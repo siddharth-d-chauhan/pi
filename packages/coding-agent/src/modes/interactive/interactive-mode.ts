@@ -61,7 +61,6 @@ import {
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
-import { getBackgroundProcessRegistry } from "../../core/background-process-registry.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -102,7 +101,6 @@ import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
-import { BackgroundLogPanel } from "./components/background-log-panel.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
@@ -501,7 +499,6 @@ export class InteractiveMode {
 			autocompleteMaxVisible,
 		});
 		// Wire the empty-editor down-arrow → background log panel affordance.
-		this.defaultEditor.onDownArrowOnEmpty = () => this.openBackgroundLogPanel();
 		// Wire Down/Up at the bottom/top of the prompt to scroll the chat
 		// scrollback by one line (Claude Code's behavior — cursor stays put
 		// in the editor; the visible scrollback moves).
@@ -2173,6 +2170,9 @@ export class InteractiveMode {
 			custom: (factory, options) => this.showExtensionCustom(factory, options),
 			pasteToEditor: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
 			setEditorText: (text) => this.editor.setText(text),
+			addEditorHistory: (entries) => {
+				for (const entry of entries) this.editor.addToHistory?.(entry);
+			},
 			getEditorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
 			editor: (title, prefill) => this.showExtensionEditor(title, prefill),
 			addAutocompleteProvider: (factory) => {
@@ -2272,34 +2272,6 @@ export class InteractiveMode {
 		notify("Pi", `Permission required: ${title}`, { terminal: this.ui.terminal });
 		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], opts);
 		return result === "Yes";
-	}
-
-	/**
-	 * Open the background-process log panel as a focus-stealing overlay.
-	 * Returns true on success; returns false when the registry is empty
-	 * (down-arrow on an empty editor should fall through to normal
-	 * editor behavior instead of popping an empty panel).
-	 */
-	private openBackgroundLogPanel(): boolean {
-		// Bail when no processes are registered. Popping an empty panel on
-		// every down-arrow is hostile UX; the down-arrow should just move
-		// the cursor in that case. The panel is reserved for actually
-		// having something to show.
-		if (getBackgroundProcessRegistry().size === 0) return false;
-		const panel = new BackgroundLogPanel({
-			terminal: this.ui.terminal,
-			onDismiss: () => {
-				handle.hide();
-			},
-		});
-		const handle = this.ui.showOverlay(panel, {
-			anchor: "center",
-			width: "80%",
-			minWidth: 60,
-			maxHeight: "70%",
-			margin: 1,
-		});
-		return true;
 	}
 
 	/**
@@ -2562,9 +2534,6 @@ export class InteractiveMode {
 				}
 				if (!customEditor.onExtensionShortcut) {
 					customEditor.onExtensionShortcut = (data: string) => this.defaultEditor.onExtensionShortcut?.(data);
-				}
-				if (!customEditor.onDownArrowOnEmpty) {
-					customEditor.onDownArrowOnEmpty = () => this.defaultEditor.onDownArrowOnEmpty?.() === true;
 				}
 				if (!customEditor.onDownArrowOnLastLine) {
 					customEditor.onDownArrowOnLastLine = () => this.defaultEditor.onDownArrowOnLastLine?.() === true;

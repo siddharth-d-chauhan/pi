@@ -15,13 +15,6 @@ export class CustomEditor extends Editor {
 	/** Handler for extension-registered shortcuts. Returns true if handled. */
 	public onExtensionShortcut?: (data: string) => boolean;
 	/**
-	 * Handler invoked when the user presses Down on an EMPTY editor and the
-	 * background-process registry is non-empty. The owner typically opens
-	 * the BackgroundLogPanel via tui.showOverlay. Returns true to indicate
-	 * the keypress was consumed.
-	 */
-	public onDownArrowOnEmpty?: () => boolean;
-	/**
 	 * Handler invoked when the user presses Down arrow while the cursor is
 	 * already on the LAST line of the editor (and the buffer is
 	 * non-empty). Lets the owner scroll the chat scrollback DOWN by one
@@ -82,18 +75,6 @@ export class CustomEditor extends Editor {
 				return;
 			}
 			// Fall through to editor handling for delete-char-forward when not empty
-		}
-
-		// Down on an empty editor opens the background-process log panel
-		// (if the registry is non-empty). The handler returns true to
-		// indicate the keypress was consumed; we fall through to the
-		// normal action loop otherwise.
-		if (
-			this.getText().length === 0 &&
-			this.keybindings.matches(data, "tui.editor.cursorDown") &&
-			this.onDownArrowOnEmpty?.() === true
-		) {
-			return;
 		}
 
 		// Down on the LAST line / Up on the FIRST line of a non-empty editor

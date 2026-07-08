@@ -234,6 +234,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			this.setEditorText(text);
 		},
 
+		addEditorHistory(_entries: string[]): void {
+			// Editor history is a TUI concern; RPC hosts manage their own input.
+		},
+
 		setEditorText(text: string): void {
 			// Fire and forget - host can implement editor control
 			output({

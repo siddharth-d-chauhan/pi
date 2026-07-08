@@ -22,7 +22,8 @@ Or per-invocation: `pi --extension /home/siddharth/pi/extensions/plan.ts`.
 | Extension | Description |
 |-----------|-------------|
 | `plan.ts` | `update_plan` tool + live checklist widget above the editor; restores from the session branch (survives resume) |
-| `agent-status.ts` | Below-editor strip of running subagents (status, age, log tail) fed by the background registry |
+| `agent-status.ts` | Claude-style footer segment: `● N agents`, green circle when some of several are done, clears when all finish |
+| `prompt-history.ts` | Persistent shell-style prompt history: Up arrow recalls your last 100 prompts across all sessions |
 | `agent-hub.ts` | `/agents` overlay: live subagent roster with kill (`x`) and steer (`s`) |
 | `agent-notify.ts` | Desktop + in-TUI notification when a background subagent completes or fails |
 | `agent-footer.ts` | `/agentfooter` toggles a footer focused on subagent activity |

@@ -1,103 +1,46 @@
 /**
- * Agent Status Extension — a compact below-editor strip of in-flight
- * background work (subagents, tracked tasks).
+ * Agent Status Extension — a Claude Code-style footer indicator for
+ * subagents. No popups, no extra widgets: a compact segment rendered by
+ * the DEFAULT footer via ctx.ui.setStatus().
  *
- *   ▸ agent worker 2m · reading src/auth/session.ts
- *   2 background tasks · /agents to inspect
+ *   ● 2 agents            while agents are running (accent circle)
+ *   ● 3 agents · 1 done   multiple agents, some finished (GREEN circle)
+ *   (nothing)             once everything is done — the segment clears
  *
- * Renders nothing while idle. Fed by the core BackgroundProcessRegistry
- * (same singleton the agent tool writes — imported from
- * "@earendil-works/pi-coding-agent", which shares the core module graph).
+ * Use /agents (agent-hub extension) to inspect, steer, or kill.
  */
 
 import {
-	type BackgroundProcessKind,
 	type BackgroundProcessSnapshot,
 	type ExtensionAPI,
-	formatTaskAge,
 	getBackgroundProcessRegistry,
-	sanitizeLogLine,
+	theme,
 } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth } from "@earendil-works/pi-tui";
 
-/** Max individual entry lines before rolling up into a count. */
-const MAX_ENTRY_LINES = 3;
+const STATUS_KEY = "agent-status";
 
-const KIND_LABELS: Record<BackgroundProcessKind, string> = {
-	subagent: "agent",
-	delegation: "agent",
-	mcp: "mcp",
-	"shell-suspend": "shell",
-	other: "task",
-};
+function isAgent(snap: BackgroundProcessSnapshot): boolean {
+	return snap.kind === "subagent" || snap.kind === "delegation";
+}
 
-type ThemeLike = { fg(name: string, text: string): string };
-
-class AgentStatusWidget implements Component {
-	private running: BackgroundProcessSnapshot[] = [];
-	private readonly unsubscribe: () => void;
-	private readonly theme: ThemeLike;
-
-	constructor(tui: TUI, theme: ThemeLike) {
-		this.theme = theme;
-		this.refresh();
-		this.unsubscribe = getBackgroundProcessRegistry().subscribe(() => {
-			this.refresh();
-			tui.requestRender();
-		});
-	}
-
-	private refresh(): void {
-		this.running = getBackgroundProcessRegistry()
-			.list()
-			.filter((snap) => snap.status === "running");
-	}
-
-	dispose(): void {
-		this.unsubscribe();
-	}
-
-	invalidate(): void {}
-
-	render(width: number): string[] {
-		const theme = this.theme;
-		const running = this.running;
-		if (running.length === 0) return [];
-
-		const lines: string[] = [];
-		for (const snap of running.slice(0, MAX_ENTRY_LINES)) {
-			const marker = theme.fg("accent", "▸");
-			const kind = theme.fg("muted", KIND_LABELS[snap.kind]);
-			const label = theme.fg("accent", snap.label);
-			const age = theme.fg("dim", formatTaskAge(snap));
-			const tail = snap.logTail.at(-1);
-			const preview = tail ? theme.fg("dim", ` · ${sanitizeLogLine(tail)}`) : "";
-			lines.push(truncateToWidth(`${marker} ${kind} ${label} ${age}${preview}`, width, "…"));
-		}
-		const remaining = running.length - MAX_ENTRY_LINES;
-		if (remaining > 0) {
-			lines.push(truncateToWidth(theme.fg("dim", `  … and ${remaining} more`), width, "…"));
-		}
-		lines.push(
-			truncateToWidth(
-				theme.fg(
-					"dim",
-					`  ${running.length === 1 ? "1 background task" : `${running.length} background tasks`} · /agents to inspect`,
-				),
-				width,
-				"…",
-			),
-		);
-		return lines;
-	}
+function segmentText(): string | undefined {
+	const agents = getBackgroundProcessRegistry().list().filter(isAgent);
+	const running = agents.filter((snap) => snap.status === "running").length;
+	if (running === 0) return undefined; // all done (or none) — disappear
+	const done = agents.filter((snap) => snap.status === "completed").length;
+	const someDoneOfMany = agents.length > 1 && done > 0;
+	const circle = theme.fg(someDoneOfMany ? "success" : "accent", "●");
+	const label = `${running} agent${running === 1 ? "" : "s"}`;
+	const doneNote = someDoneOfMany ? theme.fg("dim", ` · ${done} done`) : "";
+	return `${circle} ${theme.fg("muted", label)}${doneNote}`;
 }
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
-		ctx.ui.setWidget("agent-status", (tui, theme) => new AgentStatusWidget(tui, theme), {
-			placement: "belowEditor",
+		ctx.ui.setStatus(STATUS_KEY, segmentText());
+		getBackgroundProcessRegistry().subscribe(() => {
+			ctx.ui.setStatus(STATUS_KEY, segmentText());
 		});
 	});
 }

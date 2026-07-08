@@ -247,6 +247,7 @@ const noOpUIContext: ExtensionUIContext = {
 	custom: async () => undefined as never,
 	pasteToEditor: () => {},
 	setEditorText: () => {},
+	addEditorHistory: () => {},
 	getEditorText: () => "",
 	editor: async () => undefined,
 	addAutocompleteProvider: () => {},

@@ -211,6 +211,12 @@ export interface ExtensionUIContext {
 	/** Set the text in the core input editor. */
 	setEditorText(text: string): void;
 
+	/**
+	 * Seed the input editor's up/down prompt history. Entries are added
+	 * oldest → newest, so the last entry is the first recalled with Up.
+	 */
+	addEditorHistory(entries: string[]): void;
+
 	/** Get the current text from the core input editor. */
 	getEditorText(): string;
 

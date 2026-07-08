@@ -428,6 +428,7 @@ export {
 	initTheme,
 	Theme,
 	type ThemeColor,
+	theme,
 } from "./modes/interactive/theme/theme.ts";
 // Clipboard utilities
 export { copyToClipboard } from "./utils/clipboard.ts";

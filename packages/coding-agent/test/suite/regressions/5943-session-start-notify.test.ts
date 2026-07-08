@@ -28,6 +28,7 @@ function createUiContext(
 		custom: async <T>() => undefined as T,
 		pasteToEditor: () => {},
 		setEditorText: () => {},
+		addEditorHistory: () => {},
 		getEditorText: () => "",
 		editor: async () => undefined,
 		addAutocompleteProvider: () => {},

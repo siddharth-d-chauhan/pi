@@ -97,9 +97,13 @@ export default function (pi: ExtensionAPI) {
 
 			const name = entry.agentType ?? "agent";
 			const verb = event.status === "completed" ? "finished" : event.status;
-			const body = `${name} ${verb} after ${formatTaskAge(entry)} — ${entry.label}`;
-			ctx.ui.notify(body, event.status === "failed" ? "error" : "info");
-			desktopNotify(`pi · ${name} ${verb}`, entry.label);
+			// The label already leads with the agent type — don't repeat it.
+			const gist = entry.label.startsWith(`${name} · `) ? entry.label.slice(name.length + 3) : entry.label;
+			ctx.ui.notify(
+				`${name} ${verb} after ${formatTaskAge(entry)} — ${gist}`,
+				event.status === "failed" ? "error" : "info",
+			);
+			desktopNotify(`pi · ${name} ${verb}`, gist);
 		});
 	});
 

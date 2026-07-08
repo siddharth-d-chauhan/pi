@@ -2285,7 +2285,14 @@ export class InteractiveMode {
 		// xterm and most modern emulators (iTerm2, kitty, WezTerm, GNOME
 		// Terminal). On unsupported terminals this is a no-op; the user
 		// still gets the cursor-movement fallback because we return false
-		// when we want to fall through. We always return true to consume.
+		// when we want to fall through.
+		//
+		// While the agent is STREAMING the differential renderer repaints the
+		// live region continuously; a raw viewport scroll under it leaves
+		// stale copies of every repaint stacked in scrollback (torn borders,
+		// duplicated spinner rows). Scrolling is only safe on a static
+		// screen, so fall through to cursor movement while streaming.
+		if (this.session.isStreaming) return false;
 		this.ui.terminal.write("\x1b[1T");
 		return true;
 	}
@@ -2295,6 +2302,7 @@ export class InteractiveMode {
 	 * `onUpArrowOnFirstLine`.
 	 */
 	private scrollChatUp(): boolean {
+		if (this.session.isStreaming) return false;
 		this.ui.terminal.write("\x1b[1S");
 		return true;
 	}
@@ -2374,7 +2382,7 @@ export class InteractiveMode {
 		for (let i = navIndex + 1; i < navChildren.length; i++) {
 			linesBelow += navChildren[i].render(width).length;
 		}
-		if (linesBelow > 0) {
+		if (linesBelow > 0 && !this.session.isStreaming) {
 			this.ui.terminal.write(`\x1b[${Math.min(linesBelow, 10000)}S`);
 		}
 		this.setNavStatus("Message", navIndex, total);
@@ -3861,7 +3869,7 @@ export class InteractiveMode {
 		// top of the scrollback. Real TUI-level scroll-to-message would
 		// require a scrollOffset concept in the TUI; this is a best-effort
 		// affordance until that's available.
-		this.ui.terminal.write("\x1b[1000S"); // scroll up 1000 lines (xterm)
+		if (!this.session.isStreaming) this.ui.terminal.write("\x1b[1000S"); // scroll up 1000 lines (xterm)
 		this.setNavStatus("First message", 0, total);
 		this.ui.requestRender();
 	}
@@ -3889,7 +3897,7 @@ export class InteractiveMode {
 		const next = this.currentMessageIndex < 0 ? total - 1 : this.currentMessageIndex - 1;
 		const clamped = Math.max(0, next);
 		this.currentMessageIndex = clamped;
-		this.ui.terminal.write("\x1b[10S"); // scroll up 10 lines
+		if (!this.session.isStreaming) this.ui.terminal.write("\x1b[10S"); // scroll up 10 lines
 		this.setNavStatus("Message", clamped, total);
 		this.ui.requestRender();
 	}
@@ -3908,7 +3916,7 @@ export class InteractiveMode {
 			this.showStatus("Latest message");
 		} else {
 			this.currentMessageIndex = clamped;
-			this.ui.terminal.write("\x1b[10T"); // scroll down 10 lines
+			if (!this.session.isStreaming) this.ui.terminal.write("\x1b[10T"); // scroll down 10 lines
 			this.setNavStatus("Message", clamped, total);
 		}
 		this.ui.requestRender();

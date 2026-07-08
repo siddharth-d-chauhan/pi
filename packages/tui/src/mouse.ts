@@ -30,6 +30,18 @@ export function isSgrMouseSequence(data: string): boolean {
 	return data.startsWith(SGR_MOUSE_PREFIX);
 }
 
+/**
+ * Test for ANY terminal mouse report: SGR (`\x1b[<…M/m`) or legacy X10
+ * (`\x1b[M` followed by 3 raw bytes). Legacy reports appear when a terminal
+ * or multiplexer downgrades the encoding, or when tracking enabled by a
+ * crashed process leaks into a session that never turned it on. They must
+ * never reach the keyboard path — their payload bytes are printable
+ * characters (button/x/y + 32) that would be typed into the editor.
+ */
+export function isMouseReportSequence(data: string): boolean {
+	return isSgrMouseSequence(data) || data.startsWith("\x1b[M");
+}
+
 /** Parse a single SGR mouse sequence. Returns null if it is not one. */
 export function parseSgrMouse(data: string): MouseEvent | null {
 	const match = data.match(SGR_MOUSE_PATTERN);

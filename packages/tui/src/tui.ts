@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isKeyRelease, matchesKey } from "./keys.ts";
 import { LoopWatchdog } from "./loop-watchdog.ts";
-import { isSgrMouseSequence, type MouseEvent, parseSgrMouse } from "./mouse.ts";
+import { isMouseReportSequence, type MouseEvent, parseSgrMouse } from "./mouse.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	isOsc11BackgroundColorResponse,
@@ -839,17 +839,23 @@ export class TUI extends Container {
 		// unhandled events are swallowed (a fallback that scrolls the base
 		// content would shift the screen underneath the overlay and tear the
 		// differential render); otherwise the TUI-level handlers run in order.
-		if (this.mouseEnabled && isSgrMouseSequence(data)) {
-			const event = parseSgrMouse(data);
-			if (event) {
-				if (this.focusedComponent?.handleMouse?.(event)) {
-					return;
-				}
-				if (this.hasOverlay()) {
-					return;
-				}
-				for (const handler of this.mouseEventHandlers) {
-					if (handler(event)) break;
+		if (isMouseReportSequence(data)) {
+			// Mouse reports are dispatched only when tracking was enabled by
+			// this TUI; otherwise (or for legacy/unparseable reports) they are
+			// swallowed. They are NEVER keyboard input — letting one through
+			// types its raw payload bytes into the focused editor.
+			if (this.mouseEnabled) {
+				const event = parseSgrMouse(data);
+				if (event) {
+					if (this.focusedComponent?.handleMouse?.(event)) {
+						return;
+					}
+					if (this.hasOverlay()) {
+						return;
+					}
+					for (const handler of this.mouseEventHandlers) {
+						if (handler(event)) break;
+					}
 				}
 			}
 			return;

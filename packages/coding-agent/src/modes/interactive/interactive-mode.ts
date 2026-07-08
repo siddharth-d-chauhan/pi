@@ -774,8 +774,8 @@ export class InteractiveMode {
 		// (terminal.mouse setting; hold Shift for native text selection).
 		this.ui.setMouseEnabled(this.settingsManager.getTerminalMouse());
 		this.ui.onMouseEvent((event) => {
-			if (event.kind === "wheel-up") return this.scrollChatUp();
-			if (event.kind === "wheel-down") return this.scrollChatDown();
+			if (event.kind === "wheel-up") return this.queueWheelScroll(-1);
+			if (event.kind === "wheel-down") return this.queueWheelScroll(1);
 			return false;
 		});
 		this.isInitialized = true;
@@ -2344,6 +2344,32 @@ export class InteractiveMode {
 	 */
 	private scrollChatUp(): boolean {
 		this.ui.terminal.write("\x1b[1S");
+		return true;
+	}
+
+	/**
+	 * Wheel-driven scrollback (mouse tracking on). Wheel events arrive in
+	 * bursts (inertial trackpads send hundreds per second); writing one
+	 * scroll escape per tick desynchronizes the differential renderer and
+	 * blanks/tears the screen. Ticks are accumulated and flushed as ONE
+	 * combined scroll write per window.
+	 */
+	private wheelScrollDelta = 0;
+	private wheelScrollTimer: ReturnType<typeof setTimeout> | undefined;
+
+	private queueWheelScroll(direction: 1 | -1): boolean {
+		this.wheelScrollDelta += direction;
+		if (this.wheelScrollTimer === undefined) {
+			this.wheelScrollTimer = setTimeout(() => {
+				this.wheelScrollTimer = undefined;
+				const delta = this.wheelScrollDelta;
+				this.wheelScrollDelta = 0;
+				if (delta === 0) return;
+				const lines = Math.min(Math.abs(delta), 20);
+				this.ui.terminal.write(delta < 0 ? `\x1b[${lines}S` : `\x1b[${lines}T`);
+				this.ui.requestRender();
+			}, 80);
+		}
 		return true;
 	}
 	/**

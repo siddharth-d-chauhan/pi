@@ -57,6 +57,15 @@ export {
 	InMemoryAuthStorageBackend,
 	type OAuthCredential,
 } from "./core/auth-storage.ts";
+// Background process registry (read access for extensions: agent/task observability)
+export {
+	type BackgroundProcessKind,
+	type BackgroundProcessSnapshot,
+	type BackgroundProcessStatus,
+	formatTaskAge,
+	getBackgroundProcessRegistry,
+	sanitizeLogLine,
+} from "./core/background-process-registry.ts";
 // Compaction
 export {
 	type BranchPreparation,

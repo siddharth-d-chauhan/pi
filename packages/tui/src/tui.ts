@@ -5,8 +5,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
+import { LoopWatchdog } from "./loop-watchdog.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	isOsc11BackgroundColorResponse,
@@ -319,7 +319,8 @@ export class TUI extends Container {
 	private pendingOsc11BackgroundQueries: PendingOsc11BackgroundQuery[] = [];
 	private terminalColorSchemeListeners = new Set<(scheme: TerminalColorScheme) => void>();
 	private terminalColorSchemeNotificationsEnabled = false;
-
+	// Event-loop block detector (logs to stderr when the render path stalls).
+	private loopWatchdog: LoopWatchdog | undefined;
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
 	private overlayStack: OverlayStackEntry[] = [];
@@ -634,6 +635,7 @@ export class TUI extends Container {
 
 	start(): void {
 		this.stopped = false;
+		this.loopWatchdog ??= new LoopWatchdog();
 		this.terminal.start(
 			(data) => this.handleInput(data),
 			() => this.requestRender(),
@@ -686,6 +688,7 @@ export class TUI extends Container {
 
 	stop(): void {
 		this.stopped = true;
+		this.loopWatchdog?.stop();
 		if (this.renderTimer) {
 			clearTimeout(this.renderTimer);
 			this.renderTimer = undefined;

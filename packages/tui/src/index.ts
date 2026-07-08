@@ -1,5 +1,4 @@
 // Core TUI interfaces and classes
-
 // Autocomplete support
 export {
 	type AutocompleteItem,
@@ -27,6 +26,12 @@ export { type SettingItem, SettingsList, type SettingsListTheme } from "./compon
 export { Spacer } from "./components/spacer.ts";
 export { Text } from "./components/text.ts";
 export { TruncatedText } from "./components/truncated-text.ts";
+export {
+	getNotifyProtocol,
+	type NotifyProtocol,
+	notify,
+	resetNotifyProtocolCache,
+} from "./desktop-notify.ts";
 // Editor component interface (for custom editors)
 export type { EditorComponent } from "./editor-component.ts";
 // Fuzzy matching
@@ -57,8 +62,18 @@ export {
 	parseKey,
 	setKittyProtocolActive,
 } from "./keys.ts";
+// Loop watchdog — detects event-loop blocks during render
+export { LoopWatchdog, type LoopWatchdogOptions } from "./loop-watchdog.ts";
 // Input buffering for batch splitting
 export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "./stdin-buffer.ts";
+// Streaming line-commit buffer
+export {
+	STREAMING_BYTE_THRESHOLD,
+	STREAMING_LINE_THRESHOLD,
+	STREAMING_TIME_THRESHOLD_MS,
+	StreamingMarkdown,
+	StreamingMarkdownView,
+} from "./streaming-markdown.ts";
 // Terminal interface and implementations
 export { ProcessTerminal, type Terminal } from "./terminal.ts";
 // Terminal colors

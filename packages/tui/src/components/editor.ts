@@ -319,9 +319,15 @@ export class Editor implements Component, Focusable {
 
 	// Undo support
 	private undoStack = new UndoStack<EditorState>();
-
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
+	/**
+	 * Reverse-i-search prompt history (Ctrl-R). The editor emits this when
+	 * the user presses the historySearch keybinding; the owner decides how
+	 * to surface the search UI and what to do with the result. The editor
+	 * itself does not own a history buffer.
+	 */
+	public onHistorySearch?: () => void;
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -649,6 +655,16 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
+		// Reverse-i-search prompt history (Ctrl-R). The editor itself does
+		// not own the search UI; it just emits a request via the optional
+		// `onHistorySearch` callback. The owner (e.g. interactive-mode) opens
+		// a search overlay and replaces the editor text on commit.
+		if (kb.matches(data, "tui.editor.historySearch")) {
+			if (this.onHistorySearch) {
+				this.onHistorySearch();
+				return;
+			}
+		}
 		// Handle autocomplete mode
 		if (this.autocompleteState && this.autocompleteList) {
 			if (kb.matches(data, "tui.select.cancel")) {
@@ -970,6 +986,15 @@ export class Editor implements Component, Focusable {
 		return this.state.lines.join("\n");
 	}
 
+	/** 0-based line index where the cursor sits in the editor's text. */
+	getCursorLine(): number {
+		return this.state.cursorLine;
+	}
+
+	/** Total number of lines currently in the editor. */
+	getLineCount(): number {
+		return this.state.lines.length;
+	}
 	private expandPasteMarkers(text: string): string {
 		let result = text;
 		for (const [pasteId, pasteContent] of this.pastes) {

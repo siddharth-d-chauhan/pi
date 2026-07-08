@@ -6,6 +6,7 @@ import { type Component, Container, type Focusable, TUI } from "../../tui/src/tu
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
+import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -127,6 +128,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 			builtInHeader: header,
 			loadedResourcesContainer: { children: [loadedResourcesChild] },
 			chatContainer: { children: [chatChild] },
+			settingsManager: { setToolOutputExpanded: vi.fn() },
 			ui: { requestRender: vi.fn() },
 		};
 
@@ -136,6 +138,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(header.setExpanded).toHaveBeenCalledWith(true);
 		expect(loadedResourcesChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
+		expect(fakeThis.settingsManager.setToolOutputExpanded).toHaveBeenCalledWith(true);
 		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
 	});
 });
@@ -423,8 +426,62 @@ describe("InteractiveMode.createBaseAutocompleteProvider", () => {
 			"github-copilot/gpt-5.2-codex",
 		]);
 	});
-});
 
+	test("matches login command arguments by provider id and name", async () => {
+		type FakeInteractiveMode = {
+			session: {
+				scopedModels: [];
+				modelRegistry: { getAvailable: () => [] };
+				promptTemplates: [];
+				extensionRunner: { getRegisteredCommands: () => [] };
+				resourceLoader: { getSkills: () => { skills: [] } };
+			};
+			settingsManager: { getEnableSkillCommands: () => boolean };
+			skillCommands: Map<string, string>;
+			sessionManager: { getCwd: () => string };
+			fdPath: null;
+			getLoginProviderOptions: () => AuthSelectorProvider[];
+		};
+
+		const createBaseAutocompleteProvider = (
+			InteractiveMode as unknown as {
+				prototype: { createBaseAutocompleteProvider(this: FakeInteractiveMode): AutocompleteProvider };
+			}
+		).prototype.createBaseAutocompleteProvider;
+		const fakeThis: FakeInteractiveMode = {
+			session: {
+				scopedModels: [],
+				modelRegistry: { getAvailable: () => [] },
+				promptTemplates: [],
+				extensionRunner: { getRegisteredCommands: () => [] },
+				resourceLoader: { getSkills: () => ({ skills: [] }) },
+			},
+			settingsManager: { getEnableSkillCommands: () => false },
+			skillCommands: new Map(),
+			sessionManager: { getCwd: () => "/tmp" },
+			fdPath: null,
+			getLoginProviderOptions: () => [
+				{ id: "anthropic", name: "Anthropic", authType: "oauth" },
+				{ id: "anthropic", name: "Anthropic", authType: "api_key" },
+				{ id: "openai", name: "OpenAI", authType: "api_key" },
+			],
+		};
+
+		const provider = createBaseAutocompleteProvider.call(fakeThis);
+		const line = "/login subscription anthrop";
+		const suggestions = await provider.getSuggestions([line], 0, line.length, {
+			signal: new AbortController().signal,
+		});
+
+		expect(suggestions?.items).toEqual([
+			{
+				value: "anthropic",
+				label: "anthropic",
+				description: "Anthropic · subscription/API key",
+			},
+		]);
+	});
+});
 describe("InteractiveMode.showLoadedResources", () => {
 	beforeAll(() => {
 		initTheme("dark");

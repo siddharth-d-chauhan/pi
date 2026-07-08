@@ -145,6 +145,10 @@ function isWSL(env: NodeJS.ProcessEnv = process.env): boolean {
 		return true;
 	}
 
+	if (env !== process.env) {
+		return false;
+	}
+
 	try {
 		const release = readFileSync("/proc/version", "utf-8");
 		return /microsoft|wsl/i.test(release);
@@ -277,7 +281,7 @@ export async function readClipboardImage(options?: {
 		}
 
 		if (!image && !wayland) {
-			image = await readClipboardImageViaNativeClipboard();
+			image = (await readClipboardImageViaNativeClipboard()) ?? readClipboardImageViaXclip();
 		}
 	} else {
 		image = await readClipboardImageViaNativeClipboard();

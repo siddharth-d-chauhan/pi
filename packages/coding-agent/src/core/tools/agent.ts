@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Text } from "@earendil-works/pi-tui";
+import { type Component, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { getAgentDir } from "../../config.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
@@ -243,6 +243,67 @@ export function formatAgentCard(details: AgentToolDetails, options: ToolRenderRe
 	return blocks.join("\n");
 }
 
+/**
+ * Width-aware card component: a rounded-border box (omp-style) instead of
+ * the default background-block shell (the tool sets `renderShell: "self"`).
+ * One instance per tool call, shared between renderCall and renderResult
+ * through the render context's `state`.
+ */
+export class AgentToolCard implements Component {
+	private theme: Theme;
+	private args: AgentToolInput | undefined;
+	private details: AgentToolDetails | undefined;
+	private options: ToolRenderResultOptions = { expanded: false, isPartial: true };
+	private isError = false;
+
+	constructor(theme: Theme) {
+		this.theme = theme;
+	}
+
+	setArgs(args: AgentToolInput): void {
+		this.args = args;
+	}
+
+	setResult(details: AgentToolDetails | undefined, options: ToolRenderResultOptions, isError: boolean): void {
+		this.details = details;
+		this.options = options;
+		this.isError = isError;
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		const theme = this.theme;
+		const title = this.args ? formatAgentCall(this.args, theme) : theme.fg("toolTitle", theme.bold("agent"));
+		const body = this.details ? formatAgentCard(this.details, this.options, theme).split("\n") : [];
+		if (width < 24) {
+			return [truncateToWidth(title, width, "…"), ...body.map((line) => truncateToWidth(line, width, "…"))];
+		}
+
+		const borderColor = this.isError ? "error" : this.options.isPartial ? "accent" : "dim";
+		const edge = (text: string) => theme.fg(borderColor, text);
+		const inner = width - 4;
+		const lines: string[] = [];
+
+		const titleClipped = truncateToWidth(title, inner - 2, "…");
+		const fill = Math.max(0, inner - visibleWidth(titleClipped) - 1);
+		lines.push(`${edge("╭─")} ${titleClipped} ${edge("─".repeat(fill))}${edge("╮")}`);
+		for (const raw of body) {
+			const clipped = truncateToWidth(raw, inner, "…");
+			const pad = " ".repeat(Math.max(0, inner - visibleWidth(clipped)));
+			lines.push(`${edge("│")} ${clipped}${pad} ${edge("│")}`);
+		}
+		lines.push(edge(`╰${"─".repeat(width - 2)}╯`));
+		return lines;
+	}
+}
+
+/** Zero-height component: renderResult mutates the shared card instead of adding output. */
+const EMPTY_COMPONENT: Component = {
+	render: () => [],
+	invalidate() {},
+};
+
 interface ResolvedAgentTask {
 	task: Static<typeof agentTaskSchema>;
 	definition: AgentDefinition;
@@ -445,24 +506,25 @@ export function createAgentToolDefinition(
 				unsubscribe?.();
 			}
 		},
+		renderShell: "self",
 		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatAgentCall(args, theme));
-			return text;
+			const state = context.state as { card?: AgentToolCard };
+			state.card ??= new AgentToolCard(theme);
+			state.card.setArgs(args);
+			return state.card;
 		},
 		renderResult(result, options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			const state = context.state as { card?: AgentToolCard };
 			const details = result.details as AgentToolDetails | undefined;
-			if (!details) {
+			if (!state.card) {
 				const fallback = result.content
 					.filter((part) => part.type === "text")
 					.map((part) => part.text)
 					.join("\n");
-				text.setText(theme.fg("toolOutput", fallback));
-				return text;
+				return new Text(theme.fg("toolOutput", fallback), 0, 0);
 			}
-			text.setText(formatAgentCard(details, options, theme));
-			return text;
+			state.card.setResult(details, options, context.isError);
+			return EMPTY_COMPONENT;
 		},
 	};
 }

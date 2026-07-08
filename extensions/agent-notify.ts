@@ -12,10 +12,79 @@
  */
 
 import { type ExtensionAPI, formatTaskAge, getBackgroundProcessRegistry } from "@earendil-works/pi-coding-agent";
-import { notify as desktopNotify } from "@earendil-works/pi-tui";
+import { type Component, notify as desktopNotify } from "@earendil-works/pi-tui";
+import { cardLines } from "./lib/card.ts";
+
+interface TaskNotificationDetails {
+	registryId?: string;
+	agent?: string;
+	status?: string;
+	handle?: string;
+	usage?: { tokens?: number; costUsd?: number; durationMs?: number };
+}
+
+type ThemeLike = { fg(name: string, text: string): string; bold(text: string): string };
+
+/** Extract the agent's result text from the model-facing XML wrapper. */
+function extractInline(content: string): string {
+	const match = content.match(/<task-notification[^>]*>\n?([\s\S]*?)\n?<\/task-notification>/);
+	const body = (match ? match[1] : content)
+		.replace(/\n*_agentId: [^\n]*_\s*$/, "")
+		.replace(/\nhandle: agent:\/\/\S+\s*$/, "")
+		.trim();
+	return body;
+}
+
+class NotificationCard implements Component {
+	private theme: ThemeLike;
+	private title: string;
+	private body: string[];
+	private failed: boolean;
+
+	constructor(theme: ThemeLike, details: TaskNotificationDetails, content: string) {
+		this.theme = theme;
+		this.failed = details.status === "failed";
+		const glyph = this.failed ? theme.fg("error", "✗") : theme.fg("success", "✓");
+		const name = theme.fg("accent", theme.bold(details.agent ?? "agent"));
+		const verb = details.status === "completed" ? "finished" : (details.status ?? "done");
+		const metrics: string[] = [];
+		const usage = details.usage;
+		if (usage?.tokens)
+			metrics.push(`${usage.tokens < 1000 ? usage.tokens : `${(usage.tokens / 1000).toFixed(1)}k`} tok`);
+		if (usage?.costUsd) metrics.push(`$${usage.costUsd.toFixed(4)}`);
+		if (usage?.durationMs) metrics.push(`${(usage.durationMs / 1000).toFixed(1)}s`);
+		const metricsText = metrics.length > 0 ? theme.fg("dim", ` · ${metrics.join(" · ")}`) : "";
+		this.title = `${glyph} ${name} ${theme.fg("muted", verb)}${metricsText}`;
+		this.body = extractInline(content)
+			.split("\n")
+			.slice(0, 12)
+			.map((line) => theme.fg("toolOutput", line));
+		if (details.handle) {
+			this.body.push(theme.fg("dim", `⤷ ${details.handle} (agent_pull)`));
+		}
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		return cardLines({
+			width,
+			title: this.title,
+			body: this.body,
+			edge: (text) => this.theme.fg(this.failed ? "error" : "success", text),
+		});
+	}
+}
 
 export default function (pi: ExtensionAPI) {
 	let unsubscribe: (() => void) | undefined;
+
+	// Render background-completion notifications as a compact card instead
+	// of the raw <task-notification> XML the model sees.
+	pi.registerMessageRenderer<TaskNotificationDetails>("task-notification", (message, _options, theme) => {
+		const content = typeof message.content === "string" ? message.content : "";
+		return new NotificationCard(theme, message.details ?? {}, content);
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		unsubscribe?.();

@@ -27,6 +27,7 @@ Or per-invocation: `pi --extension /home/siddharth/pi/extensions/plan.ts`.
 | `agent-hub.ts` | `/agents` overlay: live subagent roster with kill (`x`) and steer (`s`) |
 | `agent-notify.ts` | Desktop + in-TUI notification when a background subagent completes or fails |
 | `agent-footer.ts` | `/agentfooter` toggles a footer focused on subagent activity |
+| `tool-cards.ts` | omp-style colorful rounded-border cards for all built-in tool calls (per-tool colors) |
 
 ## Rules
 

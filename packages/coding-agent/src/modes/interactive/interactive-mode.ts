@@ -88,6 +88,7 @@ import { type SessionEntry, SessionManager, sessionEntryToContextMessages } from
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
+import { restorePlanFromMessages } from "../../core/tools/plan.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
@@ -103,9 +104,11 @@ import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BackgroundLogPanel } from "./components/background-log-panel.ts";
+import { BackgroundStatusWidget } from "./components/background-status.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
+import { buildChatSearchEntries, ChatSearchComponent } from "./components/chat-search.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomEntryComponent } from "./components/custom-entry.ts";
@@ -122,6 +125,7 @@ import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./c
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
+import { PlanWidget } from "./components/plan-widget.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
@@ -383,6 +387,10 @@ export class InteractiveMode {
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
+	// Below-editor summary of in-flight background work (agents, subprocesses)
+	private backgroundStatusWidget!: BackgroundStatusWidget;
+	// Above-editor task checklist driven by the update_plan tool
+	private planWidget!: PlanWidget;
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -683,7 +691,11 @@ export class InteractiveMode {
 		this.ui.addChild(this.statusContainer);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
+		this.planWidget = new PlanWidget({ onChange: () => this.ui.requestRender() });
+		this.ui.addChild(this.planWidget);
 		this.ui.addChild(this.editorContainer);
+		this.backgroundStatusWidget = new BackgroundStatusWidget(this.ui);
+		this.ui.addChild(this.backgroundStatusWidget);
 		this.ui.addChild(this.widgetContainerBelow);
 		this.ui.addChild(this.footer);
 		this.ui.setFocus(this.editor);
@@ -693,11 +705,21 @@ export class InteractiveMode {
 
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
+		// Opt-in SGR mouse tracking: wheel scrolls the chat scrollback
+		// (terminal.mouse setting; hold Shift for native text selection).
+		this.ui.setMouseEnabled(this.settingsManager.getTerminalMouse());
+		this.ui.onMouseEvent((event) => {
+			if (event.kind === "wheel-up") return this.scrollChatUp();
+			if (event.kind === "wheel-down") return this.scrollChatDown();
+			return false;
+		});
 		this.isInitialized = true;
 
 		// Re-apply the user's tool selection from the most recent
 		// tools-config entry on the branch (no-op if none).
 		this.restoreToolsConfig();
+		// Restore the plan checklist from the branch (survives resume).
+		restorePlanFromMessages(this.session.messages);
 
 		await this.themeController.applyFromSettings();
 		// Add header with keybindings from config (unless silenced)
@@ -2282,6 +2304,66 @@ export class InteractiveMode {
 		);
 	}
 
+	/**
+	 * Open the in-chat search overlay (twin of openHistorySearch, but over the
+	 * whole conversation). On select, jump to the chosen message.
+	 */
+	private openChatSearch(): void {
+		const entries = buildChatSearchEntries(this.session.messages);
+		const handle = this.ui.showOverlay(
+			new ChatSearchComponent({
+				entries,
+				onSelect: (messageIndex) => {
+					handle.hide();
+					this.jumpToSearchedMessage(messageIndex, entries.length);
+				},
+				onClose: () => handle.hide(),
+			}),
+			{ anchor: "top-left", width: "70%", minWidth: 60, margin: 1 },
+		);
+	}
+
+	/**
+	 * Best-effort jump for a chat-search hit: map the entry ordinal onto the
+	 * message-like chat children (spacers excluded — they inflate the raw
+	 * child count that message navigation uses), then scroll ONCE by the
+	 * measured rendered height below the target instead of N blind 10-line
+	 * hops. Still approximate until components carry their source message;
+	 * navigation state ends up exactly as if the user had arrowed here.
+	 */
+	private jumpToSearchedMessage(entryIndex: number, entryCount: number): void {
+		const width = this.ui.terminal.columns;
+		let nav = -1;
+		const messageLikeNavIndices: number[] = [];
+		const navChildren: Component[] = [];
+		for (const child of this.chatContainer.children) {
+			if (!child || (child as { hideComponent?: boolean }).hideComponent) continue;
+			nav++;
+			navChildren.push(child);
+			if (!(child instanceof Spacer)) messageLikeNavIndices.push(nav);
+		}
+		const total = nav + 1;
+		if (total === 0 || messageLikeNavIndices.length === 0) {
+			this.showStatus("No messages to navigate");
+			return;
+		}
+		const ordinal =
+			entryCount <= 1
+				? messageLikeNavIndices.length - 1
+				: Math.round((entryIndex / (entryCount - 1)) * (messageLikeNavIndices.length - 1));
+		const navIndex = messageLikeNavIndices[Math.max(0, Math.min(ordinal, messageLikeNavIndices.length - 1))];
+		this.currentMessageIndex = navIndex;
+		let linesBelow = 0;
+		for (let i = navIndex + 1; i < navChildren.length; i++) {
+			linesBelow += navChildren[i].render(width).length;
+		}
+		if (linesBelow > 0) {
+			this.ui.terminal.write(`\x1b[${Math.min(linesBelow, 10000)}S`);
+		}
+		this.setNavStatus("Message", navIndex, total);
+		this.ui.requestRender();
+	}
+
 	private async promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined> {
 		const confirmed = await this.showExtensionConfirm(
 			"Session cwd not found",
@@ -2635,6 +2717,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.message.prev", () => this.jumpToPrevMessage());
 		this.defaultEditor.onAction("app.message.next", () => this.jumpToNextMessage());
 		this.defaultEditor.onAction("app.chat.copy", () => this.handleChatCopy());
+		this.defaultEditor.onAction("app.chat.search", () => this.openChatSearch());
 		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
@@ -2933,8 +3016,9 @@ export class InteractiveMode {
 				break;
 
 			case "session_tree":
-				// Branch navigation: re-apply tool selection from the new leaf.
+				// Branch navigation: re-apply tool selection and plan from the new leaf.
 				this.restoreToolsConfig();
+				restorePlanFromMessages(this.session.messages);
 				break;
 			case "thinking_level_changed":
 				this.footer.invalidate();
@@ -4381,6 +4465,7 @@ export class InteractiveMode {
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
+					mouse: this.settingsManager.getTerminalMouse(),
 					warnings: this.settingsManager.getWarnings(),
 				},
 				{
@@ -4512,6 +4597,10 @@ export class InteractiveMode {
 					},
 					onShowTerminalProgressChange: (enabled) => {
 						this.settingsManager.setShowTerminalProgress(enabled);
+					},
+					onMouseChange: (enabled) => {
+						this.settingsManager.setTerminalMouse(enabled);
+						this.ui.setMouseEnabled(enabled);
 					},
 					onWarningsChange: (warnings) => {
 						this.settingsManager.setWarnings(warnings);
@@ -5002,6 +5091,7 @@ export class InteractiveMode {
 			if (result.cancelled) {
 				return result;
 			}
+			restorePlanFromMessages(this.session.messages);
 			this.showStatus("Resumed session");
 			return result;
 		} catch (error: unknown) {
@@ -5019,6 +5109,7 @@ export class InteractiveMode {
 				if (result.cancelled) {
 					return result;
 				}
+				restorePlanFromMessages(this.session.messages);
 				this.showStatus("Resumed session in current cwd");
 				return result;
 			}
@@ -5951,6 +6042,7 @@ export class InteractiveMode {
 			if (result.cancelled) {
 				return;
 			}
+			restorePlanFromMessages(this.session.messages);
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
 			this.ui.requestRender();
@@ -6122,6 +6214,8 @@ export class InteractiveMode {
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
+		this.planWidget?.dispose();
+		this.backgroundStatusWidget?.dispose();
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}

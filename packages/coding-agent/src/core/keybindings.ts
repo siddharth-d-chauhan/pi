@@ -30,6 +30,7 @@ export interface AppKeybindings {
 	"app.message.prev": true;
 	"app.message.next": true;
 	"app.chat.copy": true;
+	"app.chat.search": true;
 	"app.clipboard.pasteImage": true;
 	"app.session.new": true;
 	"app.session.tree": true;
@@ -127,6 +128,10 @@ export const KEYBINDINGS = {
 	"app.chat.copy": {
 		defaultKeys: "ctrl+shift+c",
 		description: "Copy the full chat scrollback to the system clipboard",
+	},
+	"app.chat.search": {
+		defaultKeys: "ctrl+shift+f",
+		description: "Search the conversation",
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: process.platform === "win32" ? "alt+v" : "ctrl+v",

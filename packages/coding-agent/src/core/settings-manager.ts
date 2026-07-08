@@ -36,6 +36,7 @@ export interface TerminalSettings {
 	imageWidthCells?: number; // default: 60 (preferred inline image width in terminal cells)
 	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
 	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
+	mouse?: boolean; // default: false - SGR mouse tracking (wheel scrolls chat; hold Shift for native text selection)
 }
 
 export interface ImageSettings {
@@ -1122,6 +1123,19 @@ export class SettingsManager {
 		}
 		this.globalSettings.terminal.showTerminalProgress = enabled;
 		this.markModified("terminal", "showTerminalProgress");
+		this.save();
+	}
+
+	getTerminalMouse(): boolean {
+		return this.settings.terminal?.mouse ?? false;
+	}
+
+	setTerminalMouse(enabled: boolean): void {
+		if (!this.globalSettings.terminal) {
+			this.globalSettings.terminal = {};
+		}
+		this.globalSettings.terminal.mouse = enabled;
+		this.markModified("terminal", "mouse");
 		this.save();
 	}
 

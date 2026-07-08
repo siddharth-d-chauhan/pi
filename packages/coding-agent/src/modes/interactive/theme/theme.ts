@@ -88,9 +88,66 @@ const ThemeJsonSchema = Type.Object({
 		thinkingMedium: ColorValueSchema,
 		thinkingHigh: ColorValueSchema,
 		thinkingXhigh: ColorValueSchema,
-		// Bash Mode (1 color)
+		// Mode borders (bashMode required; pythonMode optional and falls back to bashMode)
 		bashMode: ColorValueSchema,
+		pythonMode: Type.Optional(ColorValueSchema),
+		// Status line segment colors (all optional with sensible fallbacks)
+		statusLineSep: Type.Optional(ColorValueSchema),
+		statusLineModel: Type.Optional(ColorValueSchema),
+		statusLinePath: Type.Optional(ColorValueSchema),
+		statusLineGitClean: Type.Optional(ColorValueSchema),
+		statusLineGitDirty: Type.Optional(ColorValueSchema),
+		statusLineContext: Type.Optional(ColorValueSchema),
+		statusLineSpend: Type.Optional(ColorValueSchema),
+		statusLineStaged: Type.Optional(ColorValueSchema),
+		statusLineDirty: Type.Optional(ColorValueSchema),
+		statusLineUntracked: Type.Optional(ColorValueSchema),
+		statusLineOutput: Type.Optional(ColorValueSchema),
+		statusLineCost: Type.Optional(ColorValueSchema),
+		statusLineSubagents: Type.Optional(ColorValueSchema),
 	}),
+	// Optional symbol preset + per-key overrides
+	symbols: Type.Optional(
+		Type.Object({
+			preset: Type.Optional(Type.Union([Type.Literal("unicode"), Type.Literal("nerd"), Type.Literal("ascii")])),
+			overrides: Type.Optional(Type.Record(Type.String(), Type.String())),
+			spinnerFrames: Type.Optional(
+				Type.Union([
+					Type.Array(Type.String()),
+					Type.Object({
+						status: Type.Optional(Type.Array(Type.String())),
+						activity: Type.Optional(Type.Array(Type.String())),
+					}),
+				]),
+			),
+		}),
+	),
+	// Optional box-drawing character sets
+	boxRound: Type.Optional(
+		Type.Object({
+			topLeft: Type.Optional(Type.String()),
+			topRight: Type.Optional(Type.String()),
+			bottomLeft: Type.Optional(Type.String()),
+			bottomRight: Type.Optional(Type.String()),
+			horizontal: Type.Optional(Type.String()),
+			vertical: Type.Optional(Type.String()),
+		}),
+	),
+	boxSharp: Type.Optional(
+		Type.Object({
+			topLeft: Type.Optional(Type.String()),
+			topRight: Type.Optional(Type.String()),
+			bottomLeft: Type.Optional(Type.String()),
+			bottomRight: Type.Optional(Type.String()),
+			horizontal: Type.Optional(Type.String()),
+			vertical: Type.Optional(Type.String()),
+			teeDown: Type.Optional(Type.String()),
+			teeUp: Type.Optional(Type.String()),
+			teeRight: Type.Optional(Type.String()),
+			teeLeft: Type.Optional(Type.String()),
+			cross: Type.Optional(Type.String()),
+		}),
+	),
 	export: Type.Optional(
 		Type.Object({
 			pageBg: Type.Optional(ColorValueSchema),
@@ -149,7 +206,21 @@ export type ThemeColor =
 	| "thinkingMedium"
 	| "thinkingHigh"
 	| "thinkingXhigh"
-	| "bashMode";
+	| "bashMode"
+	| "pythonMode"
+	| "statusLineSep"
+	| "statusLineModel"
+	| "statusLinePath"
+	| "statusLineGitClean"
+	| "statusLineGitDirty"
+	| "statusLineContext"
+	| "statusLineSpend"
+	| "statusLineStaged"
+	| "statusLineDirty"
+	| "statusLineUntracked"
+	| "statusLineOutput"
+	| "statusLineCost"
+	| "statusLineSubagents";
 
 export type ThemeBg =
 	| "selectedBg"
@@ -317,6 +388,44 @@ function resolveThemeColors<T extends Record<string, ColorValue>>(
 }
 
 // ============================================================================
+// Theme Defaults
+// ============================================================================
+
+/** Default rounded box-drawing characters. */
+const DEFAULT_BOX_ROUND = {
+	topLeft: "╭",
+	topRight: "╮",
+	bottomLeft: "╰",
+	bottomRight: "╯",
+	horizontal: "─",
+	vertical: "│",
+} as const;
+
+/** Default sharp box-drawing characters (used for tables, junctions). */
+const DEFAULT_BOX_SHARP = {
+	topLeft: "┌",
+	topRight: "┐",
+	bottomLeft: "└",
+	bottomRight: "┘",
+	horizontal: "─",
+	vertical: "│",
+	teeDown: "┬",
+	teeUp: "┴",
+	teeRight: "├",
+	teeLeft: "┤",
+	cross: "┼",
+} as const;
+
+/** Default spinner frame sets. */
+const DEFAULT_SPINNER_FRAMES: { status: string[]; activity: string[] } = {
+	status: ["◐", "◓", "◑", "◒"],
+	activity: ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"],
+};
+
+/** Default symbol preset. */
+const DEFAULT_SYMBOL_PRESET: "unicode" | "nerd" | "ascii" = "unicode";
+
+// ============================================================================
 // Theme Class
 // ============================================================================
 
@@ -332,7 +441,37 @@ export class Theme {
 		fgColors: Record<ThemeColor, string | number>,
 		bgColors: Record<ThemeBg, string | number>,
 		mode: ColorMode,
-		options: { name?: string; sourcePath?: string; sourceInfo?: SourceInfo } = {},
+		options: {
+			name?: string;
+			sourcePath?: string;
+			sourceInfo?: SourceInfo;
+			boxRound?: {
+				topLeft: string;
+				topRight: string;
+				bottomLeft: string;
+				bottomRight: string;
+				horizontal: string;
+				vertical: string;
+			};
+			boxSharp?: {
+				topLeft: string;
+				topRight: string;
+				bottomLeft: string;
+				bottomRight: string;
+				horizontal: string;
+				vertical: string;
+				teeDown: string;
+				teeUp: string;
+				teeRight: string;
+				teeLeft: string;
+				cross: string;
+			};
+			symbols?: {
+				preset: "unicode" | "nerd" | "ascii";
+				overrides: Record<string, string>;
+				spinnerFrames: { status: string[]; activity: string[] };
+			};
+		} = {},
 	) {
 		this.name = options.name;
 		this.sourcePath = options.sourcePath;
@@ -346,7 +485,43 @@ export class Theme {
 		for (const [key, value] of Object.entries(bgColors) as [ThemeBg, string | number][]) {
 			this.bgColors.set(key, bgAnsi(value, mode));
 		}
+		this.boxRoundChars = options.boxRound ?? DEFAULT_BOX_ROUND;
+		this.boxSharpChars = options.boxSharp ?? DEFAULT_BOX_SHARP;
+		this.symbolsConfig = options.symbols ?? {
+			preset: "unicode",
+			overrides: {},
+			spinnerFrames: { ...DEFAULT_SPINNER_FRAMES },
+		};
 	}
+
+	// Box-drawing character sets (rounded + sharp)
+	private readonly boxRoundChars: {
+		topLeft: string;
+		topRight: string;
+		bottomLeft: string;
+		bottomRight: string;
+		horizontal: string;
+		vertical: string;
+	};
+	private readonly boxSharpChars: {
+		topLeft: string;
+		topRight: string;
+		bottomLeft: string;
+		bottomRight: string;
+		horizontal: string;
+		vertical: string;
+		teeDown: string;
+		teeUp: string;
+		teeRight: string;
+		teeLeft: string;
+		cross: string;
+	};
+	// Resolved symbol config (preset, overrides, spinner frames)
+	private readonly symbolsConfig: {
+		preset: "unicode" | "nerd" | "ascii";
+		overrides: Record<string, string>;
+		spinnerFrames: { status: string[]; activity: string[] };
+	};
 
 	fg(color: ThemeColor, text: string): string {
 		const ansi = this.fgColors.get(color);
@@ -418,6 +593,91 @@ export class Theme {
 
 	getBashModeBorderColor(): (str: string) => string {
 		return (str: string) => this.fg("bashMode", str);
+	}
+
+	getPythonModeBorderColor(): (str: string) => string {
+		return (str: string) => this.fg("pythonMode", str);
+	}
+
+	/**
+	 * Look up a status line segment color by short name. Falls back to "muted" if
+	 * the theme doesn't define the segment.
+	 *
+	 * Accepts both the bare segment ("model") and the full token ("statusLineModel").
+	 */
+	getStatusLineColor(segment: string): (str: string) => string {
+		const token = segment.startsWith("statusLine")
+			? (segment as ThemeColor)
+			: (`statusLine${segment[0]!.toUpperCase()}${segment.slice(1)}` as ThemeColor);
+		const ansi = this.fgColors.get(token);
+		if (ansi) return (str: string) => `${ansi}${str}\x1b[39m`;
+		const fallback = this.fgColors.get("muted");
+		return (str: string) => `${fallback}${str}\x1b[39m`;
+	}
+
+	/**
+	 * Look up a syntax highlighting color by token name. Throws if the token
+	 * is unknown — syntax tokens are required and the highlighter should never
+	 * silently fall back to muted.
+	 */
+	getSyntaxColor(token: string): (str: string) => string {
+		const name = token.startsWith("syntax")
+			? (token as ThemeColor)
+			: (`syntax${token[0]!.toUpperCase()}${token.slice(1)}` as ThemeColor);
+		const ansi = this.fgColors.get(name);
+		if (!ansi) throw new Error(`Unknown syntax token: ${token}`);
+		return (str: string) => `${ansi}${str}\x1b[39m`;
+	}
+
+	/**
+	 * Look up a tool diff color by kind.
+	 */
+	getToolDiffColor(kind: "added" | "removed" | "context"): (str: string) => string {
+		const name = `toolDiff${kind[0]!.toUpperCase()}${kind.slice(1)}` as ThemeColor;
+		const ansi = this.fgColors.get(name);
+		if (!ansi) throw new Error(`Unknown tool diff kind: ${kind}`);
+		return (str: string) => `${ansi}${str}\x1b[39m`;
+	}
+
+	/**
+	 * Return the resolved symbol config: preset, per-key overrides, and spinner
+	 * frame lists. Defaults applied if the theme omits the section.
+	 */
+	getSymbols(): {
+		preset: "unicode" | "nerd" | "ascii";
+		overrides: Record<string, string>;
+		spinnerFrames: { status: string[]; activity: string[] };
+	} {
+		return this.symbolsConfig;
+	}
+
+	/**
+	 * Return the resolved box-drawing character sets.
+	 */
+	getBoxChars(): {
+		round: {
+			topLeft: string;
+			topRight: string;
+			bottomLeft: string;
+			bottomRight: string;
+			horizontal: string;
+			vertical: string;
+		};
+		sharp: {
+			topLeft: string;
+			topRight: string;
+			bottomLeft: string;
+			bottomRight: string;
+			horizontal: string;
+			vertical: string;
+			teeDown: string;
+			teeUp: string;
+			teeRight: string;
+			teeLeft: string;
+			cross: string;
+		};
+	} {
+		return { round: this.boxRoundChars, sharp: this.boxSharpChars };
 	}
 }
 
@@ -584,6 +844,27 @@ function loadThemeJson(name: string): ThemeJson {
 	return parseThemeJsonContent(name, content);
 }
 
+/**
+ * Status line segment -> fallback token map. When a status line color is not
+ * provided in the theme JSON, the fallback token supplies the value so legacy
+ * themes keep working.
+ */
+const STATUS_LINE_FALLBACK: Record<string, ThemeColor> = {
+	statusLineSep: "borderMuted",
+	statusLineModel: "accent",
+	statusLinePath: "text",
+	statusLineGitClean: "success",
+	statusLineGitDirty: "warning",
+	statusLineContext: "muted",
+	statusLineSpend: "accent",
+	statusLineStaged: "success",
+	statusLineDirty: "warning",
+	statusLineUntracked: "muted",
+	statusLineOutput: "muted",
+	statusLineCost: "warning",
+	statusLineSubagents: "accent",
+};
+
 function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string): Theme {
 	const colorMode = mode ?? (getCapabilities().trueColor ? "truecolor" : "256color");
 	const resolvedColors = resolveThemeColors(themeJson.colors, themeJson.vars);
@@ -604,9 +885,72 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 			fgColors[key as ThemeColor] = value;
 		}
 	}
+
+	// Apply fallbacks for optional status line + pythonMode colors. Vars were
+	// already resolved above, so we just substitute from another resolved token.
+	const pythonModeValue = fgColors.pythonMode ?? fgColors.bashMode ?? resolvedColors.bashMode;
+	if (pythonModeValue !== undefined) {
+		fgColors.pythonMode = pythonModeValue;
+	}
+	for (const [segment, fallback] of Object.entries(STATUS_LINE_FALLBACK)) {
+		if (fgColors[segment as ThemeColor] === undefined && resolvedColors[fallback] !== undefined) {
+			fgColors[segment as ThemeColor] = resolvedColors[fallback];
+		}
+	}
+
+	// Resolve box-drawing character sets, falling back to module defaults.
+	const boxRound = {
+		...DEFAULT_BOX_ROUND,
+		...(themeJson.boxRound ?? {}),
+	} as {
+		topLeft: string;
+		topRight: string;
+		bottomLeft: string;
+		bottomRight: string;
+		horizontal: string;
+		vertical: string;
+	};
+	const boxSharp = {
+		...DEFAULT_BOX_SHARP,
+		...(themeJson.boxSharp ?? {}),
+	} as {
+		topLeft: string;
+		topRight: string;
+		bottomLeft: string;
+		bottomRight: string;
+		horizontal: string;
+		vertical: string;
+		teeDown: string;
+		teeUp: string;
+		teeRight: string;
+		teeLeft: string;
+		cross: string;
+	};
+
+	// Resolve symbol config. spinnerFrames may be a flat array (apply to both
+	// types) or an object with optional status/activity arrays.
+	const rawSymbols = themeJson.symbols;
+	const preset = rawSymbols?.preset ?? DEFAULT_SYMBOL_PRESET;
+	const overrides = { ...(rawSymbols?.overrides ?? {}) };
+	const rawFrames = rawSymbols?.spinnerFrames;
+	let spinnerFrames: { status: string[]; activity: string[] };
+	if (Array.isArray(rawFrames)) {
+		spinnerFrames = { status: rawFrames, activity: [...rawFrames] };
+	} else if (rawFrames && typeof rawFrames === "object") {
+		spinnerFrames = {
+			status: rawFrames.status ?? [...DEFAULT_SPINNER_FRAMES.status],
+			activity: rawFrames.activity ?? [...DEFAULT_SPINNER_FRAMES.activity],
+		};
+	} else {
+		spinnerFrames = { status: [...DEFAULT_SPINNER_FRAMES.status], activity: [...DEFAULT_SPINNER_FRAMES.activity] };
+	}
+
 	return new Theme(fgColors, bgColors, colorMode, {
 		name: themeJson.name,
 		sourcePath,
+		boxRound,
+		boxSharp,
+		symbols: { preset, overrides, spinnerFrames },
 	});
 }
 

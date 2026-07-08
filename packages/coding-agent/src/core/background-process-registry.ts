@@ -1,0 +1,208 @@
+/**
+ * BackgroundProcessRegistry — in-process registry of backgrounded work.
+ *
+ * A single shared instance lives for the lifetime of the agent session. The
+ * editor's down-arrow handler consults `list()` and, when non-empty, opens
+ * a log panel. Future subagent / parallel-tool implementations register
+ * themselves here so the user has one place to peek at in-flight work.
+ *
+ * Design constraints:
+ *  - Each entry holds a bounded ring buffer of recent log lines (default
+ *    500). The buffer is the source of truth for the log panel; the
+ *    underlying proc may keep its own log, but the panel renders from here.
+ *  - Subscribers are notified on every mutation (register, unregister,
+ *    appendLog, statusChange). The TUI re-renders on notification.
+ *  - The registry is intentionally minimal — it stores state, it does not
+ *    render. The panel component (in `modes/interactive/components/`) is
+ *    the renderer.
+ *
+ * Today: no callers register. The registry is wired and ready; future
+ * subagent/parallel-tool/MCP work plugs in by calling `register()`.
+ */
+
+export type BackgroundProcessKind = "subagent" | "delegation" | "mcp" | "shell-suspend" | "other";
+export type BackgroundProcessStatus = "running" | "completed" | "failed" | "cancelled";
+
+export interface BackgroundProcess {
+	id: string;
+	kind: BackgroundProcessKind;
+	label: string;
+	/** Free-form details; the panel renders this above the log. */
+	summary?: string;
+	status: BackgroundProcessStatus;
+	startedAt: number;
+	endedAt?: number;
+}
+
+export interface BackgroundProcessEntry extends BackgroundProcess {
+	/** Bounded ring buffer of log lines. Most recent line is the last. */
+	log: string[];
+}
+
+export interface BackgroundProcessSnapshot {
+	id: string;
+	kind: BackgroundProcessKind;
+	label: string;
+	summary?: string;
+	status: BackgroundProcessStatus;
+	startedAt: number;
+	endedAt?: number;
+	/** Current size of the log buffer. */
+	logSize: number;
+	/** Tail of the log (most recent N lines), for preview. */
+	logTail: string[];
+}
+
+export type BackgroundProcessEvent =
+	| { type: "register"; entry: BackgroundProcessEntry }
+	| { type: "unregister"; id: string }
+	| { type: "appendLog"; id: string; lines: string[] }
+	| { type: "statusChange"; id: string; status: BackgroundProcessStatus };
+
+export type BackgroundProcessListener = (event: BackgroundProcessEvent) => void;
+
+/** Default cap on log lines retained per process. */
+export const DEFAULT_LOG_CAP = 500;
+
+class BackgroundProcessRegistry {
+	#entries = new Map<string, BackgroundProcessEntry>();
+	#listeners = new Set<BackgroundProcessListener>();
+	#idCounter = 0;
+	#logCap: number;
+
+	constructor(logCap: number = DEFAULT_LOG_CAP) {
+		this.#logCap = logCap;
+	}
+
+	/** Total registered processes. */
+	get size(): number {
+		return this.#entries.size;
+	}
+
+	/**
+	 * Allocate a fresh id. Exposed for callers that want a stable id before
+	 * `register` (rare — usually just call `register` with no id).
+	 */
+	nextId(): string {
+		this.#idCounter++;
+		return `bg-${Date.now().toString(36)}-${this.#idCounter}`;
+	}
+
+	/**
+	 * Register a new process. Returns the assigned id. If `init.id` is
+	 * provided and unique, it is used; otherwise a fresh id is allocated.
+	 * Throws if `init.id` collides.
+	 */
+	register(
+		init: Omit<BackgroundProcess, "startedAt" | "status"> & { id?: string; status?: BackgroundProcessStatus },
+	): string {
+		const id = init.id ?? this.nextId();
+		if (this.#entries.has(id)) throw new Error(`BackgroundProcessRegistry: duplicate id "${id}"`);
+		const entry: BackgroundProcessEntry = {
+			id,
+			kind: init.kind,
+			label: init.label,
+			summary: init.summary,
+			status: init.status ?? "running",
+			startedAt: Date.now(),
+			log: [],
+		};
+		this.#entries.set(id, entry);
+		this.#emit({ type: "register", entry });
+		return id;
+	}
+
+	/** Remove a process. Idempotent — returns true if it was present. */
+	unregister(id: string): boolean {
+		const had = this.#entries.delete(id);
+		if (had) this.#emit({ type: "unregister", id });
+		return had;
+	}
+
+	/**
+	 * Append one or more log lines to a process. Lines longer than the cap
+	 * are kept whole (no truncation); only the OLDEST lines are evicted
+	 * when the buffer would exceed the cap. No-op if `id` is unknown.
+	 */
+	appendLog(id: string, lines: string | string[]): void {
+		const entry = this.#entries.get(id);
+		if (!entry) return;
+		const arr = Array.isArray(lines) ? lines : [lines];
+		if (arr.length === 0) return;
+		// Evict from the front until we have room.
+		const overflow = entry.log.length + arr.length - this.#logCap;
+		if (overflow > 0) entry.log.splice(0, overflow);
+		entry.log.push(...arr);
+		this.#emit({ type: "appendLog", id, lines: arr });
+	}
+
+	/** Update the process status. */
+	setStatus(id: string, status: BackgroundProcessStatus): void {
+		const entry = this.#entries.get(id);
+		if (!entry || entry.status === status) return;
+		entry.status = status;
+		if (status !== "running") entry.endedAt = Date.now();
+		this.#emit({ type: "statusChange", id, status });
+	}
+
+	/** Read a snapshot of one entry. Returns undefined if not found. */
+	get(id: string): BackgroundProcessEntry | undefined {
+		return this.#entries.get(id);
+	}
+
+	/**
+	 * List snapshots for all registered processes, most-recent first.
+	 * Cheap to call; does not copy log buffers.
+	 */
+	list(): BackgroundProcessSnapshot[] {
+		const out: BackgroundProcessSnapshot[] = [];
+		for (const e of this.#entries.values()) {
+			out.push({
+				id: e.id,
+				kind: e.kind,
+				label: e.label,
+				summary: e.summary,
+				status: e.status,
+				startedAt: e.startedAt,
+				endedAt: e.endedAt,
+				logSize: e.log.length,
+				logTail: e.log.slice(-5),
+			});
+		}
+		out.sort((a, b) => b.startedAt - a.startedAt);
+		return out;
+	}
+
+	/** Subscribe to all registry events. Returns an unsubscribe fn. */
+	subscribe(listener: BackgroundProcessListener): () => void {
+		this.#listeners.add(listener);
+		return () => {
+			this.#listeners.delete(listener);
+		};
+	}
+
+	#emit(event: BackgroundProcessEvent): void {
+		for (const l of this.#listeners) {
+			try {
+				l(event);
+			} catch {
+				// A failing listener must not poison the registry or other listeners.
+			}
+		}
+	}
+}
+
+/**
+ * Module-level singleton. Lazily created on first access so importing this
+ * file alone does no work. Tests can call `resetForTests()` to discard.
+ */
+let singleton: BackgroundProcessRegistry | undefined;
+
+export function getBackgroundProcessRegistry(): BackgroundProcessRegistry {
+	if (!singleton) singleton = new BackgroundProcessRegistry();
+	return singleton;
+}
+
+export function resetForTests(): void {
+	singleton = undefined;
+}

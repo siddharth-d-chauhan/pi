@@ -30,7 +30,6 @@
 		"dim": "dimGray",
 		"text": "text",
 		"thinkingText": "mediumGray",
-
 		"selectedBg": "selectedBg",
 		"userMessageBg": "userMsgBg",
 		"userMessageText": "text",
@@ -42,7 +41,6 @@
 		"toolErrorBg": "toolErrorBg",
 		"toolTitle": "text",
 		"toolOutput": "mediumGray",
-
 		"mdHeading": "yellow",
 		"mdLink": "blue",
 		"mdLinkUrl": "dimGray",
@@ -53,11 +51,9 @@
 		"mdQuoteBorder": "mediumGray",
 		"mdHr": "mediumGray",
 		"mdListBullet": "green",
-
 		"toolDiffAdded": "green",
 		"toolDiffRemoved": "red",
 		"toolDiffContext": "mediumGray",
-
 		"syntaxComment": "#008000",
 		"syntaxKeyword": "#0000FF",
 		"syntaxFunction": "#795E26",
@@ -67,15 +63,69 @@
 		"syntaxType": "#267F99",
 		"syntaxOperator": "#000000",
 		"syntaxPunctuation": "#000000",
-
 		"thinkingOff": "lightGray",
 		"thinkingMinimal": "#767676",
 		"thinkingLow": "blue",
 		"thinkingMedium": "teal",
 		"thinkingHigh": "#875f87",
 		"thinkingXhigh": "#8b008b",
-
-		"bashMode": "green"
+		"bashMode": "green",
+		"pythonMode": "green",
+		"statusLineSep": "lightGray",
+		"statusLineModel": "teal",
+		"statusLinePath": "text",
+		"statusLineGitClean": "green",
+		"statusLineGitDirty": "yellow",
+		"statusLineContext": "mediumGray",
+		"statusLineSpend": "teal",
+		"statusLineStaged": "green",
+		"statusLineDirty": "yellow",
+		"statusLineUntracked": "mediumGray",
+		"statusLineOutput": "mediumGray",
+		"statusLineCost": "yellow",
+		"statusLineSubagents": "teal"
+	},
+	"symbols": {
+		"preset": "unicode",
+		"spinnerFrames": {
+			"status": [
+				"\u25d0",
+				"\u25d3",
+				"\u25d1",
+				"\u25d2"
+			],
+			"activity": [
+				"\u28fe",
+				"\u28fd",
+				"\u28fb",
+				"\u28bf",
+				"\u287f",
+				"\u28df",
+				"\u28ef",
+				"\u28f7"
+			]
+		}
+	},
+	"boxRound": {
+		"topLeft": "\u256d",
+		"topRight": "\u256e",
+		"bottomLeft": "\u2570",
+		"bottomRight": "\u256f",
+		"horizontal": "\u2500",
+		"vertical": "\u2502"
+	},
+	"boxSharp": {
+		"topLeft": "\u250c",
+		"topRight": "\u2510",
+		"bottomLeft": "\u2514",
+		"bottomRight": "\u2518",
+		"horizontal": "\u2500",
+		"vertical": "\u2502",
+		"teeDown": "\u252c",
+		"teeUp": "\u2534",
+		"teeRight": "\u251c",
+		"teeLeft": "\u2524",
+		"cross": "\u253c"
 	},
 	"export": {
 		"pageBg": "#f8f8f8",

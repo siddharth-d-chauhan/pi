@@ -127,25 +127,28 @@ export class FooterComponent implements Component {
 		if (sessionName) {
 			pwd = `${pwd} • ${sessionName}`;
 		}
-
-		// Build stats line
+		// Build stats line — each token type is colorized via statusLine tokens.
+		const sep = theme.getStatusLineColor("sep");
 		const statsParts = [];
-		if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
-		if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
-		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
-		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
+		if (totalInput) statsParts.push(sep("↑") + theme.getStatusLineColor("output")(formatTokens(totalInput)));
+		if (totalOutput) statsParts.push(sep("↓") + theme.getStatusLineColor("output")(formatTokens(totalOutput)));
+		if (totalCacheRead) statsParts.push(sep("R") + theme.getStatusLineColor("output")(formatTokens(totalCacheRead)));
+		if (totalCacheWrite)
+			statsParts.push(sep("W") + theme.getStatusLineColor("output")(formatTokens(totalCacheWrite)));
 		if ((totalCacheRead > 0 || totalCacheWrite > 0) && latestCacheHitRate !== undefined) {
-			statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+			statsParts.push(sep("CH") + theme.getStatusLineColor("output")(`${latestCacheHitRate.toFixed(1)}%`));
 		}
 
 		// Show cost with "(sub)" indicator if using OAuth subscription
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
 		if (totalCost || usingSubscription) {
 			const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-			statsParts.push(costStr);
+			statsParts.push(theme.getStatusLineColor("cost")(costStr));
 		}
 
-		// Colorize context percentage based on usage
+		// Colorize context percentage based on usage. Keep the existing
+		// 70/90 %-of-window thresholds (red/yellow) but route through the
+		// statusLine token when context is healthy.
 		let contextPercentStr: string;
 		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
 		const contextPercentDisplay =
@@ -157,17 +160,17 @@ export class FooterComponent implements Component {
 		} else if (contextPercentValue > 70) {
 			contextPercentStr = theme.fg("warning", contextPercentDisplay);
 		} else {
-			contextPercentStr = contextPercentDisplay;
+			contextPercentStr = theme.getStatusLineColor("context")(contextPercentDisplay);
 		}
 		statsParts.push(contextPercentStr);
 		if (areExperimentalFeaturesEnabled()) {
-			statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
+			statsParts.push(`${sep("•")} ${theme.bold(theme.fg("warning", "xp"))}`);
 		}
-
 		let statsLeft = statsParts.join(" ");
 
 		// Add model name on the right side, plus thinking level if model supports it
 		const modelName = state.model?.id || "no-model";
+		const modelColor = theme.getStatusLineColor("model");
 
 		let statsLeftWidth = visibleWidth(statsLeft);
 
@@ -181,7 +184,7 @@ export class FooterComponent implements Component {
 		const minPadding = 2;
 
 		// Add thinking level indicator if model supports reasoning
-		let rightSideWithoutProvider = modelName;
+		let rightSideWithoutProvider = modelColor(modelName);
 		if (state.model?.reasoning) {
 			const thinkingLevel = state.thinkingLevel || "off";
 			rightSideWithoutProvider =
@@ -227,7 +230,11 @@ export class FooterComponent implements Component {
 		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
 		const dimRemainder = theme.fg("dim", remainder);
 
-		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+		const pwdLine = truncateToWidth(
+			theme.getStatusLineColor("path")(pwd),
+			width,
+			theme.getStatusLineColor("sep")("..."),
+		);
 		const lines = [pwdLine, dimStatsLeft + dimRemainder];
 
 		// Add extension statuses on a single line, sorted by key alphabetically

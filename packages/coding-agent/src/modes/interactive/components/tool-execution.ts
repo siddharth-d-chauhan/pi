@@ -5,6 +5,12 @@ import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/rend
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 
+// When `expanded` is false, a result with more than this many lines is
+// collapsed to the first COLLAPSE_HEAD_LINES lines + a hint. The user
+// presses `app.tools.expand` to toggle. The threshold is intentionally
+// generous — most one-line tool results stay uncollapsed.
+const COLLAPSE_LINE_THRESHOLD = 30;
+const COLLAPSE_HEAD_LINES = 28;
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
@@ -141,9 +147,23 @@ export class ToolExecutionComponent extends Container {
 		if (!output) {
 			return undefined;
 		}
+		// Collapse long outputs by default; the user toggles with
+		// `app.tools.expand`. The hint shows how many lines are hidden
+		// so the user knows there's content.
+		if (!this.expanded) {
+			const lines = output.split("\n");
+			if (lines.length > COLLAPSE_LINE_THRESHOLD) {
+				const head = lines.slice(0, COLLAPSE_HEAD_LINES).join("\n");
+				const hidden = lines.length - COLLAPSE_HEAD_LINES;
+				const hint = `\n${theme.fg(
+					"muted",
+					`… ${hidden} more line${hidden === 1 ? "" : "s"} (press ${theme.fg("accent", "ctrl+o")} to expand)`,
+				)}`;
+				return new Text(theme.fg("toolOutput", head + hint), 0, 0);
+			}
+		}
 		return new Text(theme.fg("toolOutput", output), 0, 0);
 	}
-
 	updateArgs(args: any): void {
 		this.args = args;
 		this.updateDisplay();

@@ -20,6 +20,7 @@ export class DynamicBorder implements Component {
 	}
 
 	render(width: number): string[] {
-		return [this.color("─".repeat(Math.max(1, width)))];
+		const { horizontal } = theme.getBoxChars().round;
+		return [this.color(horizontal.repeat(Math.max(1, width)))];
 	}
 }

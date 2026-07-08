@@ -122,6 +122,9 @@ export interface Settings {
 	httpProxy?: string; // Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
 	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
+	// Persisted state for whether tool output blocks start expanded. The
+	// user toggles with `app.tools.expand`; the choice survives reloads
+	toolOutputExpanded?: boolean;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -730,6 +733,21 @@ export class SettingsManager {
 	setTheme(theme: string): void {
 		this.globalSettings.theme = theme;
 		this.markModified("theme");
+		this.save();
+	}
+
+	/**
+	 * Whether tool output blocks start expanded. When false (default), long
+	 * outputs (>= COLLAPSE_LINE_THRESHOLD) are collapsed with a hint; when
+	 * true, everything is shown in full.
+	 */
+	getToolOutputExpanded(): boolean {
+		return this.settings.toolOutputExpanded === true;
+	}
+
+	setToolOutputExpanded(expanded: boolean): void {
+		this.globalSettings.toolOutputExpanded = expanded;
+		this.markModified("toolOutputExpanded");
 		this.save();
 	}
 

@@ -37,6 +37,7 @@ import {
 	hyperlink,
 	Markdown,
 	matchesKey,
+	notify,
 	ProcessTerminal,
 	Spacer,
 	setKeybindings,
@@ -60,6 +61,7 @@ import {
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+import { getBackgroundProcessRegistry } from "../../core/background-process-registry.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -72,6 +74,7 @@ import type {
 	ProjectTrustContext,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import type { SessionEvent as ExtensionSessionEvent } from "../../core/extensions/types.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
@@ -87,6 +90,7 @@ import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
+import { stripAnsi } from "../../utils/ansi.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
@@ -98,6 +102,7 @@ import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
+import { BackgroundLogPanel } from "./components/background-log-panel.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
@@ -112,6 +117,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
+import { HistorySearchComponent } from "./components/history-search.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
@@ -128,7 +134,10 @@ import {
 	type StatusIndicator,
 	WorkingStatusIndicator,
 } from "./components/status-indicator.ts";
+import { ThemeSelectorComponent } from "./components/theme-selector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
+import { ToolInspectComponent } from "./components/tool-inspect.ts";
+import { ToolSelectorComponent } from "./components/tools-selector.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -326,6 +335,11 @@ export class InteractiveMode {
 	// Tool output expansion state
 	private toolOutputExpanded = false;
 
+	// Message navigation: 0-based current message index in the chat, or
+	// -1 when nothing is focused. -1 means "follow the live edge" (the
+	// default — the user is reading the latest assistant output).
+	private currentMessageIndex = -1;
+
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
 	private outputPad = 1;
@@ -428,6 +442,14 @@ export class InteractiveMode {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
 		});
+		// Wire the empty-editor down-arrow → background log panel affordance.
+		this.defaultEditor.onDownArrowOnEmpty = () => this.openBackgroundLogPanel();
+		// Wire Down/Up at the bottom/top of the prompt to scroll the chat
+		// scrollback by one line (Claude Code's behavior — cursor stays put
+		// in the editor; the visible scrollback moves).
+		this.defaultEditor.onDownArrowOnLastLine = () => this.scrollChatDown();
+		this.defaultEditor.onUpArrowOnFirstLine = () => this.scrollChatUp();
+		this.defaultEditor.onHistorySearch = () => this.openHistorySearch();
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
@@ -673,8 +695,11 @@ export class InteractiveMode {
 		this.ui.start();
 		this.isInitialized = true;
 
-		await this.themeController.applyFromSettings();
+		// Re-apply the user's tool selection from the most recent
+		// tools-config entry on the branch (no-op if none).
+		this.restoreToolsConfig();
 
+		await this.themeController.applyFromSettings();
 		// Add header with keybindings from config (unless silenced)
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
 			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
@@ -1633,6 +1658,7 @@ export class InteractiveMode {
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
+		this.toolOutputExpanded = this.settingsManager.getToolOutputExpanded();
 		this.outputPad = this.settingsManager.getOutputPad();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 		const clearOnShrink = this.settingsManager.getClearOnShrink();
@@ -2174,8 +2200,86 @@ export class InteractiveMode {
 		message: string,
 		opts?: ExtensionUIDialogOptions,
 	): Promise<boolean> {
+		// Extension-driven permission/approval prompts funnel through this dialog.
+		// Each invocation is one prompt, so a single notify() here satisfies the
+		// "once per prompt" requirement without an external guard.
+		notify("Pi", `Permission required: ${title}`, { terminal: this.ui.terminal });
 		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], opts);
 		return result === "Yes";
+	}
+
+	/**
+	 * Open the background-process log panel as a focus-stealing overlay.
+	 * Returns true on success; returns false when the registry is empty
+	 * (down-arrow on an empty editor should fall through to normal
+	 * editor behavior instead of popping an empty panel).
+	 */
+	private openBackgroundLogPanel(): boolean {
+		// Bail when no processes are registered. Popping an empty panel on
+		// every down-arrow is hostile UX; the down-arrow should just move
+		// the cursor in that case. The panel is reserved for actually
+		// having something to show.
+		if (getBackgroundProcessRegistry().size === 0) return false;
+		const panel = new BackgroundLogPanel({
+			terminal: this.ui.terminal,
+			onDismiss: () => {
+				handle.hide();
+			},
+		});
+		const handle = this.ui.showOverlay(panel, {
+			anchor: "center",
+			width: "80%",
+			minWidth: 60,
+			maxHeight: "70%",
+			margin: 1,
+		});
+		return true;
+	}
+
+	/**
+	 * Scroll the chat scrollback DOWN by one line (cursor stays in editor).
+	 * Bound to `onDownArrowOnLastLine` — the editor fires it when Down is
+	 * pressed at the last line of a non-empty editor.
+	 */
+	private scrollChatDown(): boolean {
+		// CSI \x1b[T  with one parameter means "scroll down N lines". Used in
+		// xterm and most modern emulators (iTerm2, kitty, WezTerm, GNOME
+		// Terminal). On unsupported terminals this is a no-op; the user
+		// still gets the cursor-movement fallback because we return false
+		// when we want to fall through. We always return true to consume.
+		this.ui.terminal.write("\x1b[1T");
+		return true;
+	}
+
+	/**
+	 * Scroll the chat scrollback UP by one line. Bound to
+	 * `onUpArrowOnFirstLine`.
+	 */
+	private scrollChatUp(): boolean {
+		this.ui.terminal.write("\x1b[1S");
+		return true;
+	}
+	/**
+	 * Open the reverse-i-search overlay. Triggered by Ctrl-R from the
+	 * editor (the editor's `onHistorySearch` callback routes here). The
+	 * search is over the session's user messages; on commit we replace
+	 * the editor's text with the chosen prompt.
+	 */
+	private openHistorySearch(): void {
+		const history = this.session.getUserMessagesForForking().map((m) => m.text);
+		const initialQuery = this.editor.getText();
+		const handle = this.ui.showOverlay(
+			new HistorySearchComponent({
+				history,
+				initialQuery,
+				onCommit: (text) => {
+					handle.hide();
+					this.editor.setText(text);
+				},
+				onCancel: () => handle.hide(),
+			}),
+			{ anchor: "top-left", width: "70%", minWidth: 60, margin: 1 },
+		);
 	}
 
 	private async promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined> {
@@ -2333,7 +2437,18 @@ export class InteractiveMode {
 				if (!customEditor.onExtensionShortcut) {
 					customEditor.onExtensionShortcut = (data: string) => this.defaultEditor.onExtensionShortcut?.(data);
 				}
-				// Copy action handlers (clear, suspend, model switching, etc.)
+				if (!customEditor.onDownArrowOnEmpty) {
+					customEditor.onDownArrowOnEmpty = () => this.defaultEditor.onDownArrowOnEmpty?.() === true;
+				}
+				if (!customEditor.onDownArrowOnLastLine) {
+					customEditor.onDownArrowOnLastLine = () => this.defaultEditor.onDownArrowOnLastLine?.() === true;
+				}
+				if (!customEditor.onUpArrowOnFirstLine) {
+					customEditor.onUpArrowOnFirstLine = () => this.defaultEditor.onUpArrowOnFirstLine?.() === true;
+				}
+				if (!customEditor.onHistorySearch) {
+					customEditor.onHistorySearch = () => this.defaultEditor.onHistorySearch?.();
+				}
 				for (const [action, handler] of this.defaultEditor.actionHandlers) {
 					(customEditor.actionHandlers as Map<string, () => void>).set(action, handler);
 				}
@@ -2515,6 +2630,11 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
 		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
 		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
+		this.defaultEditor.onAction("app.message.first", () => this.jumpToFirstMessage());
+		this.defaultEditor.onAction("app.message.last", () => this.jumpToLastMessage());
+		this.defaultEditor.onAction("app.message.prev", () => this.jumpToPrevMessage());
+		this.defaultEditor.onAction("app.message.next", () => this.jumpToNextMessage());
+		this.defaultEditor.onAction("app.chat.copy", () => this.handleChatCopy());
 		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
@@ -2565,6 +2685,18 @@ export class InteractiveMode {
 			if (text === "/settings") {
 				this.showSettingsSelector();
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/theme") {
+				this.editor.setText("");
+				this.showThemeSelector();
+				return;
+			}
+			if (text === "/tools" || text.startsWith("/tools ")) {
+				const arg = text.startsWith("/tools ") ? text.slice(7).trim() : "";
+				this.editor.setText("");
+				if (arg) this.showToolInspect(arg);
+				else this.showToolsSelector();
 				return;
 			}
 			if (text === "/scoped-models") {
@@ -2750,7 +2882,7 @@ export class InteractiveMode {
 		});
 	}
 
-	private async handleEvent(event: AgentSessionEvent): Promise<void> {
+	private async handleEvent(event: AgentSessionEvent | ExtensionSessionEvent): Promise<void> {
 		if (!this.isInitialized) {
 			await this.init();
 		}
@@ -2794,13 +2926,16 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				}
 				break;
-
 			case "session_info_changed":
 				this.updateTerminalTitle();
 				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
 
+			case "session_tree":
+				// Branch navigation: re-apply tool selection from the new leaf.
+				this.restoreToolsConfig();
+				break;
 			case "thinking_level_changed":
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
@@ -2961,6 +3096,10 @@ export class InteractiveMode {
 				await this.checkShutdownRequested();
 
 				this.ui.requestRender();
+				// Fire a desktop notification when the agent finishes a turn and the
+				// user needs to take over. Routed through the TUI terminal so the
+				// escape sequence doesn't interleave into the final rendered frame.
+				notify("Pi", "Ready for input", { terminal: this.ui.terminal });
 				break;
 
 			case "compaction_start": {
@@ -3593,6 +3732,125 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Count the "user-visible" messages currently in the chat container.
+	 * We treat every child as one message; tool executions, branch markers,
+	 * and skill invocations each occupy one row in the user's mental model
+	 * of the scrollback, so this count is approximate but useful for the
+	 * "[3/12]" indicator in the status line.
+	 */
+	private countChatMessages(): number {
+		let n = 0;
+		for (const child of this.chatContainer.children) {
+			if (child && !(child as { hideComponent?: boolean }).hideComponent) n++;
+		}
+		return n;
+	}
+
+	private setNavStatus(label: string, index: number, total: number): void {
+		const display = total === 0 ? `${label} (no messages)` : `${label} [${Math.max(1, index + 1)}/${total}]`;
+		this.showStatus(display);
+	}
+
+	private jumpToFirstMessage(): void {
+		const total = this.countChatMessages();
+		if (total === 0) {
+			this.showStatus("No messages to navigate");
+			return;
+		}
+		this.currentMessageIndex = 0;
+		// Scroll the terminal up by a large amount so the user can see the
+		// top of the scrollback. Real TUI-level scroll-to-message would
+		// require a scrollOffset concept in the TUI; this is a best-effort
+		// affordance until that's available.
+		this.ui.terminal.write("\x1b[1000S"); // scroll up 1000 lines (xterm)
+		this.setNavStatus("First message", 0, total);
+		this.ui.requestRender();
+	}
+
+	private jumpToLastMessage(): void {
+		const total = this.countChatMessages();
+		if (total === 0) {
+			this.showStatus("No messages to navigate");
+			return;
+		}
+		this.currentMessageIndex = total - 1;
+		// Reset position to the bottom (the prompt); -1 sentinel in the
+		// editor's tracking means "follow the live edge".
+		this.currentMessageIndex = -1;
+		this.showStatus("Latest message");
+		this.ui.requestRender();
+	}
+
+	private jumpToPrevMessage(): void {
+		const total = this.countChatMessages();
+		if (total === 0) {
+			this.showStatus("No messages to navigate");
+			return;
+		}
+		const next = this.currentMessageIndex < 0 ? total - 1 : this.currentMessageIndex - 1;
+		const clamped = Math.max(0, next);
+		this.currentMessageIndex = clamped;
+		this.ui.terminal.write("\x1b[10S"); // scroll up 10 lines
+		this.setNavStatus("Message", clamped, total);
+		this.ui.requestRender();
+	}
+
+	private jumpToNextMessage(): void {
+		const total = this.countChatMessages();
+		if (total === 0) {
+			this.showStatus("No messages to navigate");
+			return;
+		}
+		const next = this.currentMessageIndex < 0 ? total : this.currentMessageIndex + 1;
+		const clamped = Math.min(total, next);
+		// At-or-past-the-end: return to "follow the live edge".
+		if (clamped >= total) {
+			this.currentMessageIndex = -1;
+			this.showStatus("Latest message");
+		} else {
+			this.currentMessageIndex = clamped;
+			this.ui.terminal.write("\x1b[10T"); // scroll down 10 lines
+			this.setNavStatus("Message", clamped, total);
+		}
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Copy the entire chat scrollback to the system clipboard. The TUI does
+	 * not use the alternate screen buffer, so the host terminal's mouse
+	 * selection is unreliable; this command is the supported way to grab
+	 * the conversation. ANSI escapes are stripped from the rendered output
+	 * to produce a clean plain-text copy.
+	 *
+	 * Triggered via `app.chat.copy` (default: Ctrl-Shift-C).
+	 */
+	private async handleChatCopy(): Promise<void> {
+		const lines: string[] = [];
+		for (const child of this.chatContainer.children) {
+			if (!child) continue;
+			if ((child as { hideComponent?: boolean }).hideComponent) continue;
+			try {
+				// Render at a generous width; ANSI escapes will be stripped.
+				const rendered = child.render(120);
+				for (const line of rendered) lines.push(line);
+			} catch {
+				// Skip components that fail to render rather than abort the
+				// whole copy; the user still gets the rest of the scrollback.
+			}
+		}
+		const plain = stripAnsi(lines.join("\n"));
+		try {
+			await copyToClipboard(plain);
+			const messageCount = this.countChatMessages();
+			this.showStatus(
+				`Copied ${messageCount} message${messageCount === 1 ? "" : "s"} (${plain.length} chars) to clipboard`,
+			);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
 	private updateEditorBorderColor(): void {
 		if (this.isBashMode) {
 			this.editor.borderColor = theme.getBashModeBorderColor();
@@ -3639,6 +3897,7 @@ export class InteractiveMode {
 
 	private setToolsExpanded(expanded: boolean): void {
 		this.toolOutputExpanded = expanded;
+		this.settingsManager.setToolOutputExpanded(expanded);
 		const activeHeader = this.customHeader ?? this.builtInHeader;
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
@@ -3964,7 +4223,6 @@ export class InteractiveMode {
 			restoreQueue(error);
 		}
 	}
-
 	/** Move pending bash components from pending area to chat */
 	private flushPendingBashComponents(): void {
 		for (const component of this.pendingBashComponents) {
@@ -3972,6 +4230,41 @@ export class InteractiveMode {
 			this.chatContainer.addChild(component);
 		}
 		this.pendingBashComponents = [];
+	}
+
+	/**
+	 * Walk the current branch for the most recent `tools-config` custom
+	 * entry and re-apply the enabled-tools set. Called on session start
+	 * and after branch navigation so /tools choices survive reloads and
+	 * tree navigation.
+	 *
+	 * The branch is scanned in REVERSE order — the most recent config
+	 * wins. Tool names are filtered to those that still exist in the
+	 * current registry (a tool removed via an extension update between
+	 * sessions won't crash the apply step).
+	 */
+	private restoreToolsConfig(): void {
+		const branch = this.sessionManager.getBranch();
+		let saved: string[] | undefined;
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type !== "custom") continue;
+			if (entry.customType !== "tools-config") continue;
+			const data = entry.data;
+			if (data && typeof data === "object" && "enabledTools" in data) {
+				const enabled = (data as { enabledTools: unknown }).enabledTools;
+				if (Array.isArray(enabled)) {
+					saved = enabled.filter((n): n is string => typeof n === "string");
+					break;
+				}
+			}
+		}
+		if (!saved || saved.length === 0) return;
+		const validNames = new Set(this.session.getAllTools().map((t) => t.name));
+		const filtered = saved.filter((n) => validNames.has(n));
+		if (filtered.length > 0) {
+			this.session.setActiveToolsByName(filtered);
+		}
 	}
 
 	// =========================================================================
@@ -3989,12 +4282,73 @@ export class InteractiveMode {
 			this.ui.setFocus(this.editor);
 		};
 		const { component, focus } = create(done);
-		this.editorContainer.clear();
 		this.editorContainer.addChild(component);
 		this.ui.setFocus(focus);
 		this.ui.requestRender();
 	}
 
+	private showThemeSelector(): void {
+		// Resolve the active theme. The setting may be a "light/dark" auto
+		// spec; ask the controller for the currently-resolved name.
+		const currentTheme = this.themeController.getCurrentThemeName() ?? this.settingsManager.getTheme() ?? "dark";
+		this.showSelector((done) => {
+			const selector = new ThemeSelectorComponent(
+				currentTheme,
+				(themeName) => {
+					// Commit: apply via the standard setTheme path so settings + preview stay in sync.
+					const result = this.themeController.setThemeName(themeName);
+					if (result.success && this.settingsManager.getTheme() !== themeName) {
+						this.settingsManager.setTheme(themeName);
+					}
+					this.showStatus(`Theme: ${themeName}`);
+					done();
+				},
+				() => {
+					// Cancel: restore the original theme via preview.
+					this.themeController.preview(currentTheme);
+					done();
+				},
+				(themeName) => this.themeController.preview(themeName),
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
+	}
+
+	private showToolsSelector(): void {
+		const tools = this.session.getAllTools();
+		const active = new Set(this.session.getActiveToolNames());
+		this.showSelector((done) => {
+			const selector = new ToolSelectorComponent({
+				tools,
+				enabled: active,
+				onChange: (next) => {
+					this.session.setActiveToolsByName(Array.from(next));
+					// Persist so the choice survives fork/branch.
+					this.session.sessionManager.appendCustomEntry("tools-config", { enabledTools: Array.from(next) });
+				},
+				onClose: () => done(),
+			});
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private showToolInspect(name: string): void {
+		const tools = this.session.getAllTools();
+		const tool = tools.find((t) => t.name === name);
+		if (!tool) {
+			this.showWarning(`Unknown tool: ${name}. Run /tools to see available tools.`);
+			return;
+		}
+		const active = new Set(this.session.getActiveToolNames());
+		this.showSelector((done) => {
+			const inspect = new ToolInspectComponent({
+				tool,
+				enabled: active.has(name),
+				onClose: () => done(),
+			});
+			return { component: inspect, focus: inspect };
+		});
+	}
 	private showSettingsSelector(): void {
 		this.showSelector((done) => {
 			const selector = new SettingsSelectorComponent(

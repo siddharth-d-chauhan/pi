@@ -3,7 +3,10 @@
 	"title": "Pi Coding Agent Theme",
 	"description": "Theme schema for Pi coding agent",
 	"type": "object",
-	"required": ["name", "colors"],
+	"required": [
+		"name",
+		"colors"
+	],
 	"properties": {
 		"$schema": {
 			"type": "string",
@@ -292,6 +295,62 @@
 				"bashMode": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Editor border color in bash mode"
+				},
+				"pythonMode": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Python REPL mode border color"
+				},
+				"statusLineSep": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line separator color"
+				},
+				"statusLineModel": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line model label color"
+				},
+				"statusLinePath": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line working directory path color"
+				},
+				"statusLineGitClean": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line git clean color"
+				},
+				"statusLineGitDirty": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line git dirty color"
+				},
+				"statusLineContext": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line context usage color"
+				},
+				"statusLineSpend": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line session spend color"
+				},
+				"statusLineStaged": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line git staged changes color"
+				},
+				"statusLineDirty": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line git dirty changes color"
+				},
+				"statusLineUntracked": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line git untracked changes color"
+				},
+				"statusLineOutput": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line tool output color"
+				},
+				"statusLineCost": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line cost color"
+				},
+				"statusLineSubagents": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Status line subagent indicator color"
 				}
 			},
 			"additionalProperties": false
@@ -314,6 +373,139 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"symbols": {
+			"type": "object",
+			"description": "Symbol preset and per-key overrides for TUI glyphs",
+			"properties": {
+				"preset": {
+					"type": "string",
+					"enum": [
+						"unicode",
+						"nerd",
+						"ascii",
+						"null"
+					],
+					"description": "Default symbol preset; null disables preset-driven defaults"
+				},
+				"overrides": {
+					"type": "object",
+					"description": "Per-symbol key overrides; see TUI symbol registry for valid keys",
+					"additionalProperties": {
+						"type": "string"
+					}
+				},
+				"spinnerFrames": {
+					"oneOf": [
+						{
+							"type": "array",
+							"items": {
+								"type": "string"
+							},
+							"description": "Flat frame list applied to both status and activity spinners"
+						},
+						{
+							"type": "object",
+							"properties": {
+								"status": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "Frames for status/spinner (~12.5fps)"
+								},
+								"activity": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									},
+									"description": "Frames for activity spinner (~30fps)"
+								}
+							}
+						}
+					]
+				}
+			}
+		},
+		"boxRound": {
+			"type": "object",
+			"description": "Rounded box-drawing characters (\u256d\u256e\u2570\u256f \u2500 \u2502)",
+			"properties": {
+				"topLeft": {
+					"type": "string",
+					"description": "topLeft box-drawing character"
+				},
+				"topRight": {
+					"type": "string",
+					"description": "topRight box-drawing character"
+				},
+				"bottomLeft": {
+					"type": "string",
+					"description": "bottomLeft box-drawing character"
+				},
+				"bottomRight": {
+					"type": "string",
+					"description": "bottomRight box-drawing character"
+				},
+				"horizontal": {
+					"type": "string",
+					"description": "horizontal box-drawing character"
+				},
+				"vertical": {
+					"type": "string",
+					"description": "vertical box-drawing character"
+				}
+			}
+		},
+		"boxSharp": {
+			"type": "object",
+			"description": "Sharp box-drawing characters (\u250c\u2510\u2514\u2518 \u2500 \u2502 \u252c\u2534\u251c\u2524 \u253c) \u2014 used for tables and junctions",
+			"properties": {
+				"topLeft": {
+					"type": "string",
+					"description": "topLeft box-drawing character"
+				},
+				"topRight": {
+					"type": "string",
+					"description": "topRight box-drawing character"
+				},
+				"bottomLeft": {
+					"type": "string",
+					"description": "bottomLeft box-drawing character"
+				},
+				"bottomRight": {
+					"type": "string",
+					"description": "bottomRight box-drawing character"
+				},
+				"horizontal": {
+					"type": "string",
+					"description": "horizontal box-drawing character"
+				},
+				"vertical": {
+					"type": "string",
+					"description": "vertical box-drawing character"
+				},
+				"teeDown": {
+					"type": "string",
+					"description": "teeDown box-drawing character"
+				},
+				"teeUp": {
+					"type": "string",
+					"description": "teeUp box-drawing character"
+				},
+				"teeRight": {
+					"type": "string",
+					"description": "teeRight box-drawing character"
+				},
+				"teeLeft": {
+					"type": "string",
+					"description": "teeLeft box-drawing character"
+				},
+				"cross": {
+					"type": "string",
+					"description": "cross box-drawing character"
+				}
+			}
 		}
 	},
 	"additionalProperties": false,

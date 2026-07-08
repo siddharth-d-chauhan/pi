@@ -64,6 +64,10 @@ export class InteractiveThemeController {
 		return this.applyThemeName(themeName, showError);
 	}
 
+	/** Currently-resolved theme name, or undefined if none has been applied yet. */
+	getCurrentThemeName(): string | undefined {
+		return this.activeThemeName;
+	}
 	setThemeInstance(themeInstance: Theme): ThemeResult {
 		this.setAutoSync(false);
 		setThemeInstance(themeInstance);

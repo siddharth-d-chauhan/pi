@@ -14,7 +14,26 @@ export class CustomEditor extends Editor {
 	public onPasteImage?: () => void;
 	/** Handler for extension-registered shortcuts. Returns true if handled. */
 	public onExtensionShortcut?: (data: string) => boolean;
-
+	/**
+	 * Handler invoked when the user presses Down on an EMPTY editor and the
+	 * background-process registry is non-empty. The owner typically opens
+	 * the BackgroundLogPanel via tui.showOverlay. Returns true to indicate
+	 * the keypress was consumed.
+	 */
+	public onDownArrowOnEmpty?: () => boolean;
+	/**
+	 * Handler invoked when the user presses Down arrow while the cursor is
+	 * already on the LAST line of the editor (and the buffer is
+	 * non-empty). Lets the owner scroll the chat scrollback DOWN by one
+	 * line, the way Claude Code does — the cursor stays put in the editor
+	 * while the visible scrollback moves. Returns true to consume.
+	 */
+	public onDownArrowOnLastLine?: () => boolean;
+	/**
+	 * Symmetric handler for Up arrow on the FIRST line of a non-empty
+	 * editor: scroll the chat scrollback UP by one line.
+	 */
+	public onUpArrowOnFirstLine?: () => boolean;
 	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, options?: EditorOptions) {
 		super(tui, theme, options);
 		this.keybindings = keybindings;
@@ -55,7 +74,6 @@ export class CustomEditor extends Editor {
 			super.handleInput(data);
 			return;
 		}
-
 		// Exit (Ctrl+D) - only when editor is empty
 		if (this.keybindings.matches(data, "app.exit")) {
 			if (this.getText().length === 0) {
@@ -64,6 +82,29 @@ export class CustomEditor extends Editor {
 				return;
 			}
 			// Fall through to editor handling for delete-char-forward when not empty
+		}
+
+		// Down on an empty editor opens the background-process log panel
+		// (if the registry is non-empty). The handler returns true to
+		// indicate the keypress was consumed; we fall through to the
+		// normal action loop otherwise.
+		if (this.getText().length === 0 && this.onDownArrowOnEmpty?.() === true) {
+			return;
+		}
+
+		// Down on the LAST line / Up on the FIRST line of a non-empty editor
+		// scrolls the chat scrollback by one line (Claude Code's behavior).
+		// We match via the keybinding name so the same keychord the editor
+		// uses for cursor movement triggers the scroll hook.
+		if (this.getText().length > 0 && this.keybindings.matches(data, "tui.editor.cursorDown")) {
+			if (this.getCursorLine() >= this.getLineCount() - 1 && this.onDownArrowOnLastLine?.() === true) {
+				return;
+			}
+		}
+		if (this.getText().length > 0 && this.keybindings.matches(data, "tui.editor.cursorUp")) {
+			if (this.getCursorLine() <= 0 && this.onUpArrowOnFirstLine?.() === true) {
+				return;
+			}
 		}
 
 		// Check all other app actions

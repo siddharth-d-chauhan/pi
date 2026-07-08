@@ -25,6 +25,11 @@ export interface AppKeybindings {
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.message.dequeue": true;
+	"app.message.first": true;
+	"app.message.last": true;
+	"app.message.prev": true;
+	"app.message.next": true;
+	"app.chat.copy": true;
 	"app.clipboard.pasteImage": true;
 	"app.session.new": true;
 	"app.session.tree": true;
@@ -102,6 +107,26 @@ export const KEYBINDINGS = {
 	"app.message.dequeue": {
 		defaultKeys: "alt+up",
 		description: "Restore queued messages",
+	},
+	"app.message.first": {
+		defaultKeys: "alt+g",
+		description: "Jump to first message in scrollback",
+	},
+	"app.message.last": {
+		defaultKeys: "alt+shift+g",
+		description: "Jump to last message (return to prompt)",
+	},
+	"app.message.prev": {
+		defaultKeys: "alt+[",
+		description: "Jump to previous message",
+	},
+	"app.message.next": {
+		defaultKeys: "alt+]",
+		description: "Jump to next message",
+	},
+	"app.chat.copy": {
+		defaultKeys: "ctrl+shift+c",
+		description: "Copy the full chat scrollback to the system clipboard",
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: process.platform === "win32" ? "alt+v" : "ctrl+v",
@@ -247,6 +272,10 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	externalEditor: "app.editor.external",
 	followUp: "app.message.followUp",
 	dequeue: "app.message.dequeue",
+	first: "app.message.first",
+	last: "app.message.last",
+	prev: "app.message.prev",
+	next: "app.message.next",
 	pasteImage: "app.clipboard.pasteImage",
 	newSession: "app.session.new",
 	tree: "app.session.tree",

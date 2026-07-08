@@ -86,6 +86,20 @@ export type BackgroundProcessListener = (event: BackgroundProcessEvent) => void;
 /** Default cap on log lines retained per process. */
 export const DEFAULT_LOG_CAP = 500;
 
+/**
+ * Make a raw log line safe to embed in a rendered TUI row: drop CSI/OSC
+ * escape sequences and map remaining control characters (\r, \t, \b, …)
+ * to spaces so they can't move the cursor or skew width math.
+ */
+export function sanitizeLogLine(line: string): string {
+	return line
+		.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
+		.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+		.replace(/\x1b./g, "")
+		.replace(/[\x00-\x1f\x7f]/g, " ")
+		.trim();
+}
+
 class BackgroundProcessRegistry {
 	#entries = new Map<string, BackgroundProcessEntry>();
 	#listeners = new Set<BackgroundProcessListener>();

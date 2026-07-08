@@ -53,6 +53,12 @@ export interface SpawnOptions {
 	/** Caller-supplied abort signal. */
 	signal?: AbortSignal;
 	/**
+	 * Called with the registry id as soon as the spawn is registered, before
+	 * any awaiting. Lets the caller (the agent tool) track live progress for
+	 * its streaming UI.
+	 */
+	onRegistered?: (registryId: string) => void;
+	/**
 	 * Optional seam for callers that want to drive the child themselves
 	 * (e.g. tests, alternative runtimes). When provided, `spawnAgent`
 	 * does NOT create a child session — the caller must implement the
@@ -338,6 +344,7 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			void childForControl?.session.steer(text);
 		},
 	});
+	opts.onRegistered?.(registryId);
 
 	const sem = getSemaphore(settings);
 
@@ -388,20 +395,29 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			throw err;
 		}
 
-		// Stream child events to the registry.
+		// Stream child events to the registry. Text deltas are NOT logged
+		// per-delta (that floods the bounded log ring and fires a registry
+		// event per token); instead the assistant's text lands once per
+		// message via message_end.
 		const unsubscribe = child.session.subscribe((event) => {
-			if (event.type === "message_update") {
-				const update = event as unknown as { assistantMessageEvent?: { type: string; delta?: string } };
-				const ev = update.assistantMessageEvent;
-				if (ev?.type === "text_delta" && ev.delta) {
-					registry.appendLog(registryId, ev.delta);
+			if (event.type === "message_end") {
+				const end = event as unknown as { message?: { role?: string; content?: unknown } };
+				if (end.message?.role === "assistant") {
+					const text = extractTextSnippet(end.message.content, 160);
+					if (text) registry.appendLog(registryId, text);
 				}
 			} else if (event.type === "tool_execution_start") {
 				const start = event as unknown as { toolName?: string };
 				if (start.toolName) registry.appendLog(registryId, `↳ ${start.toolName}`);
 			} else if (event.type === "agent_end") {
 				const stats = child.session.getSessionStats();
-				registry.appendLog(registryId, `tokens=${stats.tokens.total} cost=$${stats.cost.toFixed(4)}`);
+				registry.update(registryId, {
+					metrics: {
+						tokens: stats.tokens.total,
+						costUsd: stats.cost,
+						requests: countAssistantRequests(child.session),
+					},
+				});
 			}
 		});
 
@@ -583,6 +599,21 @@ function countAssistantRequests(session: AgentSession): number {
 function truncateForLabel(text: string, max = 80): string {
 	const flat = text.replace(/\s+/g, " ").trim();
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** Flatten assistant message content to a short single-line snippet for the registry log. */
+function extractTextSnippet(content: unknown, max: number): string | undefined {
+	if (typeof content === "string") return truncateForLabel(content, max) || undefined;
+	if (!Array.isArray(content)) return undefined;
+	const parts: string[] = [];
+	for (const block of content) {
+		if (block && typeof block === "object" && (block as { type?: string }).type === "text") {
+			const text = (block as { text?: string }).text;
+			if (text) parts.push(text);
+		}
+	}
+	const joined = parts.join(" ").trim();
+	return joined ? truncateForLabel(joined, max) : undefined;
 }
 
 function appendUsageTrailer(

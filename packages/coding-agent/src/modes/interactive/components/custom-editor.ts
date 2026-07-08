@@ -88,7 +88,11 @@ export class CustomEditor extends Editor {
 		// (if the registry is non-empty). The handler returns true to
 		// indicate the keypress was consumed; we fall through to the
 		// normal action loop otherwise.
-		if (this.getText().length === 0 && this.onDownArrowOnEmpty?.() === true) {
+		if (
+			this.getText().length === 0 &&
+			this.keybindings.matches(data, "tui.editor.cursorDown") &&
+			this.onDownArrowOnEmpty?.() === true
+		) {
 			return;
 		}
 

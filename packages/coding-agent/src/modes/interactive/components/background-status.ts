@@ -21,6 +21,7 @@ import {
 	type BackgroundProcessSnapshot,
 	formatTaskAge,
 	getBackgroundProcessRegistry,
+	sanitizeLogLine,
 } from "../../../core/background-process-registry.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -34,20 +35,6 @@ const KIND_LABELS: Record<BackgroundProcessKind, string> = {
 	"shell-suspend": "shell",
 	other: "task",
 };
-
-/**
- * Make a raw log line safe to embed in a rendered TUI row: drop CSI/OSC
- * escape sequences and map remaining control characters (\r, \t, \b, …)
- * to spaces so they can't move the cursor or skew width math.
- */
-function sanitizeLogLine(line: string): string {
-	return line
-		.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
-		.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
-		.replace(/\x1b./g, "")
-		.replace(/[\x00-\x1f\x7f]/g, " ")
-		.trim();
-}
 
 export class BackgroundStatusWidget implements Component {
 	private ui: TUI;

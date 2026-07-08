@@ -3,11 +3,13 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { getAgentDir } from "../../config.ts";
+import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { AgentDefinition } from "../agents/definitions.ts";
 import { formatAgentDefinitionsForPrompt, loadAgentDefinitions, spawnAgent } from "../agents/index.ts";
 import type { CreateChildSessionInput, CreateChildSessionResult, SpawnDeps } from "../agents/spawn.ts";
-import type { ToolDefinition } from "../extensions/types.ts";
+import { getBackgroundProcessRegistry, sanitizeLogLine } from "../background-process-registry.ts";
+import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { createAgentSession } from "../sdk.ts";
 import { getDefaultSessionDir, SessionManager } from "../session-manager.ts";
@@ -39,17 +41,23 @@ export type AgentToolInput = Static<typeof agentToolSchema>;
 
 export interface AgentTaskResult {
 	agent: string;
-	status: "completed" | "failed" | "cancelled";
+	status: "running" | "completed" | "failed" | "cancelled";
 	inline: string;
 	handle?: string;
 	registryId: string;
 	usage: { tokens: number; costUsd: number; requests: number; durationMs: number };
 	sessionFile?: string;
+	/** Latest activity line (tool name / text snippet) while running. */
+	activity?: string;
+	/** UI-only: short prompt gist for the card header. */
+	gist?: string;
 }
 
 export interface AgentToolDetails {
 	tasks: AgentTaskResult[];
 	background: string[];
+	/** True on streaming partial frames (renderers show live rows). */
+	live?: boolean;
 }
 
 interface AgentToolContext {
@@ -117,6 +125,124 @@ function describeRoster(definitions: AgentDefinition[], limit: number): string {
 	return formatAgentDefinitionsForPrompt(definitions, limit);
 }
 
+// ---------------------------------------------------------------------------
+// TUI rendering — a live card, not a wall of markdown.
+// ---------------------------------------------------------------------------
+
+/** Lines of a task body shown when collapsed; beyond this a ctrl+o hint appears. */
+const CARD_COLLAPSE_LINES = 12;
+
+function gistOf(prompt: string): string {
+	const flat = prompt.replace(/\s+/g, " ").trim();
+	return flat.length > 48 ? `${flat.slice(0, 47)}…` : flat;
+}
+
+function formatTokens(tokens: number): string {
+	if (tokens < 1000) return `${tokens}`;
+	return `${(tokens / 1000).toFixed(1)}k`;
+}
+
+function formatElapsed(durationMs: number): string {
+	const seconds = durationMs / 1000;
+	if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
+	return `${Math.floor(seconds / 60)}m${Math.round(seconds % 60)}s`;
+}
+
+/** Drop the model-facing `_agentId: …_` trailer from a task body — the card renders its own metrics row. */
+function stripUsageTrailer(inline: string): string {
+	return inline.replace(/\n*_agentId: [^\n]*_\s*$/, "").trim();
+}
+
+/** Exported for tests and headless render probes. */
+export function formatAgentCall(args: AgentToolInput, theme: Theme): string {
+	const title = theme.fg("toolTitle", theme.bold("agent"));
+	if (args.tasks.length === 1) {
+		const task = args.tasks[0];
+		const marker = task.background ? theme.fg("muted", " (background)") : "";
+		return `${title} ${theme.fg("accent", task.agent)}${marker} ${theme.fg("dim", gistOf(task.prompt))}`;
+	}
+	const names = args.tasks
+		.map((task) => `${theme.fg("accent", task.agent)}${task.background ? theme.fg("muted", "⁺") : ""}`)
+		.join(theme.fg("dim", ", "));
+	return `${title} ${theme.fg("dim", `${args.tasks.length} tasks:`)} ${names}`;
+}
+
+function statusGlyph(task: AgentTaskResult, theme: Theme): string {
+	switch (task.status) {
+		case "running":
+			return theme.fg("accent", "▶");
+		case "completed":
+			return theme.fg("success", "✓");
+		case "failed":
+			return theme.fg("error", "✗");
+		case "cancelled":
+			return theme.fg("warning", "⊘");
+	}
+}
+
+function formatMetrics(task: AgentTaskResult, theme: Theme): string {
+	const parts: string[] = [];
+	if (task.usage.tokens > 0) parts.push(`${formatTokens(task.usage.tokens)} tok`);
+	if (task.usage.costUsd > 0) parts.push(`$${task.usage.costUsd.toFixed(4)}`);
+	if (task.usage.durationMs > 0) parts.push(formatElapsed(task.usage.durationMs));
+	return parts.length > 0 ? theme.fg("dim", ` · ${parts.join(" · ")}`) : "";
+}
+
+function formatTaskHeader(task: AgentTaskResult, isBackground: boolean, theme: Theme): string {
+	const glyph = statusGlyph(task, theme);
+	const name = theme.fg("accent", theme.bold(task.agent));
+	const gist = task.gist ? theme.fg("dim", ` ${task.gist}`) : "";
+	if (isBackground) {
+		const id = task.registryId ? theme.fg("muted", ` ${task.registryId}`) : "";
+		return `${glyph} ${name}${gist} ${theme.fg("muted", "· background")}${id} ${theme.fg("dim", "— result arrives as a notification")}`;
+	}
+	if (task.status === "running") {
+		// Registry tool-start lines already carry the `↳ ` prefix.
+		const raw = task.activity;
+		const activity = raw ? theme.fg("dim", raw.startsWith("↳") ? ` ${raw}` : ` ↳ ${raw}`) : "";
+		return `${glyph} ${name}${gist}${formatMetrics(task, theme)}${activity}`;
+	}
+	const statusText = task.status === "completed" ? "" : theme.fg("error", ` · ${task.status}`);
+	return `${glyph} ${name}${statusText}${formatMetrics(task, theme)}`;
+}
+
+function formatTaskBody(task: AgentTaskResult, options: ToolRenderResultOptions, theme: Theme): string[] {
+	const body = stripUsageTrailer(task.inline);
+	if (!body) return [];
+	let lines = body.split("\n");
+	let hint: string | undefined;
+	if (!options.expanded && lines.length > CARD_COLLAPSE_LINES) {
+		const hidden = lines.length - CARD_COLLAPSE_LINES;
+		lines = lines.slice(0, CARD_COLLAPSE_LINES);
+		hint = theme.fg(
+			"muted",
+			`… ${hidden} more line${hidden === 1 ? "" : "s"} (${theme.fg("accent", "ctrl+o")} to expand)`,
+		);
+	}
+	const color = task.status === "failed" ? "error" : "toolOutput";
+	const out = lines.map((line) => `  ${theme.fg(color, line)}`);
+	if (hint) out.push(`  ${hint}`);
+	if (task.handle) {
+		out.push(`  ${theme.fg("dim", `⤷ full output: ${task.handle} (agent_pull)`)}`);
+	}
+	return out;
+}
+
+/** Exported for tests and headless render probes. */
+export function formatAgentCard(details: AgentToolDetails, options: ToolRenderResultOptions, theme: Theme): string {
+	const backgroundIds = new Set(details.background);
+	const blocks: string[] = [];
+	for (const task of details.tasks) {
+		const isBackground = task.registryId !== "" && backgroundIds.has(task.registryId);
+		const lines = [formatTaskHeader(task, isBackground, theme)];
+		if (!isBackground && task.status !== "running") {
+			lines.push(...formatTaskBody(task, options, theme));
+		}
+		blocks.push(lines.join("\n"));
+	}
+	return blocks.join("\n");
+}
+
 interface ResolvedAgentTask {
 	task: Static<typeof agentTaskSchema>;
 	definition: AgentDefinition;
@@ -162,7 +288,7 @@ export function createAgentToolDefinition(
 			initialRoster,
 		promptSnippet: "Delegate work to a subagent (read-only, worker, plan, reviewer, or user-defined).",
 		parameters: agentToolSchema,
-		async execute(_toolCallId, args: AgentToolInput, signal?: AbortSignal) {
+		async execute(_toolCallId, args: AgentToolInput, signal?: AbortSignal, onUpdate?) {
 			if (signal?.aborted) {
 				throw new Error("Operation aborted");
 			}
@@ -189,7 +315,66 @@ export function createAgentToolDefinition(
 				};
 			});
 
-			const runOne = async ({ task, definition, background }: ResolvedAgentTask): Promise<AgentTaskResult> => {
+			// ---- Live progress: one row per task, streamed to the tool card ----
+			const startedAt = resolvedTasks.map(() => Date.now());
+			const live: AgentTaskResult[] = resolvedTasks.map(({ task, definition }) => ({
+				agent: definition.name,
+				status: "running",
+				inline: "",
+				registryId: "",
+				usage: { tokens: 0, costUsd: 0, requests: 0, durationMs: 0 },
+				gist: gistOf(task.prompt),
+			}));
+			const backgroundIds: string[] = [];
+			const trackedIds = new Map<string, number>();
+			const processRegistry = getBackgroundProcessRegistry();
+			let updateTimer: ReturnType<typeof setTimeout> | undefined;
+			let updateDirty = false;
+			const pushUpdate = (): void => {
+				onUpdate?.({
+					content: [{ type: "text", text: "subagents running…" }],
+					details: {
+						tasks: live.map((task) => ({ ...task, usage: { ...task.usage } })),
+						background: [...backgroundIds],
+						live: true,
+					},
+				});
+			};
+			const scheduleUpdate = (): void => {
+				if (!onUpdate) return;
+				updateDirty = true;
+				if (updateTimer) return;
+				updateTimer = setTimeout(() => {
+					updateTimer = undefined;
+					if (updateDirty) {
+						updateDirty = false;
+						pushUpdate();
+					}
+				}, 150);
+			};
+			const unsubscribe = onUpdate
+				? processRegistry.subscribe((event) => {
+						if (!("id" in event)) return;
+						const index = trackedIds.get(event.id);
+						if (index === undefined) return;
+						const entry = processRegistry.get(event.id);
+						const row = live[index];
+						if (entry) {
+							const tail = entry.log.at(-1);
+							if (tail) row.activity = sanitizeLogLine(tail);
+							if (entry.metrics) {
+								row.usage.tokens = entry.metrics.tokens ?? row.usage.tokens;
+								row.usage.costUsd = entry.metrics.costUsd ?? row.usage.costUsd;
+								row.usage.requests = entry.metrics.requests ?? row.usage.requests;
+							}
+						}
+						row.usage.durationMs = Date.now() - startedAt[index];
+						scheduleUpdate();
+					})
+				: undefined;
+
+			const runOne = async (index: number): Promise<AgentTaskResult> => {
+				const { task, definition, background } = resolvedTasks[index];
 				const result = await spawnAgent(
 					{
 						definition,
@@ -206,10 +391,15 @@ export function createAgentToolDefinition(
 						background,
 						name: task.name,
 						signal,
+						onRegistered: (registryId) => {
+							live[index].registryId = registryId;
+							trackedIds.set(registryId, index);
+							scheduleUpdate();
+						},
 					},
 					deps,
 				);
-				return {
+				const settled: AgentTaskResult = {
 					agent: definition.name,
 					status: result.status,
 					inline: result.inline,
@@ -217,50 +407,61 @@ export function createAgentToolDefinition(
 					registryId: result.registryId,
 					usage: result.usage,
 					sessionFile: result.sessionFile,
+					gist: live[index].gist,
 				};
+				live[index] = settled;
+				scheduleUpdate();
+				return settled;
 			};
 
-			const backgroundIds: string[] = [];
-			const results: AgentTaskResult[] = [];
-			const syncTasks = resolvedTasks.filter((task) => !task.background);
-			const asyncTasks = resolvedTasks.filter((task) => task.background);
+			try {
+				const results: AgentTaskResult[] = new Array(live.length);
+				const syncIndices = resolvedTasks.flatMap((task, index) => (task.background ? [] : [index]));
+				const asyncIndices = resolvedTasks.flatMap((task, index) => (task.background ? [index] : []));
 
-			if (syncTasks.length > 0) {
-				const settled = await Promise.all(syncTasks.map(runOne));
-				results.push(...settled);
-			}
-			for (const task of asyncTasks) {
-				const result = await runOne(task);
-				backgroundIds.push(result.registryId);
-				results.push(result);
-			}
+				if (syncIndices.length > 0) {
+					const settled = await Promise.all(syncIndices.map(runOne));
+					syncIndices.forEach((taskIndex, i) => {
+						results[taskIndex] = settled[i];
+					});
+				}
+				for (const taskIndex of asyncIndices) {
+					const result = await runOne(taskIndex);
+					backgroundIds.push(result.registryId);
+					results[taskIndex] = result;
+				}
 
-			return {
-				content: [
-					{
-						type: "text",
-						text: results.map((r) => `### ${r.agent} (${r.status})\n${r.inline}`).join("\n\n"),
-					},
-				],
-				details: { tasks: results, background: backgroundIds },
-			};
+				return {
+					content: [
+						{
+							type: "text",
+							text: results.map((r) => `### ${r.agent} (${r.status})\n${r.inline}`).join("\n\n"),
+						},
+					],
+					details: { tasks: results, background: backgroundIds },
+				};
+			} finally {
+				if (updateTimer) clearTimeout(updateTimer);
+				unsubscribe?.();
+			}
 		},
-		renderCall(args, theme) {
-			const text = new Text("", 0, 0);
-			const summary = args.tasks.map((task) => `${task.agent}(${task.background ? "bg" : "sync"})`).join(", ");
-			text.setText(`${theme.bold("agent")} ${summary}`);
+		renderCall(args, theme, context) {
+			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			text.setText(formatAgentCall(args, theme));
 			return text;
 		},
-		renderResult(result, _options, _theme, context) {
+		renderResult(result, options, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const details = result.details as AgentToolDetails | undefined;
-			const output = details
-				? details.tasks.map((task) => `### ${task.agent} (${task.status})\n${task.inline}`).join("\n\n")
-				: result.content
-						.filter((part) => part.type === "text")
-						.map((part) => part.text)
-						.join("\n");
-			text.setText(output);
+			if (!details) {
+				const fallback = result.content
+					.filter((part) => part.type === "text")
+					.map((part) => part.text)
+					.join("\n");
+				text.setText(theme.fg("toolOutput", fallback));
+				return text;
+			}
+			text.setText(formatAgentCard(details, options, theme));
 			return text;
 		},
 	};

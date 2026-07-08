@@ -23,6 +23,29 @@ export {
 	parseSkillBlock,
 	type SessionStats,
 } from "./core/agent-session.ts";
+export {
+	type AgentArtifact,
+	type AgentDefinition,
+	type AgentDefinitionFrontmatter,
+	type AgentDefinitionRegistry,
+	type AgentDefinitionSource,
+	AgentHandleStore,
+	type AgentHandleStoreOptions,
+	type AgentIsolationMode,
+	type AgentPermissionMode,
+	type AgentReturn,
+	type AgentSpawnPolicy,
+	type AgentToolList,
+	canOmitProjectContext,
+	capReturn,
+	createAgentDefinitionDisplayPath,
+	formatAgentDefinitionsForPrompt,
+	inferAgentNameFromFile,
+	isReadOnlyToolSet,
+	type LoadAgentDefinitionsOptions,
+	loadAgentDefinitions,
+	pullHandle,
+} from "./core/agents/index.ts";
 // Auth and model registry
 export {
 	type ApiKeyCredential,
@@ -243,6 +266,7 @@ export {
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
 export {
+	type AgentSettings,
 	type CompactionSettings,
 	type DefaultProjectTrust,
 	type ImageSettings,
@@ -265,12 +289,19 @@ export { createSyntheticSourceInfo } from "./core/source-info.ts";
 export { type EditDiffResult, generateDiffString, generateUnifiedPatch } from "./core/tools/edit-diff.ts";
 // Tools
 export {
+	type AgentListItem,
+	type AgentListToolDetails,
+	type AgentListToolInput,
+	type AgentPullToolDetails,
+	type AgentPullToolInput,
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
 	type BashToolDetails,
 	type BashToolInput,
 	type BashToolOptions,
+	createAgentListToolDefinition,
+	createAgentPullToolDefinition,
 	createBashToolDefinition,
 	createEditToolDefinition,
 	createFindToolDefinition,

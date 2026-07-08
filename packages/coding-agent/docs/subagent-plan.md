@@ -11,6 +11,19 @@ into upstream code, type contracts, test gates, and risks. Every phase ends gree
   optional seams (AGENTS.md escalation ladder rungs 2–3).
 - **One enforcement point**: spawn policy, depth, tool stripping all live in
   `spawn.ts` — never duplicated into children via env vars.
+- **Domain-neutral core**: subagents are scoped workers for any tool-backed domain, not only
+  coding. Coding-specific affordances (diff review, tests, git worktrees) are optional layers
+  activated only when the agent uses workspace/code tools.
+- **Permission safety before autonomy**: Phase 1 must preserve the parent's approval story by
+  constraining child tool exposure and failing closed for unsafe parallel shared-state writes.
+  A full child approval bridge for write/execute/network-sensitive actions is Phase 2 work.
+- **Shared-workspace writes are opt-in**: parallel filesystem/project-write agents run in an
+  isolation primitive when one exists (git worktree for repos, domain-specific isolation for
+  other tools) or serialize. The default must not let two background agents mutate the same
+  workspace state blindly.
+- **Scalable discovery**: tool descriptions may include a small stable agent roster, but
+  large or changing registries use a read-only listing/search tool plus cache-stable
+  system-reminder deltas.
 - **Strict-mode-safe schemas from day one** (omp pitfall #7): no top-level unions in tool
   params; optional fields via `Type.Optional`; test against the faux provider AND one
   strict-mode shape check.
@@ -18,11 +31,78 @@ into upstream code, type contracts, test gates, and risks. Every phase ends gree
   using `test/suite/harness.ts` + faux provider (no real APIs). Regression tests for every
   pitfall in the design doc's ledger.
 
+## Current implementation status
+
+Last updated: 2026-07-08.
+
+Implemented and verified:
+- ✅ Agent definition discovery/parsing with project/user/package/bundled precedence.
+- ✅ Bundled domain-neutral agents: `explore`, `plan`, `worker`, `reviewer`.
+- ✅ Agent model role resolution (`pi/<role>`), fallback chains, overrides, cycle guards.
+- ✅ Result handle store with cap/spill, `agent://` refs, JSON-path pulls, regex windows.
+- ✅ `agent_list` read-only discovery tool.
+- ✅ `agent_pull` read-only artifact pull tool.
+- ✅ Tool registration/category/default-active wiring for `agent`, `agent_list`, and
+  `agent_pull`.
+- ✅ Agent settings block and getters for depth/concurrency/model roles/overrides/etc.
+- ✅ Focused suite/regression tests for the implemented foundation.
+- ✅ Phase 0 concurrent-session spike (`test/suite/agents/concurrent-sessions.test.ts`).
+- ✅ `spawnAgent` core: depth/spawn-policy/self-spawn/permission-mode guards, per-spawn
+  semaphore, in-flight race-free isolation reservation, child session factory contract,
+  registry bridge with `tokens=`/`cost=` line on `agent_end`, turn-cap steer+abort,
+  cap/spill finalization, usage trailer, child lineage propagation, and instructional
+  permission-mode prompt text.
+- ✅ `core/tools/agent.ts` runtime tool: typed schema (single `tasks` array, mixed sync
+  + background), `agent_list`-style discovery wired into description, definition-level
+  background defaults, default factory that builds a child `AgentSession` via
+  `createAgentSession` with `noContextFiles`, configured `agentDir` session storage, and
+  `parentSession` header propagation, and child extension loading disabled.
+- ✅ `agent_list` uses the same project/user/package/bundled definition discovery inputs as
+  spawn routing when package agent dirs are supplied.
+- ✅ Explicit empty/effectively empty tool allowlists are treated as non-mutating/read-only
+  for the shared-workspace gate.
+- ✅ Tool registered in `tools/index.ts` (`ToolName`/`allToolNames`/switch cases), tagged
+  `coord` in `tool-categories.ts`, added to default-active in both `sdk.ts` and
+  `agent-session.ts`.
+- ✅ Existing read-only discovery tools (`grep`, `find`, `ls`) are default-active so bundled
+  read-only agents receive the tools their definitions request.
+- ✅ Phase 1 faux-provider tests for the spawn path (`test/suite/agents/spawn.test.ts`):
+  custom-prompt forwarding, self-spawn ban, spawns allowlist, depth cap, sync happy
+  path with usage, in-flight counter release on factory throw.
+- ✅ Background registry control-plane extensions: subagent metadata, metrics, result handle,
+  kill/steer callbacks, `idle` status, guarded `x` kill in the log panel, and metrics line.
+- ✅ Background launches return a registry id before waiting on a saturated child concurrency
+  slot; synchronous launches still wait for capacity.
+- ✅ Result usage trailers include the real background registry id (`agentId: bg-...`) rather
+  than a placeholder.
+- ✅ Background completion notification injection via a queued `<task-notification>` custom
+  message delivered on the parent session's next turn.
+- ✅ TUI background surfaces covered by headless render regressions: below-editor status
+  widget log preview, log-panel metrics/result handle display, and selected-task kill.
+- ✅ Focused agent/regression suite clean locally; `npm run check` clean.
+
+Partially done:
+- ⚠️ `agent-session.ts` received a small additive `agentDir` getter and a
+  `systemPromptOverride` config field for the spawn seam — the rest of the file is
+  unchanged.
+- ⚠️ Worktree isolation is enforced as a *configuration gate* (parallel mutating spawns
+  fail closed with a clear error and a pointer to `agents.allowSharedWorkspaceWrites`
+  or `isolation: worktree`); the actual git-backed worktree helper is still Phase 4
+  polish, not a Phase 1 blocker.
+- ⚠️ Permission mode is currently enforced through child tool exposure plus system-prompt
+  instructions. Parent approval bubbling for child write/execute/network-sensitive actions is
+  not implemented yet.
+
+Remaining before Phase 1 is complete:
+- ⬜ Manual smoke against a real cheap model (per the Phase 1 exit criteria in §1.5/§1.6).
+
 ---
 
 ## Phase 0 — Concurrency spike (½ day, de-risks everything)
 
 The audit found no proof two `AgentSession`s ever ran concurrently in one process.
+
+Status: ✅ implemented and covered by `test/suite/agents/concurrent-sessions.test.ts`.
 
 **`test/suite/agents/concurrent-sessions.test.ts`**
 - Create two `createAgentSession` instances with the faux provider (different fake models),
@@ -35,7 +115,8 @@ The audit found no proof two `AgentSession`s ever ran concurrently in one proces
 - **Exit criteria**: green test, or a documented list of globals to fix first.
 
 Decision locked here: **children load no extensions in Phase 1** (fast spawn, no jiti cost, no
-invalidation interplay). Extension support for children is a Phase 4 opt-in
+invalidation interplay). This is enforced by the default child session factory. Extension
+support for children is a Phase 4 opt-in
 (`agents.childExtensions: true`).
 
 ---
@@ -44,12 +125,16 @@ invalidation interplay). Extension support for children is a Phase 4 opt-in
 
 ### 1.1 `core/agents/definitions.ts` (~250 LoC)
 
+Status: ✅ implemented as additive core module with bundled generic agents and tests.
+
 ```ts
 export interface AgentDefinition {
   name: string;                    // lookup is case-INSENSITIVE, stored lowercase
   description: string;             // routing text; required
   systemPrompt: string;            // markdown body
   tools?: string[];                // allowlist; undefined = defaults; '*' = all
+  disallowedTools?: string[];       // subtractive denylist, applied after tools
+  permissionMode?: "inherit" | "bubble" | "auto" | "read-only";
   spawns?: string[] | "*";         // default: none
   model?: string;                  // id, provider/model, or role alias "pi/<role>"
   thinkingLevel?: ThinkingLevel;
@@ -73,13 +158,21 @@ export function loadAgentDefinitions(cwd: string, agentDir: string): AgentDefini
 - **Seam**: one entry in ResourceLoader's discovery table so `--list-resources`/packages see
   agents. If ResourceLoader's shape doesn't fit cheaply, defer the seam — the loader above is
   self-sufficient; note it as Phase 4 cleanup.
-- Bundled agents: `explore.md`, `plan.md`, `worker.md`, `reviewer.md` (contents adapted from
-  Claude Code's Explore read-only prompt + omp's format contracts).
+- Bundled agents stay generic enough to use outside coding: `explore.md` (read-only
+  information gathering), `plan.md` (read-only task planning), `worker.md` (general execution),
+  `reviewer.md` (independent verification). Code-specific examples can ship as project/user
+  agent definitions or package-provided agents rather than hardwired core behavior.
+- `omitProjectContext` is honored only for bundled read-only agents by default. User/project
+  agents can use it only when `agents.allowOmitProjectContext: true` is set, because skipping
+  AGENTS.md/context files can bypass repo rules.
 - Tests: precedence override, case-insensitive lookup (`Reviewer` == `reviewer`), lenient
-  parse (unknown keys, invalid YAML → skip w/ warning), tools CSV and array forms, output
-  schema passthrough.
+  parse (unknown keys, invalid YAML → skip w/ warning), tools/disallowedTools CSV and array
+  forms, permissionMode validation, output schema passthrough, `omitProjectContext` gating.
 
 ### 1.2 `core/agents/model-roles.ts` (~80 LoC)
+
+Status: ✅ implemented with `pi/<role>` aliases, per-agent model overrides, configured
+fallback chains, case-insensitive override lookup, inherit fallback, and cycle detection.
 
 ```ts
 export function resolveAgentModel(
@@ -97,13 +190,16 @@ export function resolveAgentModel(
 
 ### 1.3 `core/agents/handles.ts` (~150 LoC) — externalized returns
 
+Status: ✅ implemented as `AgentHandleStore` with cap/spill, `agent://` pulls, JSON subpaths,
+regex windows, and runtime `agent_pull` tool wiring.
+
 ```ts
 export interface AgentArtifact { id: string; path: string; bytes: number }
 export function capReturn(id: string, text: string, capChars?: number):
   { inline: string; handle?: string }   // handle = "agent://<id>"
 export function pullHandle(ref: string): string  // agent://<id>[/json.path | ?q=/regex/]
 ```
-- Artifacts dir: `<agentDir>/artifacts/<sessionId>/<id>.md` (bounded: delete-on-park option
+- Artifacts dir: `<agentDir>/artifacts/<id>.md` (bounded cleanup and per-session partitioning
   later). JSON-path pull when the artifact parses as JSON (structured output case); regex
   windowed slice otherwise (port delegate.ts `pullHandle`, it's proven).
 - Also register `agent://` in whatever pi uses to resolve `@`-mention-like refs later — NOT
@@ -112,6 +208,8 @@ export function pullHandle(ref: string): string  // agent://<id>[/json.path | ?q
 - Tests: cap boundary, JSON path pull, regex pull, missing handle error text.
 
 ### 1.4 `core/agents/spawn.ts` (~400 LoC) — the heart
+
+Status: ✅ implemented as `core/agents/spawn.ts` with focused faux-provider tests.
 
 ```ts
 export interface SpawnOptions {
@@ -134,67 +232,82 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 Internals:
 1. **Guards**: depth (`agents.maxDepth`, default 2), spawns allowlist, self-spawn-by-type ban,
    per-session semaphore (`agents.maxConcurrency`, default 8, **re-read each spawn**).
-2. **Child session**: `createAgentSession({ cwd, agentDir, authStorage: parentAuth,
-   modelRegistry: parentRegistry, model: resolved, thinkingLevel, tools: definition.tools,
+2. **Permissions + isolation preflight**:
+   - Effective tools = defaults/allowlist minus `disallowedTools`, then spawn-policy
+     stripping. Parent plan/read-only mode forces a read-only tool set and clears spawns.
+   - Permission mode default is `bubble`, but Phase 1 enforcement is limited to tool exposure
+     and child prompt instructions. Parent approval bubbling for child write/execute/network-
+     sensitive actions is Phase 2 work.
+   - Phase 1 implements a shared-workspace mutation gate: background or concurrent mutating
+     agents fail closed unless `agents.allowSharedWorkspaceWrites` is set. The actual
+     git-backed `isolation: "worktree"` helper is Phase 4 work.
+3. **Child session**: `createAgentSession({ cwd, agentDir, authStorage: parentAuth,
+   modelRegistry: parentRegistry, model: resolved, thinkingLevel, tools: effectiveTools,
    customTools: [], noTools: undefined, settingsManager: snapshot, sessionManager, ... })`.
    - `sessionManager`: `SessionManager.create(cwd, agentDir, { parentSession: parentFile })`
      for named/background agents; `inMemory()` for one-shot sync workers (setting
      `agents.persistSessions: "always" | "background" | "never"`, default `background`).
    - Settings snapshot: clone parent SettingsManager view with compaction on, retry on,
-     **no extensions**, tool approval = auto (children are unattended; the parent's
-     permission story guards the blast radius via tool allowlists in phase 1; permission
-     rulesets are Phase 4).
+     **no extensions**, parent-derived tool exposure, and permission-mode instructions in the
+     child prompt. A child approval bridge that bubbles prompts to the parent session is Phase
+     2 work.
    - System prompt: definition body + `## CONTEXT` (the shared `context` field) +
      `## OUTPUT CONTRACT` (if `output` schema — "call the `finish` tool"). If
      `omitProjectContext`, pass the option that suppresses AGENTS.md/context files (check
      `sessionStartEvent`/resourceLoader path; if no such option exists upstream, add ONE
      optional flag `omitProjectContext?: boolean` to CreateAgentSessionOptions — hook-sized
      seam, undefined-safe).
-3. **Turn cap**: subscribe to `turn_end`; at `maxTurns - 1` steer "budget notice: wrap up
+4. **Turn cap**: subscribe to `turn_end`; at `maxTurns - 1` steer "budget notice: wrap up
    now"; at cap, abort with graceful finalization (opencode's forced text-only final step
    approximated via steer + abort-after-response).
-4. **Registry bridge** (~30 LoC): `registry.register({kind: "subagent", label, ...})`;
+5. **Registry bridge** (~30 LoC): `registry.register({kind: "subagent", label, ...})`;
    subscribe child events → `appendLog` (tool titles + text deltas, one line each),
-   `setStatus`; stash `tokens/costUsd/requests/contextPct` from `getSessionStats()` on each
-   `agent_end` (needs registry field additions, §1.6).
-5. **Finalize**: `getLastAssistantText()`; empty → `"(Subagent completed but returned no
+   `setStatus`; stash `tokens/costUsd/requests/contextPct` from `getSessionStats()` when
+   available.
+6. **Finalize**: `getLastAssistantText()`; empty → `"(Subagent completed but returned no
    output.)"` (Claude Code); structured output: if `output` schema, register a hidden
    `finish` tool (omp yield, simplified: single terminal call, 3 validation retries then
    accept-with-flag); `capReturn` → inline + handle; usage trailer appended to inline:
    `agentId: <id> — <tokens> tok · $<cost> · <n> tools · <t>s`.
-6. **Failure**: child throw/abort → status failed/cancelled, partial last-text still
+7. **Failure**: child throw/abort → status failed/cancelled, partial last-text still
    extracted (Claude Code's extractPartialResult).
 
 Tests (faux provider): sync spawn happy path; depth cap; spawns allowlist; semaphore blocks
 9th concurrent; result cap + handle; empty-output placeholder; turn cap steer; abort
-propagation; cost/usage accounting; child session file has parentSession header.
+propagation; cost/usage accounting; child session file has parentSession header; permission
+prompt-text/fail-closed behavior; isolation-required gate for parallel shared-state mutation.
 
-### 1.5 `core/tools/agent.ts` (~250 LoC) + `agent_pull`
+### 1.5 `core/tools/agent.ts` (~300 LoC) + `agent_pull` + `agent_list`
+
+Status: ✅ `agent`, `agent_list`, and `agent_pull` implemented and default-active with
+allowlist/denylist filtering.
 
 - Schema per design doc (single shape, `tasks` array, all optionals).
 - `execute`: resolve definitions; sync tasks → `Promise.all(spawnAgent…)` bounded by
-  semaphore; background tasks → fire, return
-  `{status:"async_launched", registryId, note}` per task. Mixed batches allowed.
-- Background completion injection: on child completion, `pi`-side bridge uses the session's
-  `sendUserMessage`-equivalent internal API to inject a `<task-notification>` block
-  (task id, status, inline result, handle) as a next-turn message. Phase 1 delivers this via
-  the extension-API-equivalent core path (`AgentSession.sendUserMessage` exists per audit).
+  semaphore; background tasks → fire, return normal task details with inline
+  `Background agent launched: <registryId>` text. Mixed batches allowed.
+- Background completion injection: on child completion, `pi`-side bridge uses
+  `AgentSession.sendCustomMessage(..., { deliverAs: "nextTurn" })` to inject a
+  `<task-notification>` block (task id, status, inline result, handle) as next-turn context.
   Include "do not poll; do not duplicate the agent's work" guidance.
-- **Dynamic description**: build from spawnable definitions at tool-creation time; when the
-  definitions registry changes (file watcher NOT in phase 1 — only session start), it's
-  static per session. Re-announce-on-change lands with the watcher in Phase 2 (as a
-  system-reminder message, never schema mutation).
+- **Dynamic discovery**: the `agent` tool description includes only the spawnable bundled
+  agents plus up to `agents.maxInlineDefinitions` project/user agents (default 12). Larger
+  registries expose `agent_list { q?, limit? }` so the model can search without mutating the
+  tool schema. File-watcher deltas land in Phase 2 as system-reminder messages, never schema
+  mutation.
 - `renderCall/renderResult`: compact card — `agent reviewer (fix auth bug) · running ▸ last
   tool` reusing Text; the full live card component comes in Phase 2 with the Hub.
 - Registration: one entry each in `core/tools/index.ts` (like update_plan), category `coord`
-  in tool-categories.ts. **Default-active**: yes for `agent`, yes for `agent_pull`
-  (they're the feature; opt out via /tools).
+  in tool-categories.ts. **Default-active**: yes for `agent`, `agent_pull`, and
+  `agent_list` (they're the feature; opt out via /tools).
 - Prompt text: port Claude Code's briefing guidance + omp's format contracts (Goal /
   Constraints / Contract for `context`; Target / Change / Acceptance encouraged per prompt).
 - Tests: schema strict-mode shape; parallel fan-out; background launch + notification
-  injection; dynamic description lists only spawnable types; agent_pull round-trip.
+  injection; inline description cap; `agent_list` search; agent_pull round-trip.
 
 ### 1.6 Registry control-plane extensions (upstream-file edit, ~40 LoC additive)
+
+Status: ✅ implemented.
 
 `background-process-registry.ts`:
 - Entry gains optional `metrics?: { tokens?, costUsd?, requests?, contextPct? }`,
@@ -203,10 +316,13 @@ propagation; cost/usage accounting; child session file has parentSession header.
 - Registry methods `kill(id)`, `steer(id, text)` (no-ops without callbacks); statuses gain
   `"idle"` (Phase 2 uses it; harmless now).
 - BackgroundLogPanel: show metrics line when present; `x` key → `kill(id)` (guard: only when
-  onKill exists). BackgroundStatusWidget unchanged (already renders labels/age/tail).
+  onKill exists). BackgroundStatusWidget renders the below-editor running-task summary and
+  sanitized log preview.
 - Tests: kill/steer plumbing, metrics snapshot rendering (headless render probe).
 
 ### 1.7 Settings additions (settings-manager.ts, additive block)
+
+Status: ✅ implemented as an additive `agents` settings block with getters.
 
 ```ts
 agents?: {
@@ -217,13 +333,19 @@ agents?: {
   roles?: Record<string, string[]>;
   modelOverrides?: Record<string, string>;
   disabled?: string[];          // agent types hidden from spawning
+  allowSharedWorkspaceWrites?: boolean;
+  allowOmitProjectContext?: boolean;
+  maxInlineDefinitions?: number; // 12
 }
 ```
 Getters only where consumed; no settings-selector UI in Phase 1 (Phase 2 polish).
 
 **Phase 1 exit**: spawn `explore` + `worker` from a real session against faux provider tests;
-manual smoke: `pi` → ask it to "use the agent tool to explore src/ in two parallel agents" →
-watch the below-prompt widget + log panel light up. Commit series (~6 commits), push.
+manual smoke: `pi` → ask it to "use the agent tool to explore the project/docs in two
+parallel agents" → watch the below-prompt widget + log panel light up; attempt two parallel
+shared-state mutations without isolation and verify the gate; verify permission-mode prompt
+text/tool exposure until the Phase 2 approval bridge exists. Commit series (~6 commits),
+push.
 
 ---
 
@@ -232,7 +354,7 @@ watch the below-prompt widget + log panel light up. Commit series (~6 commits), 
 ### 2.1 `core/agents/lifecycle.ts` (~200 LoC)
 - Completed non-isolated agents → status `idle`, session kept, TTL timer
   (`agents.idleTtlMs`, default 420_000). TTL → `parked`: `session.dispose()`, keep
-  sessionFile + registry entry (status parked). `revive(id)`: reopen via
+  sessionFile + registry entry (adds `parked` status). `revive(id)`: reopen via
   `createAgentSession` + `SessionManager.open(sessionFile)`, replay identity (name, type,
   depth), status back to idle.
 - Cold revival: on session start, scan agentDir sessions with `parentSession == current
@@ -264,9 +386,13 @@ watch the below-prompt widget + log panel light up. Commit series (~6 commits), 
   spawnAgent already returns a controllable iterator-equivalent (subscription), promotion =
   stop streaming into parent turn, register async completion injection.
 - Definitions file-watcher; changes re-announce via system-reminder (cache-stable).
+- Permission prompt polish in the Hub: entries needing approval show `blocked: approval`,
+  focus the parent prompt, and resume/fail the child when the approval resolves. This is the
+  full child approval bridge deferred from Phase 1.
 
 **Exit**: message a parked agent and watch it revive in the Hub; kill from Hub; promotion
-works; tests for TTL park/revive, delivery matrix (running/idle/parked), mailbox overflow.
+works; permission prompts are visible from the Hub; tests for TTL park/revive, delivery
+matrix (running/idle/parked), mailbox overflow.
 
 ---
 
@@ -279,9 +405,12 @@ works; tests for TTL park/revive, delivery matrix (running/idle/parked), mailbox
   (`{{stage.result}}` inline if < 2k chars else auto-`{{stage.handle}}` + note); verify
   ladder per stage: shell command (cwd-scoped, timeout) → on fail, feed stderr back and
   retry ≤ `max_iters` (default 2) → optional `judge: true` adversarial gate via a hidden
-  `judge` agent on the git diff (port delegate.ts drive()).
+  `judge` agent on produced artifacts or diffs (git diff for coding workflows; port
+  delegate.ts drive()).
 - Chain run registers ONE parent registry entry + child entries; failure policy per stage:
-  `on_fail: stop | continue | goto:<stage>`.
+  `on_fail: stop | continue | goto:<stage>`. Verify gates are domain-specific: shell commands
+  are the coding/default-local option, but stages can also use structured checks supplied by
+  tools, MCP servers, or package-provided validators.
 
 ### 3.2 `components/chain-card.ts` (~200 LoC)
 - Boxed stage flow: `[plan ✓] → [build ▶ 2m: npm run check] → [review ○]`, width-aware,
@@ -291,7 +420,8 @@ works; tests for TTL park/revive, delivery matrix (running/idle/parked), mailbox
 (`{ name, input }`), keeps `agent` schema stable. Category coord, default-active.
 
 **Exit**: `feature-flow` example chain in docs; suite test with faux provider driving a
-3-stage chain incl. verify-retry; TUI probe rendering.
+3-stage chain incl. verify-retry; TUI probe rendering; chain stages inherit the same
+permission/isolation gates as direct agent spawns.
 
 ---
 
@@ -306,10 +436,26 @@ works; tests for TTL park/revive, delivery matrix (running/idle/parked), mailbox
   that type's system prompt; write-tool allowlisted to its own dir (Claude Code).
 - Fork spawns (`agent` tool `fork: true`): parent-context inheritance with placeholder
   tool-results for cache-shared prefixes. Gate behind `agents.experimental.fork`.
-- Worktree isolation for `isolation: "worktree"` (create/cleanup-if-unchanged, notice
-  injection about stale paths); merge = patch apply (omp's default; skip branch mode).
-- Child-extension opt-in; permission rulesets exploration (opencode model) — separate
-  design note before building.
+- Worktree isolation polish: cleanup-if-unchanged, notice injection about stale paths, and
+  patch-apply merge helpers (omp's default; skip branch mode).
+- Child-extension opt-in; richer permission rulesets exploration (opencode model) —
+  separate design note before building.
+
+---
+
+## Phase 5 — User docs and publish polish
+
+- Create a concise user-facing `subagents.md` that covers: what subagents inherit, what they
+  do not inherit, foreground vs background, permission prompts, isolation, result handles,
+  `agent_pull`, and common agent-definition examples across coding, docs/research, data/ops,
+  and other tool-backed workflows.
+- Add the user doc to `docs.json`. Keep `subagent-design.md`, `subagent-plan.md`, and
+  research notes development-only unless explicitly publishing the design history.
+- Add a short migration note for extension authors currently using `delegate.ts` or the
+  example `subagent/` extension: which APIs are replaced by core agents, and which remain
+  extension-only.
+- Exit: docs nav includes the user-facing page, docs build/link check passes if available,
+  and the published page avoids leaking internal research claims as product guarantees.
 
 ---
 
@@ -331,12 +477,16 @@ works; tests for TTL park/revive, delivery matrix (running/idle/parked), mailbox
 | Spawn latency (session construction cost) | measure in Phase 0; inMemory sessions for sync one-shots; lazy tool creation |
 | Registry/UI churn on many agents | metrics coalescing (150ms, omp), log ring buffers already bounded |
 | Upstream drift on seamed files | seams are optional/undefined-safe; sync weekly per Fork Maintenance |
-| Cost runaway from recursive fan-out | depth 2 default, semaphore, `agents.maxCostUsd` tree budget enforced in spawnAgent |
+| Cost runaway from recursive fan-out | depth 2 default and semaphore today; `agents.maxCostUsd` tree-budget enforcement remains follow-up work |
 | Strict-mode providers reject schemas | phase-1 shape test; no top-level unions; optional-only extensions |
+| Child bypasses parent permission expectations | Phase 1 tool exposure constraints plus prompt instructions; Phase 2 approval bridge; fail-closed gates for unsafe parallel mutation |
+| Parallel agents overwrite shared state | Phase 1 isolation gate for shared-state mutation; shared-workspace writes require explicit opt-in |
+| Agent registry bloats prompt cache | Inline roster cap plus `agent_list`; file changes announced as system-reminder deltas, never schema mutation |
+| `omitProjectContext` skips repo rules | Bundled read-only default only; user/project use requires explicit setting |
 
 ## Sequencing summary
 
 Phase 0 (½ d) → Phase 1 (core value: parallel research/implement agents with clean context) →
 Phase 2 (the "alive" feel: revive, message, Hub) → Phase 3 (chains = your orchestration ask) →
-Phase 4 (teams/memory/fork = differentiation). Each phase is a PR-sized commit series on main,
-pushed after green checks.
+Phase 4 (teams/memory/fork = differentiation) → Phase 5 (publishable docs). Each phase is a
+PR-sized commit series on main, pushed after green checks.

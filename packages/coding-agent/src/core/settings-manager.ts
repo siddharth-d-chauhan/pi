@@ -59,6 +59,19 @@ export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
 }
 
+export interface AgentSettings {
+	maxDepth?: number;
+	maxConcurrency?: number;
+	maxCostUsd?: number;
+	persistSessions?: "always" | "background" | "never";
+	roles?: Record<string, string[]>;
+	modelOverrides?: Record<string, string>;
+	disabled?: string[];
+	allowSharedWorkspaceWrites?: boolean;
+	allowOmitProjectContext?: boolean;
+	maxInlineDefinitions?: number;
+}
+
 export type DefaultProjectTrust = "ask" | "always" | "never";
 
 export type TransportSetting = Transport;
@@ -121,6 +134,7 @@ export interface Settings {
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
+	agents?: AgentSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpProxy?: string; // Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
@@ -1243,6 +1257,18 @@ export class SettingsManager {
 
 	getWarnings(): WarningSettings {
 		return { ...(this.settings.warnings ?? {}) };
+	}
+
+	getAgentSettings(): AgentSettings {
+		return { ...(this.settings.agents ?? {}) };
+	}
+
+	getAgentRoles(): Record<string, string[]> {
+		return { ...(this.settings.agents?.roles ?? {}) };
+	}
+
+	getAgentModelOverrides(): Record<string, string> {
+		return { ...(this.settings.agents?.modelOverrides ?? {}) };
 	}
 
 	setWarnings(warnings: WarningSettings): void {

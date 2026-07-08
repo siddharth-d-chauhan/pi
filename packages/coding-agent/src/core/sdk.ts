@@ -4,6 +4,7 @@ import { clampThinkingLevel, type Message, type Model, streamSimple } from "@ear
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
+import type { AgentSpawnPolicy } from "./agents/index.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -18,6 +19,8 @@ import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { time } from "./timings.ts";
 import {
+	createAgentListTool,
+	createAgentPullTool,
 	createBashTool,
 	createCodingTools,
 	createEditTool,
@@ -53,14 +56,14 @@ export interface CreateAgentSessionOptions {
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
 	 *
 	 * - "all": start with no tools enabled
-	 * - "builtin": disable the default built-in tools (read, bash, edit, write)
+	 * - "builtin": disable the default built-in tools
 	 *   but keep extension/custom tools enabled
 	 */
 	noTools?: "all" | "builtin";
 	/**
 	 * Optional allowlist of tool names.
 	 *
-	 * When omitted, pi enables the default built-in tools (read, bash, edit, write)
+	 * When omitted, pi enables the default built-in tools
 	 * and leaves extension/custom tools enabled unless `noTools` changes that default.
 	 * When provided, only the listed tool names are enabled.
 	 */
@@ -78,6 +81,14 @@ export interface CreateAgentSessionOptions {
 
 	/** Settings manager. Default: SettingsManager.create(cwd, agentDir) */
 	settingsManager?: SettingsManager;
+	/** Custom system prompt override for the child session (replaces the default). */
+	customPrompt?: string;
+	/** Subagent lineage depth. Root sessions are depth 0. */
+	subagentDepth?: number;
+	/** Subagent type for child sessions. Undefined for root sessions. */
+	subagentType?: string;
+	/** Spawn policy inherited from the active subagent definition. */
+	subagentSpawns?: AgentSpawnPolicy;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
 }
@@ -112,6 +123,8 @@ export type { Tool } from "./tools/index.ts";
 export {
 	withFileMutationQueue,
 	// Tool factories (for custom cwd)
+	createAgentListTool,
+	createAgentPullTool,
 	createCodingTools,
 	createReadOnlyTools,
 	createReadTool,
@@ -242,7 +255,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write", "update_plan"];
+	const defaultActiveToolNames: ToolName[] = [
+		"read",
+		"grep",
+		"find",
+		"ls",
+		"bash",
+		"edit",
+		"write",
+		"update_plan",
+		"agent",
+		"agent_list",
+		"agent_pull",
+	];
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
@@ -381,12 +406,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
-
 	const session = new AgentSession({
 		agent,
 		sessionManager,
 		settingsManager,
 		cwd,
+		agentDir,
 		scopedModels: options.scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
@@ -396,6 +421,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		systemPromptOverride: options.customPrompt,
+		subagentDepth: options.subagentDepth,
+		subagentType: options.subagentType,
+		subagentSpawns: options.subagentSpawns,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

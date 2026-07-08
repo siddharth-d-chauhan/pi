@@ -39,6 +39,7 @@ import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { sleep } from "../utils/sleep.ts";
+import type { AgentSpawnPolicy } from "./agents/index.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
@@ -167,11 +168,13 @@ export interface AgentSessionConfig {
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	/** Resource loader for skills, prompts, themes, context files, system prompt */
 	resourceLoader: ResourceLoader;
+	/** Global agent config directory for subagent definition discovery. */
+	agentDir?: string;
 	/** SDK custom tools registered outside extensions */
 	customTools?: ToolDefinition[];
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
-	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
+	/** Initial active tool names. Default: read/grep/find/ls/bash/edit/write/update_plan/agent tools. */
 	initialActiveToolNames?: string[];
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
@@ -188,6 +191,14 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Optional override of the system prompt (used by subagent spawn). */
+	systemPromptOverride?: string;
+	/** Subagent lineage depth. Root sessions are depth 0. */
+	subagentDepth?: number;
+	/** Subagent type for child sessions. Undefined for root sessions. */
+	subagentType?: string;
+	/** Spawn policy inherited from the active subagent definition. */
+	subagentSpawns?: AgentSpawnPolicy;
 }
 
 export interface ExtensionBindings {
@@ -304,6 +315,7 @@ export class AgentSession {
 	private _turnIndex = 0;
 
 	private _resourceLoader: ResourceLoader;
+	private _agentDir: string;
 	private _customTools: ToolDefinition[];
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
@@ -334,6 +346,9 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 	private _systemPromptOverride?: string;
+	private _subagentDepth: number;
+	private _subagentType?: string;
+	private _subagentSpawns?: AgentSpawnPolicy;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -341,6 +356,7 @@ export class AgentSession {
 		this.settingsManager = config.settingsManager;
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
+		this._agentDir = config.agentDir ?? config.cwd;
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._modelRegistry = config.modelRegistry;
@@ -350,6 +366,10 @@ export class AgentSession {
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+		this._systemPromptOverride = config.systemPromptOverride;
+		this._subagentDepth = config.subagentDepth ?? 0;
+		this._subagentType = config.subagentType;
+		this._subagentSpawns = config.subagentSpawns;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -1455,6 +1475,23 @@ export class AgentSession {
 		return this._resourceLoader;
 	}
 
+	/** Agent config directory used for subagent definition discovery and artifacts. */
+	get agentDir(): string {
+		return this._agentDir;
+	}
+
+	get subagentDepth(): number {
+		return this._subagentDepth;
+	}
+
+	get subagentType(): string | undefined {
+		return this._subagentType;
+	}
+
+	get subagentSpawns(): AgentSpawnPolicy | undefined {
+		return this._subagentSpawns;
+	}
+
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 */
@@ -2456,6 +2493,8 @@ export class AgentSession {
 					]),
 				)
 			: createAllToolDefinitions(this._cwd, {
+					agentList: { agentDir: this._agentDir },
+					agentToolContext: { cwd: this._cwd, agentDir: this._agentDir, parentSession: this },
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 				});
@@ -2486,7 +2525,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", "update_plan"];
+			: ["read", "grep", "find", "ls", "bash", "edit", "write", "update_plan", "agent", "agent_list", "agent_pull"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

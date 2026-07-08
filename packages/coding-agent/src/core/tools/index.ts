@@ -1,4 +1,25 @@
 export {
+	type AgentTaskResult,
+	type AgentToolDetails,
+	type AgentToolInput,
+	type CreateAgentToolOptions,
+	createAgentTool,
+	createAgentToolDefinition,
+} from "./agent.ts";
+export {
+	type AgentListItem,
+	type AgentListToolDetails,
+	type AgentListToolInput,
+	createAgentListTool,
+	createAgentListToolDefinition,
+} from "./agent-list.ts";
+export {
+	type AgentPullToolDetails,
+	type AgentPullToolInput,
+	createAgentPullTool,
+	createAgentPullToolDefinition,
+} from "./agent-pull.ts";
+export {
 	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
@@ -79,7 +100,12 @@ export {
 } from "./write.ts";
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { getAgentDir } from "../../config.ts";
+import type { AgentSession } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { createAgentTool, createAgentToolDefinition, createUnavailableAgentToolDefinition } from "./agent.ts";
+import { createAgentListTool, createAgentListToolDefinition } from "./agent-list.ts";
+import { createAgentPullTool, createAgentPullToolDefinition } from "./agent-pull.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
@@ -87,11 +113,23 @@ import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createPlanTool, createPlanToolDefinition } from "./plan.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
+import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls" | "update_plan";
+export type ToolName =
+	| "read"
+	| "bash"
+	| "edit"
+	| "write"
+	| "grep"
+	| "find"
+	| "ls"
+	| "update_plan"
+	| "agent"
+	| "agent_list"
+	| "agent_pull";
 export const allToolNames: Set<ToolName> = new Set([
 	"read",
 	"bash",
@@ -101,9 +139,21 @@ export const allToolNames: Set<ToolName> = new Set([
 	"find",
 	"ls",
 	"update_plan",
+	"agent",
+	"agent_list",
+	"agent_pull",
 ]);
-
 export interface ToolsOptions {
+	agentList?: {
+		agentDir: string;
+		packageAgentDirs?: string[];
+	};
+	agentToolContext?: {
+		cwd: string;
+		agentDir?: string;
+		packageAgentDirs?: string[];
+		parentSession: AgentSession;
+	};
 	read?: ReadToolOptions;
 	bash?: BashToolOptions;
 	write?: WriteToolOptions;
@@ -131,6 +181,25 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			return createLsToolDefinition(cwd, options?.ls);
 		case "update_plan":
 			return createPlanToolDefinition(cwd);
+		case "agent": {
+			const ctx = options?.agentToolContext;
+			if (!ctx) return createUnavailableAgentToolDefinition();
+			return createAgentToolDefinition(ctx.cwd, ctx.agentDir ?? getAgentDir(), ctx.packageAgentDirs, {
+				settingsManager: ctx.parentSession.settingsManager,
+				modelRegistry: ctx.parentSession.modelRegistry,
+				parentSession: ctx.parentSession,
+			});
+		}
+		case "agent_list":
+			return createAgentListToolDefinition(
+				cwd,
+				options?.agentList?.agentDir ??
+					options?.agentToolContext?.agentDir ??
+					(options?.agentToolContext ? getAgentDir() : cwd),
+				options?.agentList?.packageAgentDirs ?? options?.agentToolContext?.packageAgentDirs,
+			);
+		case "agent_pull":
+			return createAgentPullToolDefinition(cwd, options?.agentList?.agentDir ?? cwd);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -154,6 +223,20 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createLsTool(cwd, options?.ls);
 		case "update_plan":
 			return createPlanTool(cwd);
+		case "agent": {
+			const ctx = options?.agentToolContext;
+			return ctx ? createAgentTool(ctx) : wrapToolDefinition(createUnavailableAgentToolDefinition());
+		}
+		case "agent_list":
+			return createAgentListTool(
+				cwd,
+				options?.agentList?.agentDir ??
+					options?.agentToolContext?.agentDir ??
+					(options?.agentToolContext ? getAgentDir() : cwd),
+				options?.agentList?.packageAgentDirs ?? options?.agentToolContext?.packageAgentDirs,
+			);
+		case "agent_pull":
+			return createAgentPullTool(cwd, options?.agentList?.agentDir ?? cwd);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -178,7 +261,23 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 }
 
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
+	const ctx = options?.agentToolContext;
 	return {
+		agent: ctx
+			? createAgentToolDefinition(ctx.cwd, ctx.agentDir ?? getAgentDir(), ctx.packageAgentDirs, {
+					settingsManager: ctx.parentSession.settingsManager,
+					modelRegistry: ctx.parentSession.modelRegistry,
+					parentSession: ctx.parentSession,
+				})
+			: createUnavailableAgentToolDefinition(),
+		agent_list: createAgentListToolDefinition(
+			cwd,
+			options?.agentList?.agentDir ??
+				options?.agentToolContext?.agentDir ??
+				(options?.agentToolContext ? getAgentDir() : cwd),
+			options?.agentList?.packageAgentDirs ?? options?.agentToolContext?.packageAgentDirs,
+		),
+		agent_pull: createAgentPullToolDefinition(cwd, options?.agentList?.agentDir ?? cwd),
 		read: createReadToolDefinition(cwd, options?.read),
 		bash: createBashToolDefinition(cwd, options?.bash),
 		edit: createEditToolDefinition(cwd, options?.edit),
@@ -209,7 +308,17 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 }
 
 export function createAllTools(cwd: string, options?: ToolsOptions): Record<ToolName, Tool> {
+	const ctx = options?.agentToolContext;
 	return {
+		agent: ctx ? createAgentTool(ctx) : wrapToolDefinition(createUnavailableAgentToolDefinition()),
+		agent_list: createAgentListTool(
+			cwd,
+			options?.agentList?.agentDir ??
+				options?.agentToolContext?.agentDir ??
+				(options?.agentToolContext ? getAgentDir() : cwd),
+			options?.agentList?.packageAgentDirs ?? options?.agentToolContext?.packageAgentDirs,
+		),
+		agent_pull: createAgentPullTool(cwd, options?.agentList?.agentDir ?? cwd),
 		read: createReadTool(cwd, options?.read),
 		bash: createBashTool(cwd, options?.bash),
 		edit: createEditTool(cwd, options?.edit),

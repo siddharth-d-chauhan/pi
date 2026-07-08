@@ -25,6 +25,29 @@ export {
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "./agent-session-services.ts";
+export {
+	type AgentArtifact,
+	type AgentDefinition,
+	type AgentDefinitionFrontmatter,
+	type AgentDefinitionRegistry,
+	type AgentDefinitionSource,
+	AgentHandleStore,
+	type AgentHandleStoreOptions,
+	type AgentIsolationMode,
+	type AgentPermissionMode,
+	type AgentReturn,
+	type AgentSpawnPolicy,
+	type AgentToolList,
+	canOmitProjectContext,
+	capReturn,
+	createAgentDefinitionDisplayPath,
+	formatAgentDefinitionsForPrompt,
+	inferAgentNameFromFile,
+	isReadOnlyToolSet,
+	type LoadAgentDefinitionsOptions,
+	loadAgentDefinitions,
+	pullHandle,
+} from "./agents/index.ts";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 export type { CompactionResult } from "./compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";

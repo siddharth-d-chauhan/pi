@@ -8,11 +8,9 @@
  * Esc or `q`; the `done` callback handed to the component's owner closes
  * the overlay and returns focus to the editor.
  *
- * Today the registry is empty in practice — no callers register processes
- * yet. The panel still renders correctly: an empty-state line and the
- * standard Esc/q dismiss. When future subagent/parallel-tool work lands
- * and calls `getBackgroundProcessRegistry().register(...)`, the panel
- * lights up automatically via its subscription.
+ * The panel renders registered background work and still handles the empty
+ * state correctly. Subagent and future parallel-tool work light it up
+ * automatically by calling `getBackgroundProcessRegistry().register(...)`.
  */
 
 import type { Component, Terminal } from "@earendil-works/pi-tui";
@@ -25,10 +23,11 @@ import {
 
 const EMPTY_STATE = "No background processes registered.";
 const HEADER = "Background processes (Esc/q to close)";
-const FOOTER_HINT = "↑/↓ select · Enter to view log · Esc/q to close";
+const FOOTER_HINT = "↑/↓ select · x kill · Esc/q to close";
 
 const STATUS_GLYPH: Record<BackgroundProcessSnapshot["status"], string> = {
 	running: "●",
+	idle: "○",
 	completed: "✓",
 	failed: "✗",
 	cancelled: "⊘",
@@ -85,6 +84,12 @@ export class BackgroundLogPanel implements Component {
 			this.selectedIndex = (this.selectedIndex + 1) % this.snapshots.length;
 			return;
 		}
+		if (data === "x" || data === "X") {
+			const selected = this.snapshots[this.selectedIndex];
+			if (selected?.canKill) {
+				getBackgroundProcessRegistry().kill(selected.id);
+			}
+		}
 	}
 
 	render(width: number): string[] {
@@ -112,6 +117,10 @@ export class BackgroundLogPanel implements Component {
 				lines.push(this.#pad(`— ${selected.label} (${selected.kind}, ${selected.status}) —`, width));
 				if (selected.summary) {
 					lines.push(this.#pad(truncateToWidth(selected.summary, innerWidth), width));
+				}
+				const metrics = formatMetrics(selected);
+				if (metrics) {
+					lines.push(this.#pad(truncateToWidth(metrics, innerWidth), width));
 				}
 				const tail = selected.logTail;
 				if (tail.length === 0) {
@@ -169,4 +178,16 @@ function visibleWidth(s: string): number {
 		n++;
 	}
 	return n;
+}
+
+function formatMetrics(snapshot: BackgroundProcessSnapshot): string | undefined {
+	const metrics = snapshot.metrics;
+	if (!metrics) return undefined;
+	const parts: string[] = [];
+	if (metrics.tokens !== undefined) parts.push(`${metrics.tokens} tok`);
+	if (metrics.costUsd !== undefined) parts.push(`$${metrics.costUsd.toFixed(4)}`);
+	if (metrics.requests !== undefined) parts.push(`${metrics.requests} req`);
+	if (metrics.contextPct !== undefined) parts.push(`${metrics.contextPct.toFixed(1)}% ctx`);
+	if (snapshot.resultHandle) parts.push(snapshot.resultHandle);
+	return parts.length > 0 ? parts.join(" · ") : undefined;
 }

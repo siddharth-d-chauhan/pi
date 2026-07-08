@@ -3,7 +3,7 @@
  *
  * A single shared instance lives for the lifetime of the agent session. The
  * editor's down-arrow handler consults `list()` and, when non-empty, opens
- * a log panel. Future subagent / parallel-tool implementations register
+ * a log panel. Subagent and parallel-tool implementations register
  * themselves here so the user has one place to peek at in-flight work.
  *
  * Design constraints:
@@ -16,12 +16,19 @@
  *    render. The panel component (in `modes/interactive/components/`) is
  *    the renderer.
  *
- * Today: no callers register. The registry is wired and ready; future
- * subagent/parallel-tool/MCP work plugs in by calling `register()`.
+ * Subagents and future parallel-tool/MCP work plug in by calling
+ * `register()`.
  */
 
 export type BackgroundProcessKind = "subagent" | "delegation" | "mcp" | "shell-suspend" | "other";
-export type BackgroundProcessStatus = "running" | "completed" | "failed" | "cancelled";
+export type BackgroundProcessStatus = "running" | "idle" | "completed" | "failed" | "cancelled";
+
+export interface BackgroundProcessMetrics {
+	tokens?: number;
+	costUsd?: number;
+	requests?: number;
+	contextPct?: number;
+}
 
 export interface BackgroundProcess {
 	id: string;
@@ -32,6 +39,13 @@ export interface BackgroundProcess {
 	status: BackgroundProcessStatus;
 	startedAt: number;
 	endedAt?: number;
+	metrics?: BackgroundProcessMetrics;
+	agentType?: string;
+	sessionFile?: string;
+	resultHandle?: string;
+	parentId?: string;
+	onKill?: () => void;
+	onSteer?: (text: string) => void;
 }
 
 export interface BackgroundProcessEntry extends BackgroundProcess {
@@ -47,6 +61,13 @@ export interface BackgroundProcessSnapshot {
 	status: BackgroundProcessStatus;
 	startedAt: number;
 	endedAt?: number;
+	metrics?: BackgroundProcessMetrics;
+	agentType?: string;
+	sessionFile?: string;
+	resultHandle?: string;
+	parentId?: string;
+	canKill: boolean;
+	canSteer: boolean;
 	/** Current size of the log buffer. */
 	logSize: number;
 	/** Tail of the log (most recent N lines), for preview. */
@@ -57,6 +78,7 @@ export type BackgroundProcessEvent =
 	| { type: "register"; entry: BackgroundProcessEntry }
 	| { type: "unregister"; id: string }
 	| { type: "appendLog"; id: string; lines: string[] }
+	| { type: "update"; id: string }
 	| { type: "statusChange"; id: string; status: BackgroundProcessStatus };
 
 export type BackgroundProcessListener = (event: BackgroundProcessEvent) => void;
@@ -105,11 +127,45 @@ class BackgroundProcessRegistry {
 			summary: init.summary,
 			status: init.status ?? "running",
 			startedAt: Date.now(),
+			metrics: init.metrics,
+			agentType: init.agentType,
+			sessionFile: init.sessionFile,
+			resultHandle: init.resultHandle,
+			parentId: init.parentId,
+			onKill: init.onKill,
+			onSteer: init.onSteer,
 			log: [],
 		};
 		this.#entries.set(id, entry);
 		this.#emit({ type: "register", entry });
 		return id;
+	}
+
+	update(
+		id: string,
+		patch: Partial<Pick<BackgroundProcess, "metrics" | "sessionFile" | "resultHandle" | "summary">>,
+	): void {
+		const entry = this.#entries.get(id);
+		if (!entry) return;
+		if ("metrics" in patch) entry.metrics = patch.metrics;
+		if ("sessionFile" in patch) entry.sessionFile = patch.sessionFile;
+		if ("resultHandle" in patch) entry.resultHandle = patch.resultHandle;
+		if ("summary" in patch) entry.summary = patch.summary;
+		this.#emit({ type: "update", id });
+	}
+
+	kill(id: string): boolean {
+		const entry = this.#entries.get(id);
+		if (!entry?.onKill) return false;
+		entry.onKill();
+		return true;
+	}
+
+	steer(id: string, text: string): boolean {
+		const entry = this.#entries.get(id);
+		if (!entry?.onSteer) return false;
+		entry.onSteer(text);
+		return true;
 	}
 
 	/** Remove a process. Idempotent — returns true if it was present. */
@@ -141,7 +197,7 @@ class BackgroundProcessRegistry {
 		const entry = this.#entries.get(id);
 		if (!entry || entry.status === status) return;
 		entry.status = status;
-		if (status !== "running") entry.endedAt = Date.now();
+		if (status !== "running" && status !== "idle") entry.endedAt = Date.now();
 		this.#emit({ type: "statusChange", id, status });
 	}
 
@@ -165,6 +221,13 @@ class BackgroundProcessRegistry {
 				status: e.status,
 				startedAt: e.startedAt,
 				endedAt: e.endedAt,
+				metrics: e.metrics,
+				agentType: e.agentType,
+				sessionFile: e.sessionFile,
+				resultHandle: e.resultHandle,
+				parentId: e.parentId,
+				canKill: e.onKill !== undefined,
+				canSteer: e.onSteer !== undefined,
 				logSize: e.log.length,
 				logTail: e.log.slice(-5),
 			});

@@ -94,7 +94,7 @@ class BackgroundProcessRegistry {
 	 * Throws if `init.id` collides.
 	 */
 	register(
-		init: Omit<BackgroundProcess, "startedAt" | "status"> & { id?: string; status?: BackgroundProcessStatus },
+		init: Omit<BackgroundProcess, "id" | "startedAt" | "status"> & { id?: string; status?: BackgroundProcessStatus },
 	): string {
 		const id = init.id ?? this.nextId();
 		if (this.#entries.has(id)) throw new Error(`BackgroundProcessRegistry: duplicate id "${id}"`);
@@ -173,6 +173,22 @@ class BackgroundProcessRegistry {
 		return out;
 	}
 
+	/**
+	 * Register a task and return a self-contained handle for it — the shape
+	 * handed to extensions via `ExtensionAPI.registerBackgroundTask`. The
+	 * handle closes over this instance, so it works regardless of the
+	 * caller's module graph.
+	 */
+	createTaskHandle(init: { kind?: BackgroundProcessKind; label: string; summary?: string }): BackgroundTaskHandle {
+		const id = this.register({ kind: init.kind ?? "other", label: init.label, summary: init.summary });
+		return {
+			id,
+			log: (lines) => this.appendLog(id, lines),
+			setStatus: (status) => this.setStatus(id, status),
+			unregister: () => this.unregister(id),
+		};
+	}
+
 	/** Subscribe to all registry events. Returns an unsubscribe fn. */
 	subscribe(listener: BackgroundProcessListener): () => void {
 		this.#listeners.add(listener);
@@ -190,6 +206,35 @@ class BackgroundProcessRegistry {
 			}
 		}
 	}
+}
+
+/** Human-compact age of a task: "312ms", "42s", "5m", "2h13m". */
+export function formatTaskAge(snapshot: Pick<BackgroundProcessSnapshot, "startedAt" | "endedAt">): string {
+	const end = snapshot.endedAt ?? Date.now();
+	const ms = Math.max(0, end - snapshot.startedAt);
+	if (ms < 1000) return `${ms}ms`;
+	const seconds = Math.round(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.round(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+}
+
+/**
+ * Handle returned by `ExtensionAPI.registerBackgroundTask` (created via
+ * `BackgroundProcessRegistry.createTaskHandle`). Extensions must use the API
+ * rather than importing this module: each extension loads in its own jiti
+ * module graph, so an import would create a second, empty registry. Callers
+ * own their task's lifecycle — mark it completed/failed (or unregister it)
+ * when the work ends, or it stays listed as running.
+ */
+export interface BackgroundTaskHandle {
+	readonly id: string;
+	/** Append log lines shown in the status widget preview and log panel. */
+	log(lines: string | string[]): void;
+	setStatus(status: BackgroundProcessStatus): void;
+	/** Remove the task from the UI entirely. */
+	unregister(): void;
 }
 
 /**

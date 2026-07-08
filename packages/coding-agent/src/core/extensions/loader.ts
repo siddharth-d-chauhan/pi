@@ -24,6 +24,11 @@ import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
 // avoiding a circular dependency. Extensions can import from @earendil-works/pi-coding-agent.
 import * as _bundledPiCodingAgent from "../../index.ts";
 import { resolvePath } from "../../utils/paths.ts";
+import {
+	type BackgroundProcessKind,
+	type BackgroundTaskHandle,
+	getBackgroundProcessRegistry,
+} from "../background-process-registry.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
@@ -186,8 +191,18 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		setThinkingLevel: notInitialized,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
+		backgroundTaskHandles: [],
 		assertActive,
 		invalidate: (message) => {
+			// Cancel background tasks the invalidated extensions never finished —
+			// their handles die with the old module graph, so nobody else can.
+			const registry = getBackgroundProcessRegistry();
+			for (const handle of runtime.backgroundTaskHandles) {
+				if (registry.get(handle.id)?.status === "running") {
+					handle.setStatus("cancelled");
+				}
+			}
+			runtime.backgroundTaskHandles.length = 0;
 			state.staleMessage ??=
 				message ??
 				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
@@ -232,6 +247,20 @@ function createExtensionAPI(
 				sourceInfo: extension.sourceInfo,
 			});
 			runtime.refreshTools();
+		},
+
+		registerBackgroundTask(init: {
+			kind?: BackgroundProcessKind;
+			label: string;
+			summary?: string;
+		}): BackgroundTaskHandle {
+			runtime.assertActive();
+			const handle = getBackgroundProcessRegistry().createTaskHandle(init);
+			// Tracked so runtime invalidation (reload, session replacement) can
+			// cancel tasks the extension abandoned — otherwise a task whose
+			// extension never reached setStatus stays "running" forever.
+			runtime.backgroundTaskHandles.push(handle);
+			return handle;
 		},
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {

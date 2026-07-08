@@ -42,6 +42,7 @@ import type {
 } from "@earendil-works/pi-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { BackgroundProcessKind, BackgroundTaskHandle } from "../background-process-registry.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
@@ -1213,6 +1214,25 @@ export interface ExtensionAPI {
 	): void;
 
 	// =========================================================================
+	// Background Tasks
+	// =========================================================================
+
+	/**
+	 * Register a long-running background task (delegated agent, watched
+	 * subprocess, MCP job) so it surfaces in the built-in below-editor
+	 * status widget and the down-arrow background log panel. The returned
+	 * handle streams log lines and reports status. The caller owns the
+	 * lifecycle: call `setStatus("completed" | "failed" | "cancelled")`
+	 * when the work ends (or `unregister()` to drop it from the UI),
+	 * otherwise it stays listed as running.
+	 */
+	registerBackgroundTask(init: {
+		kind?: BackgroundProcessKind;
+		label: string;
+		summary?: string;
+	}): BackgroundTaskHandle;
+
+	// =========================================================================
 	// Command, Shortcut, Flag Registration
 	// =========================================================================
 
@@ -1540,6 +1560,8 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed when runner binds */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
+	/** Tasks registered via registerBackgroundTask; invalidate() cancels any still running. */
+	backgroundTaskHandles: BackgroundTaskHandle[];
 	/** Throws when this extension instance is stale after runtime replacement. */
 	assertActive: () => void;
 	/** Marks this extension instance as stale after runtime replacement or reload. */

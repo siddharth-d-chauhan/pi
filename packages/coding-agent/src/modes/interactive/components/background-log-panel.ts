@@ -19,6 +19,7 @@ import type { Component, Terminal } from "@earendil-works/pi-tui";
 import { matchesKey } from "@earendil-works/pi-tui";
 import {
 	type BackgroundProcessSnapshot,
+	formatTaskAge,
 	getBackgroundProcessRegistry,
 } from "../../../core/background-process-registry.ts";
 
@@ -135,11 +136,7 @@ export class BackgroundLogPanel implements Component {
 	}
 
 	#formatAge(snap: BackgroundProcessSnapshot): string {
-		const end = snap.endedAt ?? Date.now();
-		const ms = Math.max(0, end - snap.startedAt);
-		if (ms < 1000) return `${ms}ms`;
-		if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
-		return `${Math.round(ms / 60_000)}m`;
+		return formatTaskAge(snap);
 	}
 }
 

@@ -9,6 +9,18 @@
 - When the user asks a question, answer it first before making edits or running implementation commands.
 - When responding to user feedback or an analysis, explicitly say whether you agree or disagree before saying what you changed.
 
+## Fork Maintenance
+
+This repo is a fork of `earendil-works/pi` (remote: `upstream`). Every change must stay mergeable with upstream pulls.
+
+- Prefer additive changes: new files, new providers, new components, and extension code (e.g. `packages/coding-agent/examples/extensions/pi-harness/`) over editing upstream files.
+- When an upstream file must be edited, keep the edit minimal and localized: add a small hook point that calls into a new file rather than restructuring existing code.
+- Never reformat, reorder, or rename anything in upstream files beyond what the change strictly requires.
+- Don't delete upstream files; disable via config instead where possible.
+- On merge conflicts in `*.generated.ts` files, take upstream's version and regenerate (per the generated-files rule below); never hand-merge them.
+- Keep local work committed in small, single-topic commits so upstream merges and conflict resolution stay tractable. Sync with `git fetch upstream && git merge upstream/main`.
+- Fixes that are not fork-specific should be candidates for upstream PRs to shrink the fork delta.
+
 ## Code Quality
 
 - Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.

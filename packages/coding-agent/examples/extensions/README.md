@@ -69,6 +69,9 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | `titlebar-spinner.ts` | Braille spinner animation in terminal title while the agent is working |
 | `summarize.ts` | Summarize conversation with GPT-5.2 and show in transient UI |
 | `custom-footer.ts` | Custom footer with git branch and token stats via `ctx.ui.setFooter()` |
+| `agent-footer.ts` | Footer focused on subagent activity: running agents, done/failed rollup, agent tokens/cost (`/agentfooter`) |
+| `agent-hub.ts` | `/agents` overlay: live subagent roster with kill (`x`) and steer (`s`) via the background registry |
+| `agent-notify.ts` | Desktop + in-TUI notification when a background subagent completes or fails |
 | `custom-header.ts` | Custom header via `ctx.ui.setHeader()` |
 | `overlay-test.ts` | Test overlay compositing with inline text inputs and edge cases |
 | `overlay-qa-tests.ts` | Comprehensive overlay QA tests: anchors, margins, stacking, overflow, animation |

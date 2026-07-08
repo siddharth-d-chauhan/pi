@@ -1,11 +1,10 @@
-import type { Terminal, TUI } from "@earendil-works/pi-tui";
+import type { Terminal } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	getBackgroundProcessRegistry,
 	resetForTests as resetRegistry,
 } from "../../../src/core/background-process-registry.ts";
 import { BackgroundLogPanel } from "../../../src/modes/interactive/components/background-log-panel.ts";
-import { BackgroundStatusWidget } from "../../../src/modes/interactive/components/background-status.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 
@@ -16,28 +15,6 @@ describe("background TUI surfaces", () => {
 
 	afterEach(() => {
 		resetRegistry();
-	});
-
-	it("renders running subagents below the editor with a sanitized log preview", () => {
-		const requestRender = vi.fn();
-		const widget = new BackgroundStatusWidget({ requestRender } as unknown as TUI);
-		const registry = getBackgroundProcessRegistry();
-		const id = registry.register({
-			kind: "subagent",
-			label: "explore docs",
-			summary: "scan docs",
-			agentType: "explore",
-		});
-		registry.appendLog(id, "\u001b[31mreading docs\u001b[0m\r\n");
-
-		const rendered = stripAnsi(widget.render(120).join("\n"));
-		expect(rendered).toContain("agent explore docs");
-		expect(rendered).toContain("reading docs");
-		expect(rendered).toContain("background task");
-		expect(rendered).toContain("empty prompt to inspect");
-		expect(requestRender).toHaveBeenCalled();
-
-		widget.dispose();
 	});
 
 	it("renders log-panel metrics and lets the selected process be killed", () => {

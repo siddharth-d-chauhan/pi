@@ -40,7 +40,6 @@ const TOOL_CATEGORY: Record<string, ToolCategory> = {
 	agent: "coord",
 	agent_list: "coord",
 	agent_pull: "coord",
-	update_plan: "coord",
 	task: "coord",
 	irc: "coord",
 	todo: "coord",

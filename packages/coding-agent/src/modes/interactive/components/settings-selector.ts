@@ -77,7 +77,6 @@ export interface SettingsConfig {
 	defaultProjectTrust: DefaultProjectTrust;
 	clearOnShrink: boolean;
 	showTerminalProgress: boolean;
-	mouse: boolean;
 	warnings: WarningSettings;
 }
 
@@ -108,7 +107,6 @@ export interface SettingsCallbacks {
 	onDefaultProjectTrustChange: (defaultProjectTrust: DefaultProjectTrust) => void;
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onShowTerminalProgressChange: (enabled: boolean) => void;
-	onMouseChange: (enabled: boolean) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onCancel: () => void;
 }
@@ -720,16 +718,6 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
-		// Mouse toggle (insert after terminal-progress)
-		const terminalProgressIndex = items.findIndex((item) => item.id === "terminal-progress");
-		items.splice(terminalProgressIndex + 1, 0, {
-			id: "mouse",
-			label: "Mouse",
-			description: "Mouse wheel scrolls the chat (hold Shift for native text selection)",
-			currentValue: config.mouse ? "true" : "false",
-			values: ["true", "false"],
-		});
-
 		// Add borders
 		this.addChild(new DynamicBorder());
 
@@ -817,9 +805,6 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "terminal-progress":
 						callbacks.onShowTerminalProgressChange(newValue === "true");
-						break;
-					case "mouse":
-						callbacks.onMouseChange(newValue === "true");
 						break;
 					case "theme":
 						callbacks.onThemeChange(newValue);

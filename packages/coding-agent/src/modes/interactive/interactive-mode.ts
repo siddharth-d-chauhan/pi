@@ -88,7 +88,6 @@ import { type SessionEntry, SessionManager, sessionEntryToContextMessages } from
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
-import { restorePlanFromMessages } from "../../core/tools/plan.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
@@ -104,7 +103,6 @@ import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BackgroundLogPanel } from "./components/background-log-panel.ts";
-import { BackgroundStatusWidget } from "./components/background-status.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
@@ -129,7 +127,6 @@ import {
 	formatAuthSelectorProviderType,
 	OAuthSelectorComponent,
 } from "./components/oauth-selector.ts";
-import { PlanWidget } from "./components/plan-widget.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
@@ -444,10 +441,6 @@ export class InteractiveMode {
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
-	// Below-editor summary of in-flight background work (agents, subprocesses)
-	private backgroundStatusWidget!: BackgroundStatusWidget;
-	// Above-editor task checklist driven by the update_plan tool
-	private planWidget!: PlanWidget;
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -756,11 +749,7 @@ export class InteractiveMode {
 		this.ui.addChild(this.statusContainer);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
-		this.planWidget = new PlanWidget({ onChange: () => this.ui.requestRender() });
-		this.ui.addChild(this.planWidget);
 		this.ui.addChild(this.editorContainer);
-		this.backgroundStatusWidget = new BackgroundStatusWidget(this.ui);
-		this.ui.addChild(this.backgroundStatusWidget);
 		this.ui.addChild(this.widgetContainerBelow);
 		this.ui.addChild(this.footer);
 		this.ui.setFocus(this.editor);
@@ -770,21 +759,11 @@ export class InteractiveMode {
 
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
-		// Opt-in SGR mouse tracking: wheel scrolls the chat scrollback
-		// (terminal.mouse setting; hold Shift for native text selection).
-		this.ui.setMouseEnabled(this.settingsManager.getTerminalMouse());
-		this.ui.onMouseEvent((event) => {
-			if (event.kind === "wheel-up") return this.queueWheelScroll(-1);
-			if (event.kind === "wheel-down") return this.queueWheelScroll(1);
-			return false;
-		});
 		this.isInitialized = true;
 
 		// Re-apply the user's tool selection from the most recent
 		// tools-config entry on the branch (no-op if none).
 		this.restoreToolsConfig();
-		// Restore the plan checklist from the branch (survives resume).
-		restorePlanFromMessages(this.session.messages);
 
 		await this.themeController.applyFromSettings();
 		// Add header with keybindings from config (unless silenced)
@@ -2346,32 +2325,6 @@ export class InteractiveMode {
 		this.ui.terminal.write("\x1b[1S");
 		return true;
 	}
-
-	/**
-	 * Wheel-driven scrollback (mouse tracking on). Wheel events arrive in
-	 * bursts (inertial trackpads send hundreds per second); writing one
-	 * scroll escape per tick desynchronizes the differential renderer and
-	 * blanks/tears the screen. Ticks are accumulated and flushed as ONE
-	 * combined scroll write per window.
-	 */
-	private wheelScrollDelta = 0;
-	private wheelScrollTimer: ReturnType<typeof setTimeout> | undefined;
-
-	private queueWheelScroll(direction: 1 | -1): boolean {
-		this.wheelScrollDelta += direction;
-		if (this.wheelScrollTimer === undefined) {
-			this.wheelScrollTimer = setTimeout(() => {
-				this.wheelScrollTimer = undefined;
-				const delta = this.wheelScrollDelta;
-				this.wheelScrollDelta = 0;
-				if (delta === 0) return;
-				const lines = Math.min(Math.abs(delta), 20);
-				this.ui.terminal.write(delta < 0 ? `\x1b[${lines}S` : `\x1b[${lines}T`);
-				this.ui.requestRender();
-			}, 80);
-		}
-		return true;
-	}
 	/**
 	 * Open the reverse-i-search overlay. Triggered by Ctrl-R from the
 	 * editor (the editor's `onHistorySearch` callback routes here). The
@@ -3110,7 +3063,6 @@ export class InteractiveMode {
 			case "session_tree":
 				// Branch navigation: re-apply tool selection and plan from the new leaf.
 				this.restoreToolsConfig();
-				restorePlanFromMessages(this.session.messages);
 				break;
 			case "thinking_level_changed":
 				this.footer.invalidate();
@@ -4557,7 +4509,6 @@ export class InteractiveMode {
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
-					mouse: this.settingsManager.getTerminalMouse(),
 					warnings: this.settingsManager.getWarnings(),
 				},
 				{
@@ -4689,10 +4640,6 @@ export class InteractiveMode {
 					},
 					onShowTerminalProgressChange: (enabled) => {
 						this.settingsManager.setShowTerminalProgress(enabled);
-					},
-					onMouseChange: (enabled) => {
-						this.settingsManager.setTerminalMouse(enabled);
-						this.ui.setMouseEnabled(enabled);
 					},
 					onWarningsChange: (warnings) => {
 						this.settingsManager.setWarnings(warnings);
@@ -5181,7 +5128,6 @@ export class InteractiveMode {
 			if (result.cancelled) {
 				return result;
 			}
-			restorePlanFromMessages(this.session.messages);
 			this.showStatus("Resumed session");
 			return result;
 		} catch (error: unknown) {
@@ -5199,7 +5145,6 @@ export class InteractiveMode {
 				if (result.cancelled) {
 					return result;
 				}
-				restorePlanFromMessages(this.session.messages);
 				this.showStatus("Resumed session in current cwd");
 				return result;
 			}
@@ -6217,7 +6162,6 @@ export class InteractiveMode {
 			if (result.cancelled) {
 				return;
 			}
-			restorePlanFromMessages(this.session.messages);
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
 			this.ui.requestRender();
@@ -6389,8 +6333,6 @@ export class InteractiveMode {
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
-		this.planWidget?.dispose();
-		this.backgroundStatusWidget?.dispose();
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}

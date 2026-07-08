@@ -174,7 +174,7 @@ export interface AgentSessionConfig {
 	customTools?: ToolDefinition[];
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
-	/** Initial active tool names. Default: read/grep/find/ls/bash/edit/write/update_plan/agent tools. */
+	/** Initial active tool names. Default: read/grep/find/ls/bash/edit/write/agent tools. */
 	initialActiveToolNames?: string[];
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
@@ -2525,7 +2525,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "grep", "find", "ls", "bash", "edit", "write", "update_plan", "agent", "agent_list", "agent_pull"];
+			: ["read", "grep", "find", "ls", "bash", "edit", "write", "agent", "agent_list", "agent_pull"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

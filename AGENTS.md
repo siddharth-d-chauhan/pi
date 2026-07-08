@@ -24,7 +24,7 @@ This repo is a fork of `earendil-works/pi` (remote: `upstream`). Every change mu
 ## Extensibility Principles
 
 Escalation ladder for new capability — use the lowest rung that works:
-1. A pi extension (`packages/coding-agent/examples/extensions/pi-harness/`) via the ExtensionAPI (`registerTool`/`registerCommand`/`registerShortcut`/`on`, `ctx.ui`).
+1. A pi extension via the ExtensionAPI (`registerTool`/`registerCommand`/`registerShortcut`/`on`, `ctx.ui.setWidget`/`setFooter`/`custom`). Production extensions we actually run live in `/extensions` (repo root); teaching examples in `packages/coding-agent/examples/extensions/`. Import core read-APIs/singletons from `@earendil-works/pi-coding-agent` (shared module graph). Code already written into core should migrate here whenever the API can carry it.
 2. A new module/component in its own file, wired in with a one-line registration.
 3. A new generic seam in an upstream file (hook, optional field, action id) that the feature plugs into.
 4. Editing upstream logic in place — last resort; keep it hook-sized.

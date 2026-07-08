@@ -64,8 +64,6 @@ export {
 } from "./keys.ts";
 // Loop watchdog — detects event-loop blocks during render
 export { LoopWatchdog, type LoopWatchdogOptions } from "./loop-watchdog.ts";
-// Mouse input (SGR mouse protocol)
-export { isMouseReportSequence, isSgrMouseSequence, type MouseEvent, parseSgrMouse } from "./mouse.ts";
 // Input buffering for batch splitting
 export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "./stdin-buffer.ts";
 // Streaming line-commit buffer

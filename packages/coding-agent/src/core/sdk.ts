@@ -263,7 +263,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		"bash",
 		"edit",
 		"write",
-		"update_plan",
 		"agent",
 		"agent_list",
 		"agent_pull",

@@ -64,16 +64,6 @@ export {
 	type LsToolOptions,
 } from "./ls.ts";
 export {
-	createPlanTool,
-	createPlanToolDefinition,
-	getPlanState,
-	onPlanChange,
-	type PlanTask,
-	type PlanTaskStatus,
-	type PlanToolDetails,
-	type PlanToolInput,
-} from "./plan.ts";
-export {
 	createReadTool,
 	createReadToolDefinition,
 	type ReadOperations,
@@ -111,7 +101,6 @@ import { createEditTool, createEditToolDefinition, type EditToolOptions } from "
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
 import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
-import { createPlanTool, createPlanToolDefinition } from "./plan.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
@@ -126,7 +115,6 @@ export type ToolName =
 	| "grep"
 	| "find"
 	| "ls"
-	| "update_plan"
 	| "agent"
 	| "agent_list"
 	| "agent_pull";
@@ -138,7 +126,6 @@ export const allToolNames: Set<ToolName> = new Set([
 	"grep",
 	"find",
 	"ls",
-	"update_plan",
 	"agent",
 	"agent_list",
 	"agent_pull",
@@ -179,8 +166,6 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			return createFindToolDefinition(cwd, options?.find);
 		case "ls":
 			return createLsToolDefinition(cwd, options?.ls);
-		case "update_plan":
-			return createPlanToolDefinition(cwd);
 		case "agent": {
 			const ctx = options?.agentToolContext;
 			if (!ctx) return createUnavailableAgentToolDefinition();
@@ -221,8 +206,6 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createFindTool(cwd, options?.find);
 		case "ls":
 			return createLsTool(cwd, options?.ls);
-		case "update_plan":
-			return createPlanTool(cwd);
 		case "agent": {
 			const ctx = options?.agentToolContext;
 			return ctx ? createAgentTool(ctx) : wrapToolDefinition(createUnavailableAgentToolDefinition());
@@ -285,7 +268,6 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		grep: createGrepToolDefinition(cwd, options?.grep),
 		find: createFindToolDefinition(cwd, options?.find),
 		ls: createLsToolDefinition(cwd, options?.ls),
-		update_plan: createPlanToolDefinition(cwd),
 	};
 }
 
@@ -326,6 +308,5 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		grep: createGrepTool(cwd, options?.grep),
 		find: createFindTool(cwd, options?.find),
 		ls: createLsTool(cwd, options?.ls),
-		update_plan: createPlanTool(cwd),
 	};
 }

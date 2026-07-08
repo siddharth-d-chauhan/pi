@@ -91,9 +91,6 @@ export interface Terminal {
 
 	// Progress indicator (OSC 9;4)
 	setProgress(active: boolean): void;
-
-	// Mouse tracking (SGR protocol). Optional so custom Terminal implementations stay valid.
-	setMouseTracking?(enabled: boolean): void;
 }
 
 /**
@@ -111,7 +108,6 @@ export class ProcessTerminal implements Terminal {
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
-	private mouseTrackingEnabled = false;
 	private writeLogPath = (() => {
 		const env = process.env.PI_TUI_WRITE_LOG || "";
 		if (!env) return "";
@@ -381,9 +377,6 @@ export class ProcessTerminal implements Terminal {
 			setKittyProtocolActive(false);
 		}
 		this.disableModifyOtherKeys();
-		// Disable mouse tracking so late mouse motion cannot generate new
-		// escape sequences while stdin is being drained.
-		this.setMouseTracking(false);
 
 		const previousHandler = this.inputHandler;
 		this.inputHandler = undefined;
@@ -429,9 +422,6 @@ export class ProcessTerminal implements Terminal {
 			setKittyProtocolActive(false);
 		}
 		this.disableModifyOtherKeys();
-
-		// Disable mouse tracking if not already done by drainInput()
-		this.setMouseTracking(false);
 
 		// Clean up StdinBuffer
 		if (this.stdinBuffer) {
@@ -514,13 +504,6 @@ export class ProcessTerminal implements Terminal {
 	setTitle(title: string): void {
 		// OSC 0;title BEL - set terminal window title
 		process.stdout.write(`\x1b]0;${title}\x07`);
-	}
-
-	setMouseTracking(enabled: boolean): void {
-		if (this.mouseTrackingEnabled === enabled) return;
-		this.mouseTrackingEnabled = enabled;
-		// DECSET 1002 (button-event tracking) + 1006 (SGR extended coordinates)
-		process.stdout.write(enabled ? "\x1b[?1002h\x1b[?1006h" : "\x1b[?1002l\x1b[?1006l");
 	}
 
 	setProgress(active: boolean): void {

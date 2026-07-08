@@ -7,6 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isKeyRelease, matchesKey } from "./keys.ts";
 import { LoopWatchdog } from "./loop-watchdog.ts";
+import { isSgrMouseSequence, type MouseEvent, parseSgrMouse } from "./mouse.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	isOsc11BackgroundColorResponse,
@@ -73,6 +74,13 @@ export interface Component {
 	 * Optional handler for keyboard input when component has focus
 	 */
 	handleInput?(data: string): void;
+
+	/**
+	 * Optional handler for mouse events when component has focus (only
+	 * delivered after TUI.setMouseEnabled(true)). Return true to consume
+	 * the event; false lets it fall through to the TUI-level handlers.
+	 */
+	handleMouse?(event: MouseEvent): boolean;
 
 	/**
 	 * If true, component receives key release events (Kitty protocol).
@@ -300,6 +308,8 @@ export class TUI extends Container {
 	private previousHeight = 0;
 	private focusedComponent: Component | null = null;
 	private inputListeners = new Set<InputListener>();
+	private mouseEnabled = false;
+	private mouseEventHandlers = new Set<(event: MouseEvent) => boolean>();
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
@@ -644,6 +654,9 @@ export class TUI extends Container {
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031h");
 		}
+		if (this.mouseEnabled) {
+			this.terminal.setMouseTracking?.(true);
+		}
 		this.queryCellSize();
 		this.requestRender();
 	}
@@ -657,6 +670,32 @@ export class TUI extends Container {
 
 	removeInputListener(listener: InputListener): void {
 		this.inputListeners.delete(listener);
+	}
+
+	/**
+	 * Enable or disable mouse tracking (SGR protocol). Off by default; when
+	 * never enabled, behavior is identical to a TUI without mouse support.
+	 * The state is tracked so tracking is re-applied on start() after a
+	 * stop()/start() cycle (e.g. suspend/resume) and released in stop().
+	 */
+	setMouseEnabled(enabled: boolean): void {
+		if (this.mouseEnabled === enabled) return;
+		this.mouseEnabled = enabled;
+		if (!this.stopped) {
+			this.terminal.setMouseTracking?.(enabled);
+		}
+	}
+
+	/**
+	 * Register a mouse event handler. Handlers are called in registration order
+	 * until one returns true (handled); unhandled events are dropped.
+	 * Returns an unsubscribe function.
+	 */
+	onMouseEvent(handler: (event: MouseEvent) => boolean): () => void {
+		this.mouseEventHandlers.add(handler);
+		return () => {
+			this.mouseEventHandlers.delete(handler);
+		};
 	}
 
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void {
@@ -695,6 +734,9 @@ export class TUI extends Container {
 		}
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
+		}
+		if (this.mouseEnabled) {
+			this.terminal.setMouseTracking?.(false);
 		}
 		// Move cursor to the end of the content to prevent overwriting/artifacts on exit
 		if (this.previousLines.length > 0) {
@@ -788,6 +830,28 @@ export class TUI extends Container {
 
 		// Consume terminal cell size responses without blocking unrelated input.
 		if (this.consumeCellSizeResponse(data)) {
+			return;
+		}
+
+		// SGR mouse reports (only emitted by the terminal after setMouseEnabled(true)).
+		// Never forwarded to the keyboard path. Routing mirrors keyboard focus:
+		// the focused component gets first refusal; while an overlay is visible
+		// unhandled events are swallowed (a fallback that scrolls the base
+		// content would shift the screen underneath the overlay and tear the
+		// differential render); otherwise the TUI-level handlers run in order.
+		if (this.mouseEnabled && isSgrMouseSequence(data)) {
+			const event = parseSgrMouse(data);
+			if (event) {
+				if (this.focusedComponent?.handleMouse?.(event)) {
+					return;
+				}
+				if (this.hasOverlay()) {
+					return;
+				}
+				for (const handler of this.mouseEventHandlers) {
+					if (handler(event)) break;
+				}
+			}
 			return;
 		}
 

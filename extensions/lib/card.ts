@@ -19,9 +19,34 @@ export interface CardOptions {
 	edge: (text: string) => string;
 }
 
+/**
+ * Strip trailing spaces while preserving trailing ANSI reset codes —
+ * child components often pad lines to full width, which would otherwise
+ * make the truncator append a phantom ellipsis.
+ */
+export function rtrimAnsi(line: string): string {
+	return line.replace(/ +((?:\x1b\[[0-9;]*m)*)$/, "$1");
+}
+
 /** Lines that carry inline-image escape payloads must not be reflowed/boxed. */
 function isImageLine(line: string): boolean {
 	return line.includes("\x1b_G") || line.includes("\x1b]1337");
+}
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/**
+ * Time-derived spinner frame: no timers to leak — the frame advances on
+ * whatever re-renders streaming already causes (text deltas, tool updates),
+ * and freezes when nothing is happening, which is honest.
+ */
+export function spinnerGlyph(): string {
+	return SPINNER_FRAMES[Math.floor(Date.now() / 80) % SPINNER_FRAMES.length];
+}
+
+/** Slow two-phase pulse for border colors while running. */
+export function pulseOn(): boolean {
+	return Math.floor(Date.now() / 500) % 2 === 0;
 }
 
 export function cardLines(opts: CardOptions): string[] {
@@ -35,7 +60,7 @@ export function cardLines(opts: CardOptions): string[] {
 	const inner = width - 4;
 	const out: string[] = [];
 	if (title) {
-		const clipped = truncateToWidth(title, inner - 2, "…");
+		const clipped = truncateToWidth(rtrimAnsi(title), inner - 2, "…");
 		const fill = Math.max(0, inner - visibleWidth(clipped) - 1);
 		out.push(`${edge("╭─")} ${clipped} ${edge("─".repeat(fill))}${edge("╮")}`);
 	} else {
@@ -46,7 +71,7 @@ export function cardLines(opts: CardOptions): string[] {
 			out.push(raw);
 			continue;
 		}
-		const clipped = truncateToWidth(raw, inner, "…");
+		const clipped = truncateToWidth(rtrimAnsi(raw), inner, "…");
 		const pad = " ".repeat(Math.max(0, inner - visibleWidth(clipped)));
 		out.push(`${edge("│")} ${clipped}${pad} ${edge("│")}`);
 	}

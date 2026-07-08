@@ -132,6 +132,8 @@ function describeRoster(definitions: AgentDefinition[], limit: number): string {
 /** Lines of a task body shown when collapsed; beyond this a ctrl+o hint appears. */
 const CARD_COLLAPSE_LINES = 12;
 
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 function gistOf(prompt: string): string {
 	const flat = prompt.replace(/\s+/g, " ").trim();
 	return flat.length > 48 ? `${flat.slice(0, 47)}…` : flat;
@@ -274,13 +276,19 @@ export class AgentToolCard implements Component {
 
 	render(width: number): string[] {
 		const theme = this.theme;
-		const title = this.args ? formatAgentCall(this.args, theme) : theme.fg("toolTitle", theme.bold("agent"));
+		let title = this.args ? formatAgentCall(this.args, theme) : theme.fg("toolTitle", theme.bold("agent"));
+		if (this.options.isPartial) {
+			// Time-derived spinner: advances on the re-renders streaming
+			// already causes (live task updates arrive ~150ms apart), no timer.
+			title = `${theme.fg("accent", SPINNER_FRAMES[Math.floor(Date.now() / 80) % SPINNER_FRAMES.length])} ${title}`;
+		}
 		const body = this.details ? formatAgentCard(this.details, this.options, theme).split("\n") : [];
 		if (width < 24) {
 			return [truncateToWidth(title, width, "…"), ...body.map((line) => truncateToWidth(line, width, "…"))];
 		}
 
-		const borderColor = this.isError ? "error" : this.options.isPartial ? "accent" : "dim";
+		const pulse = this.options.isPartial && Math.floor(Date.now() / 500) % 2 === 1;
+		const borderColor = this.isError ? "error" : this.options.isPartial ? (pulse ? "dim" : "accent") : "dim";
 		const edge = (text: string) => theme.fg(borderColor, text);
 		const inner = width - 4;
 		const lines: string[] = [];

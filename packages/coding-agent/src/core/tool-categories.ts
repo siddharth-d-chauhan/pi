@@ -37,6 +37,7 @@ const TOOL_CATEGORY: Record<string, ToolCategory> = {
 	lsp: "code-intel",
 	debug: "code-intel",
 	// Coordination
+	update_plan: "coord",
 	task: "coord",
 	irc: "coord",
 	todo: "coord",

@@ -37,6 +37,9 @@ export {
 	type AgentReturn,
 	type AgentSpawnPolicy,
 	type AgentToolList,
+	type ChainDefinition,
+	type ChainRunResult,
+	type ChainStageResult,
 	canOmitProjectContext,
 	capReturn,
 	createAgentDefinitionDisplayPath,
@@ -51,9 +54,12 @@ export {
 	type LoadAgentDefinitionsOptions,
 	listLifecycleAgents,
 	loadAgentDefinitions,
+	loadChains,
 	parkAgent,
+	parseChain,
 	pullHandle,
 	reviveAgent,
+	runChain,
 } from "./core/agents/index.ts";
 // Auth and model registry
 export {

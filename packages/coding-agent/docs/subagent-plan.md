@@ -416,6 +416,24 @@ matrix (running/idle/parked), mailbox overflow.
 
 ## Phase 3 — Chains
 
+Status (2026-07-09): ✅ shipped.
+- `core/agents/chains.ts`: YAML loader (project `.pi/chains/` → user
+  `~/.pi/agent/chains/`), validation with helpful errors (dupes, unknown
+  needs, cycles), wave-parallel DAG runner, `{{input}}`/`{{stage.result}}`/
+  `{{stage.handle}}` interpolation with the 2k inline cap, per-stage
+  `on_fail: stop|continue`.
+- Verify gates reuse Phase 2 instead of respawning: a failing `verify`
+  command's output is DELIVERED to the stage's still-idle agent via the
+  lifecycle, and the fix is re-verified (`max_iters`).
+- `chain` tool (default-active) with a live stage-flow card
+  (`[plan ✓] → [build ▶] → [review ○]`); `/chain` command extension lists
+  and launches chains; demo chain in `.pi/chains/demo.yaml`.
+- Verified live: two-stage demo chain against a real model, findings
+  interpolated across stages. 8 suite tests incl. the verify-feedback loop.
+- Deviation from the original sketch: `goto:<stage>` on_fail dropped (kept
+  stop/continue), ChainCard lives with the tool (core) not a separate
+  component file.
+
 ### 3.1 `core/agents/chains.ts` (~350 LoC)
 - YAML loader (`.pi/chains/*.yaml` + `~/.pi/agent/chains/`), schema validation with
   helpful errors (stage id dupes, unknown agent, cycle detection on `parallel_with`/deps).

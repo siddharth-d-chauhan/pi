@@ -93,11 +93,17 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import { createAgentTool, createAgentToolDefinition, createUnavailableAgentToolDefinition } from "./agent.ts";
+import {
+	createAgentTool,
+	createAgentToolDefinition,
+	createDefaultSpawnDeps,
+	createUnavailableAgentToolDefinition,
+} from "./agent.ts";
 import { createAgentListTool, createAgentListToolDefinition } from "./agent-list.ts";
 import { createAgentMessageTool, createAgentMessageToolDefinition } from "./agent-message.ts";
 import { createAgentPullTool, createAgentPullToolDefinition } from "./agent-pull.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
+import { createChainTool, createChainToolDefinition, createUnavailableChainToolDefinition } from "./chain.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
 import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
@@ -118,6 +124,7 @@ export type ToolName =
 	| "ls"
 	| "agent"
 	| "agent_message"
+	| "chain"
 	| "agent_list"
 	| "agent_pull";
 export const allToolNames: Set<ToolName> = new Set([
@@ -130,6 +137,7 @@ export const allToolNames: Set<ToolName> = new Set([
 	"ls",
 	"agent",
 	"agent_message",
+	"chain",
 	"agent_list",
 	"agent_pull",
 ]);
@@ -178,6 +186,22 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 				parentSession: ctx.parentSession,
 			});
 		}
+		case "chain": {
+			const ctx = options?.agentToolContext;
+			if (!ctx) return createUnavailableChainToolDefinition();
+			const agentDir = ctx.agentDir ?? getAgentDir();
+			return createChainToolDefinition({
+				cwd: ctx.cwd,
+				agentDir,
+				packageAgentDirs: ctx.packageAgentDirs,
+				parentSession: ctx.parentSession,
+				spawnDeps: createDefaultSpawnDeps(ctx.cwd, agentDir, ctx.packageAgentDirs, {
+					settingsManager: ctx.parentSession.settingsManager,
+					modelRegistry: ctx.parentSession.modelRegistry,
+					parentSession: ctx.parentSession,
+				}),
+			});
+		}
 		case "agent_message": {
 			const ctx = options?.agentToolContext;
 			return createAgentMessageToolDefinition({
@@ -220,6 +244,22 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			const ctx = options?.agentToolContext;
 			return ctx ? createAgentTool(ctx) : wrapToolDefinition(createUnavailableAgentToolDefinition());
 		}
+		case "chain": {
+			const ctx = options?.agentToolContext;
+			if (!ctx) return wrapToolDefinition(createUnavailableChainToolDefinition());
+			const agentDir = ctx.agentDir ?? getAgentDir();
+			return createChainTool({
+				cwd: ctx.cwd,
+				agentDir,
+				packageAgentDirs: ctx.packageAgentDirs,
+				parentSession: ctx.parentSession,
+				spawnDeps: createDefaultSpawnDeps(ctx.cwd, agentDir, ctx.packageAgentDirs, {
+					settingsManager: ctx.parentSession.settingsManager,
+					modelRegistry: ctx.parentSession.modelRegistry,
+					parentSession: ctx.parentSession,
+				}),
+			});
+		}
 		case "agent_message":
 			return createAgentMessageTool({ selfLabel: "main" });
 		case "agent_list":
@@ -259,6 +299,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 	const ctx = options?.agentToolContext;
 	return {
 		agent_message: createAgentMessageToolDefinition({ selfLabel: "main" }),
+		chain: createToolDefinition("chain", cwd, options),
 		agent: ctx
 			? createAgentToolDefinition(ctx.cwd, ctx.agentDir ?? getAgentDir(), ctx.packageAgentDirs, {
 					settingsManager: ctx.parentSession.settingsManager,
@@ -306,6 +347,7 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 	const ctx = options?.agentToolContext;
 	return {
 		agent_message: createAgentMessageTool({ selfLabel: "main" }),
+		chain: createTool("chain", cwd, options),
 		agent: ctx ? createAgentTool(ctx) : wrapToolDefinition(createUnavailableAgentToolDefinition()),
 		agent_list: createAgentListTool(
 			cwd,

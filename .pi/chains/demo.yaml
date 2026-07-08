@@ -1,0 +1,13 @@
+# Demo chain — try: ask pi to "run the demo chain with input <topic>"
+# or /chain demo <topic> (chain-command extension).
+name: demo
+description: Explore a topic, then summarize the findings (two-stage demo)
+stages:
+  - id: scout
+    agent: explore
+    prompt: "Briefly explore this topic in the current repo (2-3 findings): {{input}}"
+  - id: summary
+    agent: worker
+    prompt: |
+      Summarize these findings in exactly two sentences:
+      {{scout.result}}

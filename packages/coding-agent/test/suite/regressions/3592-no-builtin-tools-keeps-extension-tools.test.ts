@@ -84,6 +84,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"agent_message",
 			"agent_pull",
 			"bash",
+			"chain",
 			"dynamic_tool",
 			"edit",
 			"find",

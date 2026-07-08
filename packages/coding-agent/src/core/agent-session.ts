@@ -2535,6 +2535,7 @@ export class AgentSession {
 					"write",
 					"agent",
 					"agent_message",
+					"chain",
 					"agent_list",
 					"agent_pull",
 				];

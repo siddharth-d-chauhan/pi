@@ -39,6 +39,7 @@ const TOOL_CATEGORY: Record<string, ToolCategory> = {
 	// Coordination
 	agent: "coord",
 	agent_message: "coord",
+	chain: "coord",
 	agent_list: "coord",
 	agent_pull: "coord",
 	task: "coord",

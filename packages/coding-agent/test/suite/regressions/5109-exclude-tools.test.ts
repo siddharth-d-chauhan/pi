@@ -56,6 +56,7 @@ describe("regression #5109: exclude tools", () => {
 				"agent_message",
 				"agent_pull",
 				"bash",
+				"chain",
 				"dynamic_tool",
 				"edit",
 				"find",

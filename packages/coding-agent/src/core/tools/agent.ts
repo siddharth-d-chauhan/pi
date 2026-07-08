@@ -347,13 +347,14 @@ interface ResolvedAgentTask {
 	background: boolean;
 }
 
-export function createAgentToolDefinition(
+/** Build the production SpawnDeps bag (shared by the agent and chain tools). */
+export function createDefaultSpawnDeps(
 	cwd: string,
 	agentDir: string,
 	packageAgentDirs: string[] | undefined,
 	ctx: Pick<AgentToolContext, "settingsManager" | "modelRegistry" | "parentSession">,
-): ToolDefinition<typeof agentToolSchema, AgentToolDetails> {
-	const deps: SpawnDeps = {
+): SpawnDeps {
+	return {
 		settingsManager: ctx.settingsManager,
 		modelRegistry: ctx.modelRegistry,
 		artifactDir: getArtifactDir(agentDir),
@@ -367,6 +368,15 @@ export function createAgentToolDefinition(
 			packageAgentDirs,
 		}),
 	};
+}
+
+export function createAgentToolDefinition(
+	cwd: string,
+	agentDir: string,
+	packageAgentDirs: string[] | undefined,
+	ctx: Pick<AgentToolContext, "settingsManager" | "modelRegistry" | "parentSession">,
+): ToolDefinition<typeof agentToolSchema, AgentToolDetails> {
+	const deps: SpawnDeps = createDefaultSpawnDeps(cwd, agentDir, packageAgentDirs, ctx);
 	const initialAgentSettings = ctx.settingsManager.getAgentSettings();
 	const initialDisabled = new Set(initialAgentSettings.disabled ?? []);
 	const initialRegistry = loadAgentDefinitions({ cwd, agentDir, packageAgentDirs });

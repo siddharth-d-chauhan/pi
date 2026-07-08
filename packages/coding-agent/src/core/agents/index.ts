@@ -1,4 +1,17 @@
 export {
+	type ChainDefinition,
+	type ChainRunResult,
+	type ChainStage,
+	type ChainStageResult,
+	ChainValidationError,
+	type LoadChainsOptions,
+	type LoadChainsResult,
+	loadChains,
+	parseChain,
+	type RunChainOptions,
+	runChain,
+} from "./chains.ts";
+export {
 	type AgentDefinition,
 	type AgentDefinitionFrontmatter,
 	type AgentDefinitionRegistry,

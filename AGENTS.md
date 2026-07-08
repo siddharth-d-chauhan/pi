@@ -21,6 +21,25 @@ This repo is a fork of `earendil-works/pi` (remote: `upstream`). Every change mu
 - Keep local work committed in small, single-topic commits so upstream merges and conflict resolution stay tractable. Sync with `git fetch upstream && git merge upstream/main`.
 - Fixes that are not fork-specific should be candidates for upstream PRs to shrink the fork delta.
 
+## Extensibility Principles
+
+Escalation ladder for new capability — use the lowest rung that works:
+1. A pi extension (`packages/coding-agent/examples/extensions/pi-harness/`) via the ExtensionAPI (`registerTool`/`registerCommand`/`registerShortcut`/`on`, `ctx.ui`).
+2. A new module/component in its own file, wired in with a one-line registration.
+3. A new generic seam in an upstream file (hook, optional field, action id) that the feature plugs into.
+4. Editing upstream logic in place — last resort; keep it hook-sized.
+
+If a feature needs rung 4, first ask whether a rung-3 seam could carry it; a good seam is one upstream would plausibly accept as a PR.
+
+Seam design rules:
+- Seams are optional and undefined-safe: unset means exactly upstream behavior. Model: the editor edge-arrow hooks (`onDownArrowOnEmpty?: () => boolean` in custom-editor.ts) — caller falls through to default handling unless the hook returns true.
+- Feature logic never lives inside core loops (`TUI.render`, `Container`, event dispatch in interactive-mode). Core gains capabilities; features live at the edges. Core wiring is one line and lifecycle-safe (e.g. `this.loopWatchdog ??= new LoopWatchdog()` in `TUI.start()`).
+- New key behavior = a new action id registered in `KEYBINDINGS` / `TUI_KEYBINDINGS`, bound in the same onAction block as upstream's. Never rebind, repurpose, or remove an upstream action.
+- Theme/schema additions are optional keys with a fallback chain to an existing key (model: `pythonMode ?? bashMode`), so every existing theme file stays valid.
+- New settings are optional fields whose default reproduces upstream behavior, plus getter/setter on SettingsManager; never repurpose an existing field.
+- TUI components implement the `Component` interface and compose via `Container`; overlays/panels are self-contained components added to a container, never inlined into TUI internals.
+- New tui exports are appended to `packages/tui/src/index.ts` under their own comment block without reordering existing exports.
+
 ## Code Quality
 
 - Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.
@@ -32,7 +51,7 @@ This repo is a fork of `earendil-works/pi` (remote: `upstream`). Every change mu
 - Use only erasable TypeScript syntax (Node strip-only mode) in code checked by the root config (`packages/*/src`, `packages/*/test`, `packages/coding-agent/examples`): no parameter properties, `enum`, `namespace`/`module`, `import =`, `export =`, or other constructs needing JS emit. Use explicit fields with constructor assignments.
 - Always ask before removing functionality or code that appears intentional.
 - Do not preserve backward compatibility unless the user asks for it.
-- Never hardcode key checks (e.g. `matchesKey(keyData, "ctrl+x")`). Add defaults to `DEFAULT_EDITOR_KEYBINDINGS` or `DEFAULT_APP_KEYBINDINGS` so they stay configurable.
+- Never hardcode key checks (e.g. `matchesKey(keyData, "ctrl+x")`). Add defaults to `KEYBINDINGS` (packages/coding-agent/src/core/keybindings.ts) or `TUI_KEYBINDINGS` (packages/tui/src/keybindings.ts) so they stay configurable.
 - Never modify `packages/ai/src/models.generated.ts` directly; update `packages/ai/scripts/generate-models.ts` instead, then regenerate. Including the resulting `models.generated.ts` diff is always OK, even if regeneration includes unrelated upstream model metadata changes.
 
 ## Commands

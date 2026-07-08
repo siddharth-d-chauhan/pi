@@ -170,12 +170,17 @@ function stripUsageTrailer(inline: string): string {
 }
 
 /** Exported for tests and headless render probes. */
-export function formatAgentCall(args: AgentToolInput, theme: Theme): string {
+export function formatAgentCall(args: AgentToolInput | undefined, theme: Theme): string {
 	const title = theme.fg("toolTitle", theme.bold("agent"));
+	// Args stream in — `tasks` may be missing/partial mid-stream.
+	if (!args?.tasks || args.tasks.length === 0 || args.tasks.some((task) => !task || typeof task.agent !== "string")) {
+		return title;
+	}
 	if (args.tasks.length === 1) {
 		const task = args.tasks[0];
 		const marker = task.background ? theme.fg("muted", " (background)") : "";
-		return `${title} ${theme.fg("accent", task.agent)}${marker} ${theme.fg("dim", gistOf(task.prompt))}`;
+		const promptGist = typeof task.prompt === "string" ? gistOf(task.prompt) : "";
+		return `${title} ${theme.fg("accent", task.agent)}${marker} ${theme.fg("dim", promptGist)}`;
 	}
 	const names = args.tasks
 		.map((task) => `${theme.fg("accent", task.agent)}${task.background ? theme.fg("muted", "⁺") : ""}`)
@@ -289,8 +294,18 @@ export class AgentToolCard implements Component {
 	invalidate(): void {}
 
 	render(width: number): string[] {
+		try {
+			return this.renderCard(width);
+		} catch {
+			// A render throw here would crash the TUI (renderShell: "self"
+			// runs outside the renderer try/catch). Fall back to a title row.
+			return [truncateToWidth(this.theme.fg("toolTitle", this.theme.bold("agent")), Math.max(1, width), "…")];
+		}
+	}
+
+	private renderCard(width: number): string[] {
 		const theme = this.theme;
-		let title = this.args ? formatAgentCall(this.args, theme) : theme.fg("toolTitle", theme.bold("agent"));
+		let title = formatAgentCall(this.args, theme);
 		if (this.options.isPartial) {
 			// Time-derived spinner: advances on the re-renders streaming
 			// already causes (live task updates arrive ~150ms apart), no timer.

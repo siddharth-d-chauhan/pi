@@ -109,6 +109,16 @@ export class ToolCardComponent implements Component {
 	}
 
 	render(width: number): string[] {
+		try {
+			return this.renderCard(width);
+		} catch {
+			// renderShell "self" runs outside the renderer try/catch; a throw
+			// here would crash the TUI. Degrade to an empty row instead.
+			return [];
+		}
+	}
+
+	private renderCard(width: number): string[] {
 		const theme = this.theme;
 		const inner = Math.max(10, width - 4);
 		const callLines = this.callChild?.render(inner) ?? [];

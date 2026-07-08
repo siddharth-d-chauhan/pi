@@ -62,6 +62,7 @@ export interface AgentSettings {
 	maxDepth?: number;
 	maxConcurrency?: number;
 	maxCostUsd?: number;
+	/** Child session persistence. Default "always" — revival after parking needs a session file. */
 	persistSessions?: "always" | "background" | "never";
 	roles?: Record<string, string[]>;
 	modelOverrides?: Record<string, string>;

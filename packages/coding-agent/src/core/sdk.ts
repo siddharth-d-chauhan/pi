@@ -264,6 +264,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		"edit",
 		"write",
 		"agent",
+		"agent_message",
 		"agent_list",
 		"agent_pull",
 	];

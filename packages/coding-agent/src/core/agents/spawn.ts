@@ -325,9 +325,16 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 	});
 
 	// ----- Persistence decision (factory contract) -------------------------
+	// Default "always": the lifecycle keeps every finished agent addressable
+	// (idle → parked → revive), and revival needs a session file. "never"
+	// opts out entirely; "background" persists only detached spawns.
 	const persist =
 		opts.persistOverride ??
-		(background ? agentSettings.persistSessions !== "never" : agentSettings.persistSessions === "always");
+		(agentSettings.persistSessions === "never"
+			? false
+			: agentSettings.persistSessions === "background"
+				? background
+				: true);
 
 	const parentCwd = parent.session.sessionManager.getCwd();
 	const parentAgentDir = parent.session.agentDir;

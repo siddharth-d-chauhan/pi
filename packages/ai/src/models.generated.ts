@@ -18,6 +18,8 @@ import { HUGGINGFACE_MODELS } from "./providers/huggingface.models.ts";
 import { KIMI_CODING_MODELS } from "./providers/kimi-coding.models.ts";
 import { MINIMAX_MODELS } from "./providers/minimax.models.ts";
 import { MINIMAX_CN_MODELS } from "./providers/minimax-cn.models.ts";
+import { MINIMAX_CODE_MODELS } from "./providers/minimax-code.models.ts";
+import { MINIMAX_CODE_CN_MODELS } from "./providers/minimax-code-cn.models.ts";
 import { MISTRAL_MODELS } from "./providers/mistral.models.ts";
 import { MOONSHOTAI_MODELS } from "./providers/moonshotai.models.ts";
 import { MOONSHOTAI_CN_MODELS } from "./providers/moonshotai-cn.models.ts";
@@ -55,6 +57,8 @@ export const MODELS = {
 	"kimi-coding": KIMI_CODING_MODELS,
 	"minimax": MINIMAX_MODELS,
 	"minimax-cn": MINIMAX_CN_MODELS,
+	"minimax-code": MINIMAX_CODE_MODELS,
+	"minimax-code-cn": MINIMAX_CODE_CN_MODELS,
 	"mistral": MISTRAL_MODELS,
 	"moonshotai": MOONSHOTAI_MODELS,
 	"moonshotai-cn": MOONSHOTAI_CN_MODELS,

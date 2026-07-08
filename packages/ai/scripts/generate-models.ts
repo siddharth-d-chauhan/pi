@@ -1769,6 +1769,49 @@ async function generateModels() {
 	];
 	allModels.push(...antLingModels);
 
+	const minimaxCodeCompat: OpenAICompletionsCompat = {
+		supportsStore: false,
+		supportsDeveloperRole: false,
+		supportsReasoningEffort: false,
+		requiresReasoningContentOnAssistantMessages: true,
+		maxTokensField: "max_tokens",
+		supportsStrictMode: false,
+		supportsLongCacheRetention: false,
+	};
+	const minimaxCodeCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	const minimaxCodeModelSpecs = [
+		{ id: "MiniMax-M2", name: "MiniMax-M2", input: ["text"] as const, contextWindow: 196608, maxTokens: 128000, levels: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: null } },
+		{ id: "MiniMax-M2.1", name: "MiniMax-M2.1", input: ["text"] as const, contextWindow: 204800, maxTokens: 131072, levels: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: null } },
+		{ id: "MiniMax-M2.1-lightning", name: "MiniMax M2.1 Lightning (Coding Plan)", input: ["text"] as const, contextWindow: 1000000, maxTokens: 32000, levels: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: null } },
+		{ id: "MiniMax-M2.5", name: "MiniMax-M2.5", input: ["text"] as const, contextWindow: 204800, maxTokens: 131072, levels: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: null } },
+		{ id: "MiniMax-M2.5-highspeed", name: "MiniMax-M2.5-highspeed", input: ["text"] as const, contextWindow: 204800, maxTokens: 131072, levels: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: null } },
+		{ id: "MiniMax-M2.5-lightning", name: "MiniMax M2.5 Lightning (Coding Plan)", input: ["text"] as const, contextWindow: 204800, maxTokens: 32000, levels: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: null } },
+		{ id: "MiniMax-M2.7", name: "MiniMax-M2.7", input: ["text"] as const, contextWindow: 204800, maxTokens: 131072, levels: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: null } },
+		{ id: "MiniMax-M2.7-highspeed", name: "MiniMax-M2.7-highspeed", input: ["text"] as const, contextWindow: 204800, maxTokens: 131072, levels: { minimal: null, low: "low", medium: "medium", high: "high", xhigh: null } },
+		{ id: "MiniMax-M3", name: "MiniMax-M3", input: ["text", "image"] as const, contextWindow: 1000000, maxTokens: 128000, levels: { minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: null } },
+	];
+	for (const region of [
+		{ provider: "minimax-code", baseUrl: "https://api.minimax.io/v1", cn: false },
+		{ provider: "minimax-code-cn", baseUrl: "https://api.minimaxi.com/v1", cn: true },
+	] as const) {
+		for (const spec of minimaxCodeModelSpecs) {
+			allModels.push({
+				id: spec.id,
+				name: region.cn ? spec.name.replace("(Coding Plan)", "(Coding Plan CN)") : spec.name,
+				api: "openai-completions",
+				baseUrl: region.baseUrl,
+				provider: region.provider,
+				compat: minimaxCodeCompat,
+				reasoning: true,
+				thinkingLevelMap: spec.levels,
+				input: [...spec.input],
+				cost: minimaxCodeCost,
+				contextWindow: spec.contextWindow,
+				maxTokens: spec.maxTokens,
+			});
+		}
+	}
+
 	for (const candidate of allModels) {
 		if (candidate.api === "openai-completions" && candidate.id.includes("deepseek-v4")) {
 			const preservesNativeReasoningEffort = candidate.provider === "openrouter" || candidate.provider === "opencode";

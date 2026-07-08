@@ -23,6 +23,18 @@ export {
 	capReturn,
 	pullHandle,
 } from "./handles.ts";
+export {
+	type AgentLifecycleEntry,
+	DEFAULT_IDLE_TTL_MS,
+	type DeliveryReceipt,
+	deliverToAgent,
+	disposeAllAgents,
+	getAgentLifecycle,
+	listLifecycleAgents,
+	parkAgent,
+	resetLifecycleForTests,
+	reviveAgent,
+} from "./lifecycle.ts";
 export { type ResolveAgentModelOptions, type ResolvedAgentModel, resolveAgentModel } from "./model-roles.ts";
 export {
 	type CreateChildSessionInput,

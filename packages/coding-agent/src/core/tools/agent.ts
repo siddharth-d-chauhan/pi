@@ -13,6 +13,7 @@ import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/type
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { createAgentSession } from "../sdk.ts";
 import { getDefaultSessionDir, SessionManager } from "../session-manager.ts";
+import { createAgentMessageToolDefinition } from "./agent-message.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const agentTaskSchema = Type.Object({
@@ -87,19 +88,32 @@ function defaultCreateChildSessionFactory(_ctx: AgentToolContext) {
 		});
 		await resourceLoader.reload();
 
-		const sessionManager = input.persist
-			? SessionManager.create(input.cwd, getDefaultSessionDir(input.cwd, input.agentDir), {
-					parentSession: input.parentSessionFile,
-				})
-			: SessionManager.inMemory(input.cwd);
+		const sessionManager = input.resumeSessionFile
+			? SessionManager.open(input.resumeSessionFile, getDefaultSessionDir(input.cwd, input.agentDir))
+			: input.persist
+				? SessionManager.create(input.cwd, getDefaultSessionDir(input.cwd, input.agentDir), {
+						parentSession: input.parentSessionFile,
+					})
+				: SessionManager.inMemory(input.cwd);
+
+		const customTools: ToolDefinition<any, any>[] =
+			input.parentSession && input.selfRegistryId
+				? [
+						createAgentMessageToolDefinition({
+							selfLabel: `${input.subagentType}(${input.selfRegistryId})`,
+							parentSession: input.parentSession,
+						}),
+					]
+				: [];
 
 		const { session } = await createAgentSession({
 			cwd: input.cwd,
 			agentDir: input.agentDir,
 			model: input.model,
 			thinkingLevel: input.thinkingLevel,
-			tools: input.tools,
+			tools: input.tools ? [...input.tools, "agent_message"] : input.tools,
 			excludeTools: input.excludeTools,
+			customTools,
 			settingsManager: input.settingsManager,
 			modelRegistry: input.modelRegistry,
 			customPrompt: input.customPrompt,

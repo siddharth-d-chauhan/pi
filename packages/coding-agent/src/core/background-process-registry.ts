@@ -21,7 +21,7 @@
  */
 
 export type BackgroundProcessKind = "subagent" | "delegation" | "mcp" | "shell-suspend" | "other";
-export type BackgroundProcessStatus = "running" | "idle" | "completed" | "failed" | "cancelled";
+export type BackgroundProcessStatus = "running" | "idle" | "parked" | "completed" | "failed" | "cancelled";
 
 export interface BackgroundProcessMetrics {
 	tokens?: number;

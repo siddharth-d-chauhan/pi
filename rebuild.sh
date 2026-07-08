@@ -5,24 +5,25 @@
 #   ./rebuild.sh             # full rebuild of all packages
 #   ./rebuild.sh coding-agent # rebuild only the named workspace
 #
+# POSIX-compatible: works under `sh rebuild.sh` (dash) too.
 # Works from any directory — resolves to ~/pi/ (the repo root).
-set -euo pipefail
+set -eu
 
 REPO="${PI_REPO:-$HOME/pi}"
 
-if [[ ! -d "$REPO" ]]; then
+if [ ! -d "$REPO" ]; then
   echo "error: repo not found at $REPO (set PI_REPO to override)" >&2
   exit 1
 fi
 
 cd "$REPO"
 
-if [[ $# -eq 0 ]]; then
+if [ $# -eq 0 ]; then
   echo ">> full rebuild: tui → ai → agent → coding-agent → orchestrator"
   npm run build
 else
   for pkg in "$@"; do
-    if [[ ! -d "packages/$pkg" ]]; then
+    if [ ! -d "packages/$pkg" ]; then
       echo "error: no workspace packages/$pkg" >&2
       exit 1
     fi
@@ -31,4 +32,4 @@ else
   done
 fi
 
-echo ">> done. `pi --version` -> $(pi --version)"
+echo ">> done. \`pi --version\` -> $(pi --version)"

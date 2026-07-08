@@ -81,6 +81,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 		).toEqual([
 			"agent",
 			"agent_list",
+			"agent_message",
 			"agent_pull",
 			"bash",
 			"dynamic_tool",

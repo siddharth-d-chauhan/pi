@@ -95,6 +95,7 @@ import type { AgentSession } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { createAgentTool, createAgentToolDefinition, createUnavailableAgentToolDefinition } from "./agent.ts";
 import { createAgentListTool, createAgentListToolDefinition } from "./agent-list.ts";
+import { createAgentMessageTool, createAgentMessageToolDefinition } from "./agent-message.ts";
 import { createAgentPullTool, createAgentPullToolDefinition } from "./agent-pull.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
@@ -116,6 +117,7 @@ export type ToolName =
 	| "find"
 	| "ls"
 	| "agent"
+	| "agent_message"
 	| "agent_list"
 	| "agent_pull";
 export const allToolNames: Set<ToolName> = new Set([
@@ -127,6 +129,7 @@ export const allToolNames: Set<ToolName> = new Set([
 	"find",
 	"ls",
 	"agent",
+	"agent_message",
 	"agent_list",
 	"agent_pull",
 ]);
@@ -175,6 +178,13 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 				parentSession: ctx.parentSession,
 			});
 		}
+		case "agent_message": {
+			const ctx = options?.agentToolContext;
+			return createAgentMessageToolDefinition({
+				selfLabel: "main",
+				parentSession: ctx ? undefined : undefined,
+			});
+		}
 		case "agent_list":
 			return createAgentListToolDefinition(
 				cwd,
@@ -210,6 +220,8 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			const ctx = options?.agentToolContext;
 			return ctx ? createAgentTool(ctx) : wrapToolDefinition(createUnavailableAgentToolDefinition());
 		}
+		case "agent_message":
+			return createAgentMessageTool({ selfLabel: "main" });
 		case "agent_list":
 			return createAgentListTool(
 				cwd,
@@ -246,6 +258,7 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
 	const ctx = options?.agentToolContext;
 	return {
+		agent_message: createAgentMessageToolDefinition({ selfLabel: "main" }),
 		agent: ctx
 			? createAgentToolDefinition(ctx.cwd, ctx.agentDir ?? getAgentDir(), ctx.packageAgentDirs, {
 					settingsManager: ctx.parentSession.settingsManager,
@@ -292,6 +305,7 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 export function createAllTools(cwd: string, options?: ToolsOptions): Record<ToolName, Tool> {
 	const ctx = options?.agentToolContext;
 	return {
+		agent_message: createAgentMessageTool({ selfLabel: "main" }),
 		agent: ctx ? createAgentTool(ctx) : wrapToolDefinition(createUnavailableAgentToolDefinition()),
 		agent_list: createAgentListTool(
 			cwd,

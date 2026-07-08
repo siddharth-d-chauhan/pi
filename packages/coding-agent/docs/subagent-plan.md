@@ -351,6 +351,24 @@ push.
 
 ## Phase 2 — Lifecycle, A2A, Agent Hub, background polish
 
+Status (2026-07-08):
+- ✅ 2.1 Lifecycle: `core/agents/lifecycle.ts` — running → idle → parked (TTL,
+  `agents.idleTtlMs`) → revived; revive factories reopen the child session file
+  (`resumeSessionFile` on the child-session factory contract); file-less
+  one-shots dispose at park time; kill releases; `disposeAllAgents()` sweeps on
+  interactive shutdown. Registry gained the `parked` status.
+- ✅ 2.2 A2A: `agent_message` tool (default-active; auto-injected into children
+  with parent identity). Delivery matrix: running → followUp queue, idle → wake
+  with a real turn (reply returned when `wait`), parked → revive-then-deliver;
+  per-delivery 20-turn budget. Child→parent messages arrive as `agent-message`
+  custom messages (rendered as accent cards by the agent-notify extension).
+  Sessions are the mailboxes — no droppable buffer exists.
+- ✅ 2.3 Agent Hub: shipped as `extensions/agent-hub.ts` (roster, kill,
+  steer/message with lifecycle-aware delivery, `r` revive) instead of a core
+  component — extension-first supersedes the original plan here.
+- ⬜ 2.4 remaining: cold-revival scan of parked children on session start,
+  definitions file-watcher with cache-stable re-announce, fg→bg promotion key.
+
 ### 2.1 `core/agents/lifecycle.ts` (~200 LoC)
 - Completed non-isolated agents → status `idle`, session kept, TTL timer
   (`agents.idleTtlMs`, default 420_000). TTL → `parked`: `session.dispose()`, keep

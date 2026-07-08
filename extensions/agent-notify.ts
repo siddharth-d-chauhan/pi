@@ -86,6 +86,22 @@ export default function (pi: ExtensionAPI) {
 		return new NotificationCard(theme, message.details ?? {}, content);
 	});
 
+	// Child → parent A2A messages render as an accent card.
+	pi.registerMessageRenderer<{ from?: string }>("agent-message", (message, _options, theme) => {
+		const content = typeof message.content === "string" ? message.content : "";
+		const body = (content.match(/<agent-message[^>]*>\n?([\s\S]*?)\n?<\/agent-message>/)?.[1] ?? content).trim();
+		const from = message.details?.from ?? "agent";
+		const title = `${theme.fg("accent", "✉")} ${theme.fg("accent", theme.bold(from))} ${theme.fg("muted", "says")}`;
+		const lines = body
+			.split("\n")
+			.slice(0, 12)
+			.map((line) => theme.fg("toolOutput", line));
+		return {
+			render: (width: number) => cardLines({ width, title, body: lines, edge: (t) => theme.fg("accent", t) }),
+			invalidate() {},
+		};
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		unsubscribe?.();
 		const registry = getBackgroundProcessRegistry();

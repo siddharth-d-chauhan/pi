@@ -53,6 +53,7 @@ describe("regression #5109: exclude tools", () => {
 			expect(harness.session.getActiveToolNames().sort()).toEqual([
 				"agent",
 				"agent_list",
+				"agent_message",
 				"agent_pull",
 				"bash",
 				"dynamic_tool",

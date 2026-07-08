@@ -2525,7 +2525,19 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "grep", "find", "ls", "bash", "edit", "write", "agent", "agent_list", "agent_pull"];
+			: [
+					"read",
+					"grep",
+					"find",
+					"ls",
+					"bash",
+					"edit",
+					"write",
+					"agent",
+					"agent_message",
+					"agent_list",
+					"agent_pull",
+				];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

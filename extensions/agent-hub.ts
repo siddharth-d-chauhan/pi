@@ -5,8 +5,8 @@
  * registered this session: status, label, age, tokens/cost. From the list:
  *
  *   ↑/↓  select        x  kill the selected running agent
- *   s    steer (type a message, Enter sends it to the running child)
- *   Esc  close
+ *   s    steer/message (running: steer; idle/parked: wake with a message)
+ *   r    revive a parked agent   Esc  close
  *
  * Everything comes from the core BackgroundProcessRegistry — imported from
  * "@earendil-works/pi-coding-agent", which shares the core module graph, so
@@ -15,10 +15,12 @@
 
 import {
 	type BackgroundProcessSnapshot,
+	deliverToAgent,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	formatTaskAge,
 	getBackgroundProcessRegistry,
+	reviveAgent,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
@@ -28,6 +30,7 @@ type Theme = Parameters<Parameters<ExtensionCommandContext["ui"]["custom"]>[0]>[
 const STATUS_GLYPH: Record<BackgroundProcessSnapshot["status"], string> = {
 	running: "▶",
 	idle: "◌",
+	parked: "⏸",
 	completed: "✓",
 	failed: "✗",
 	cancelled: "⊘",
@@ -84,7 +87,13 @@ class AgentHubComponent implements Component {
 				this.steerText = "";
 			} else if (matchesKey(data, "return")) {
 				if (selected && this.steerText.trim()) {
-					getBackgroundProcessRegistry().steer(selected.id, this.steerText.trim());
+					const text = this.steerText.trim();
+					if (selected.status === "running") {
+						getBackgroundProcessRegistry().steer(selected.id, text);
+					} else {
+						// idle/parked: lifecycle delivery (wakes or revives the agent)
+						void deliverToAgent(selected.id, text, { from: "user" });
+					}
 				}
 				this.steering = false;
 				this.steerText = "";
@@ -109,7 +118,13 @@ class AgentHubComponent implements Component {
 			this.selected = Math.min(Math.max(0, this.snapshots.length - 1), this.selected + 1);
 		} else if (data === "x" && selected?.canKill && selected.status === "running") {
 			getBackgroundProcessRegistry().kill(selected.id);
-		} else if (data === "s" && selected?.canSteer && selected.status === "running") {
+		} else if (data === "r" && selected?.status === "parked") {
+			void reviveAgent(selected.id);
+		} else if (
+			data === "s" &&
+			selected &&
+			(selected.status === "running" || selected.status === "idle" || selected.status === "parked")
+		) {
 			this.steering = true;
 			this.steerText = "";
 		}
@@ -152,7 +167,7 @@ class AgentHubComponent implements Component {
 			);
 			lines.push(pad(theme.fg("dim", "  Enter to send · Esc to cancel")));
 		} else {
-			lines.push(pad(theme.fg("dim", "  ↑/↓ select · x kill · s steer · Esc close")));
+			lines.push(pad(theme.fg("dim", "  ↑/↓ select · x kill · s steer/message · r revive · Esc close")));
 		}
 		return lines;
 	}

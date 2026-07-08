@@ -19,6 +19,7 @@ import type { SettingsManager } from "../settings-manager.ts";
 import type { AgentDefinition, AgentPermissionMode, AgentSpawnPolicy, AgentToolList } from "./definitions.ts";
 import { canOmitProjectContext, isReadOnlyToolSet } from "./definitions.ts";
 import { type AgentReturn, capReturn } from "./handles.ts";
+import { markAgentIdle, registerRunningAgent, releaseAgent } from "./lifecycle.ts";
 import { resolveAgentModel } from "./model-roles.ts";
 
 /** Effective per-spawn tool set after applying allowlist + denylist + spawn policy. */
@@ -122,6 +123,12 @@ export interface CreateChildSessionInput {
 	signal?: AbortSignal;
 	persist?: boolean;
 	parentSessionFile?: string;
+	/** Reopen this session file instead of creating a new session (lifecycle revive). */
+	resumeSessionFile?: string;
+	/** The spawner's session — children use it for agent_message("main"). */
+	parentSession?: AgentSession;
+	/** This child's registry id (sender identity for A2A). */
+	selfRegistryId?: string;
 	subagentDepth: number;
 	subagentType: string;
 	subagentSpawns?: AgentSpawnPolicy;
@@ -338,6 +345,7 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 		onKill: () => {
 			runAbortController.abort();
 			childForControl?.session.abort();
+			releaseAgent(registryId);
 			registry.setStatus(registryId, "cancelled");
 		},
 		onSteer: (text) => {
@@ -378,6 +386,8 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			signal: runAbortController.signal,
 			persist,
 			parentSessionFile: parent.sessionFile,
+			parentSession: parent.session,
+			selfRegistryId: registryId,
 			subagentDepth: parent.depth + 1,
 			subagentType: definition.name,
 			subagentSpawns: definition.spawns,
@@ -387,6 +397,21 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			child = await (opts.createChildSession ?? deps.createChildSession)(childInput);
 			childForControl = child;
 			registry.update(registryId, { sessionFile: child.sessionFile });
+			const factory = opts.createChildSession ?? deps.createChildSession;
+			registerRunningAgent({
+				registryId,
+				agentType: definition.name,
+				session: child.session,
+				dispose: child.dispose,
+				sessionFile: child.sessionFile,
+				revive: child.sessionFile
+					? async () => {
+							const revived = await factory({ ...childInput, resumeSessionFile: child.sessionFile });
+							return { session: revived.session, dispose: revived.dispose };
+						}
+					: undefined,
+				idleTtlMs: settings.getAgentSettings().idleTtlMs,
+			});
 		} catch (err) {
 			releaseReservation(reservation);
 			registry.setStatus(registryId, "failed");
@@ -434,6 +459,7 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			}
 		});
 
+		let adopted = false;
 		try {
 			await child.session.prompt(prompt);
 
@@ -461,7 +487,8 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 				resultHandle: capped.handle,
 				sessionFile: child.sessionFile,
 			});
-			registry.setStatus(registryId, "completed");
+			adopted = markAgentIdle(registryId);
+			if (!adopted) registry.setStatus(registryId, "completed");
 
 			return {
 				status: "completed",
@@ -512,7 +539,10 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 		} finally {
 			unsubscribe();
 			turnUnsub();
-			child.dispose();
+			if (!adopted) {
+				child.dispose();
+				releaseAgent(registryId);
+			}
 			childForControl = undefined;
 			if (acquiredSemaphore) sem.release();
 			releaseReservation(reservation);

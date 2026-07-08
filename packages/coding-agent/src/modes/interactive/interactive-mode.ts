@@ -61,6 +61,7 @@ import {
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+import { disposeAllAgents } from "../../core/agents/index.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -6302,6 +6303,7 @@ export class InteractiveMode {
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
+		disposeAllAgents();
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}

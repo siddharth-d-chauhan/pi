@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { resetLifecycleForTests } from "../../../src/core/agents/lifecycle.ts";
 import { getBackgroundProcessRegistry, resetForTests } from "../../../src/core/background-process-registry.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { createAgentTool } from "../../../src/core/tools/index.ts";
@@ -12,6 +13,7 @@ describe("agent tool", () => {
 	const tempRoots: string[] = [];
 
 	afterEach(() => {
+		resetLifecycleForTests();
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
@@ -108,7 +110,7 @@ permissionMode: read-only
 		const backgroundId = result.details?.background[0];
 		expect(backgroundId).toMatch(/^bg-/);
 		expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("Background agent launched");
-		await waitForBackgroundStatus(backgroundId!, "completed");
+		await waitForBackgroundStatus(backgroundId!, "idle");
 	});
 
 	it("persists child session lineage to the parent session file", async () => {
@@ -143,6 +145,6 @@ permissionMode: read-only
 		const firstLine = readFileSync(childSessionFile, "utf-8").split("\n")[0];
 		const header = JSON.parse(firstLine) as { parentSession?: string };
 		expect(header.parentSession).toBe(harness.session.sessionFile);
-		await waitForBackgroundStatus(task!.registryId, "completed");
+		await waitForBackgroundStatus(task!.registryId, "idle");
 	});
 });

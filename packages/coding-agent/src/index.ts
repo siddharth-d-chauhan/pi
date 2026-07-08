@@ -32,6 +32,7 @@ export {
 	AgentHandleStore,
 	type AgentHandleStoreOptions,
 	type AgentIsolationMode,
+	type AgentLifecycleEntry,
 	type AgentPermissionMode,
 	type AgentReturn,
 	type AgentSpawnPolicy,
@@ -39,12 +40,20 @@ export {
 	canOmitProjectContext,
 	capReturn,
 	createAgentDefinitionDisplayPath,
+	DEFAULT_IDLE_TTL_MS,
+	type DeliveryReceipt,
+	deliverToAgent,
+	disposeAllAgents,
 	formatAgentDefinitionsForPrompt,
+	getAgentLifecycle,
 	inferAgentNameFromFile,
 	isReadOnlyToolSet,
 	type LoadAgentDefinitionsOptions,
+	listLifecycleAgents,
 	loadAgentDefinitions,
+	parkAgent,
 	pullHandle,
+	reviveAgent,
 } from "./core/agents/index.ts";
 // Auth and model registry
 export {

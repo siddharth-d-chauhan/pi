@@ -69,6 +69,8 @@ export interface AgentSettings {
 	allowSharedWorkspaceWrites?: boolean;
 	allowOmitProjectContext?: boolean;
 	maxInlineDefinitions?: number;
+	/** Idle ms before a finished agent's session is parked to disk. Default 420000. */
+	idleTtlMs?: number;
 }
 
 export type DefaultProjectTrust = "ask" | "always" | "never";

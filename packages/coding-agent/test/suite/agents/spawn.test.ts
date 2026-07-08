@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnAgent } from "../../../src/core/agents/index.ts";
+import { resetLifecycleForTests } from "../../../src/core/agents/lifecycle.ts";
 import type { CreateChildSessionInput, CreateChildSessionResult, SpawnDeps } from "../../../src/core/agents/spawn.ts";
 import {
 	getBackgroundProcessRegistry,
@@ -17,6 +18,7 @@ describe("spawnAgent", () => {
 	const tempDirs: string[] = [];
 
 	afterEach(() => {
+		resetLifecycleForTests();
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
@@ -339,7 +341,7 @@ describe("spawnAgent", () => {
 		);
 
 		expect(result.inline).toContain("Background agent launched");
-		await waitForBackgroundStatus(result.registryId, "completed");
+		await waitForBackgroundStatus(result.registryId, "idle");
 
 		harness.setResponses([fauxAssistantMessage("ack")]);
 		await harness.session.prompt("continue");
@@ -411,8 +413,8 @@ describe("spawnAgent", () => {
 		expect(factoryCalls).toBe(1);
 
 		releaseFirstFactory();
-		await waitForBackgroundStatus(first.registryId, "completed");
-		await waitForBackgroundStatus(second.registryId, "completed");
+		await waitForBackgroundStatus(first.registryId, "idle");
+		await waitForBackgroundStatus(second.registryId, "idle");
 	});
 
 	it("releases the in-flight counter when the child factory throws", async () => {

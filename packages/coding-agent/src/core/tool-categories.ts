@@ -38,6 +38,7 @@ const TOOL_CATEGORY: Record<string, ToolCategory> = {
 	debug: "code-intel",
 	// Coordination
 	agent: "coord",
+	agent_message: "coord",
 	agent_list: "coord",
 	agent_pull: "coord",
 	task: "coord",

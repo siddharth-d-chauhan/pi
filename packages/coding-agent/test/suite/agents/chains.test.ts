@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { ChainValidationError, parseChain, runChain } from "../../../src/core/agents/chains.ts";
+import {
+	ChainValidationError,
+	parseChain,
+	resolveChainInputs,
+	runChain,
+	splitForeachItems,
+} from "../../../src/core/agents/chains.ts";
 import type { AgentDefinition, AgentDefinitionRegistry } from "../../../src/core/agents/definitions.ts";
 import { resetLifecycleForTests } from "../../../src/core/agents/lifecycle.ts";
 import type { CreateChildSessionInput, CreateChildSessionResult, SpawnDeps } from "../../../src/core/agents/spawn.ts";
@@ -265,5 +271,187 @@ stages:
 
 		expect(result.status).toBe("completed");
 		expect(result.stages.map((stage) => stage.status)).toEqual(["completed", "completed"]);
+	});
+
+	it("named inputs: JSON object resolves, defaults apply, missing required throws", () => {
+		const chainYaml = `
+name: named
+inputs:
+  topic: { description: "what" }
+  area: { default: "src" }
+stages:
+  - id: s
+    agent: worker
+    prompt: "{{inputs.topic}} in {{inputs.area}}"
+`;
+		const definition = parseChain(chainYaml, "named.yaml", "project");
+		const resolved = resolveChainInputs(definition, '{"topic": "auth"}');
+		expect(resolved.inputs).toEqual({ topic: "auth", area: "src" });
+		expect(() => resolveChainInputs(definition, "")).toThrow(/missing required input/);
+		expect(() => resolveChainInputs(definition, "")).toThrow(/topic/);
+	});
+
+	it("splitForeachItems: JSON arrays and line lists, capped", () => {
+		expect(splitForeachItems('["a", "b"]', 10)).toEqual(["a", "b"]);
+		expect(splitForeachItems("one\ntwo\n\nthree", 10)).toEqual(["one", "two", "three"]);
+		expect(splitForeachItems("a\nb\nc", 2)).toEqual(["a", "b"]);
+	});
+
+	it("foreach fans out one spawn per item and combines results", async () => {
+		const parent = await makeParent();
+		const children = [await createHarness(), await createHarness(), await createHarness()];
+		harnesses.push(...children);
+		children[0].setResponses([fauxAssistantMessage("did alpha")]);
+		children[1].setResponses([fauxAssistantMessage("did beta")]);
+		children[2].setResponses([fauxAssistantMessage("did gamma")]);
+
+		const chainYaml = `
+name: fan
+stages:
+  - id: work
+    agent: worker
+    foreach: |
+      alpha
+      beta
+      gamma
+    prompt: "Handle: {{item}}"
+`;
+		const captured: CreateChildSessionInput[] = [];
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: stagedFactory(children, captured),
+		};
+
+		const result = await runChain({
+			definition: parseChain(chainYaml, "fan.yaml", "project"),
+			input: "",
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["worker"]),
+			deps,
+			cwd: makeTempDir("pi-chain-cwd-"),
+		});
+
+		expect(result.status).toBe("completed");
+		expect(captured).toHaveLength(3);
+		expect(result.stages[0].itemsTotal).toBe(3);
+		expect(result.stages[0].itemsDone).toBe(3);
+		expect(result.stages[0].inline).toContain("did alpha");
+		expect(result.stages[0].inline).toContain("did gamma");
+	});
+
+	it("judge gate: FAIL verdict feeds back to the same agent, then passes", async () => {
+		const parent = await makeParent();
+		const worker = await createHarness();
+		const judge1 = await createHarness();
+		const judge2 = await createHarness();
+		harnesses.push(worker, judge1, judge2);
+		// Worker: first run, then the gate-feedback reply.
+		worker.setResponses([fauxAssistantMessage("half-done work"), fauxAssistantMessage("now complete")]);
+		judge1.setResponses([fauxAssistantMessage("VERDICT: FAIL — the work is superficial")]);
+		judge2.setResponses([fauxAssistantMessage("VERDICT: PASS — looks real now")]);
+
+		const chainYaml = `
+name: judged
+stages:
+  - id: work
+    agent: worker
+    prompt: "Do it: {{input}}"
+    judge: "Is the work real?"
+    max_iters: 2
+`;
+		// Factory order: worker spawn, judge #1, judge #2 (delivery reuses the live worker).
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: stagedFactory([worker, judge1, judge2]),
+		};
+
+		const result = await runChain({
+			definition: parseChain(chainYaml, "judged.yaml", "project"),
+			input: "task",
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["worker"]),
+			deps,
+			cwd: makeTempDir("pi-chain-cwd-"),
+		});
+
+		expect(result.status).toBe("completed");
+		expect(result.stages[0].verifyAttempts).toBe(2);
+		expect(result.stages[0].inline).toContain("now complete");
+	});
+
+	it("budget: a zero runtime budget fails stages before spawning", async () => {
+		const parent = await makeParent();
+		const chainYaml = `
+name: capped
+stages:
+  - id: one
+    agent: worker
+    prompt: p1
+  - id: two
+    agent: worker
+    prompt: p2
+`;
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: async () => {
+				throw new Error("should not spawn under a blown budget");
+			},
+		};
+
+		const result = await runChain({
+			definition: parseChain(chainYaml, "capped.yaml", "project"),
+			input: "",
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["worker"]),
+			deps,
+			cwd: makeTempDir("pi-chain-cwd-"),
+			budgetUsd: 0,
+		});
+
+		expect(result.status).toBe("failed");
+		expect(result.stages[0].status).toBe("failed");
+		expect(result.stages[0].error).toContain("budget exhausted");
+		expect(result.stages[1].status).toBe("skipped");
+	});
+
+	it("resume: seeded stages skip their spawns and feed interpolation", async () => {
+		const parent = await makeParent();
+		const buildChild = await createHarness();
+		harnesses.push(buildChild);
+		buildChild.setResponses([fauxAssistantMessage("built from seed")]);
+
+		const captured: CreateChildSessionInput[] = [];
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: stagedFactory([buildChild], captured),
+		};
+
+		const settled: string[] = [];
+		const result = await runChain({
+			definition: parseChain(VALID_CHAIN, "flow.yaml", "project"),
+			input: "x",
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["planner", "builder"]),
+			deps,
+			cwd: makeTempDir("pi-chain-cwd-"),
+			seedStages: { plan: { inline: "SEEDED PLAN" } },
+			onStageSettled: (stage) => settled.push(`${stage.id}:${stage.status}`),
+		});
+
+		expect(result.status).toBe("completed");
+		// Only the build stage spawned; the plan stage came from the seed.
+		expect(captured).toHaveLength(1);
+		expect(captured[0].customPrompt ?? "").not.toContain("Plan:");
+		expect(result.stages[0].inline).toBe("SEEDED PLAN");
+		expect(result.stages[1].inline).toContain("built from seed");
+		expect(settled).toEqual(["build:completed"]);
 	});
 });

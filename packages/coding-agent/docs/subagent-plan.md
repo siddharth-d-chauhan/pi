@@ -433,6 +433,14 @@ Status (2026-07-09): ✅ shipped.
 - Deviation from the original sketch: `goto:<stage>` on_fail dropped (kept
   stop/continue), ChainCard lives with the tool (core) not a separate
   component file.
+- 2026-07-09 upgrades: judge gates (`judge:` — fresh-eyes read-only agent,
+  VERDICT: PASS|FAIL, shares the verify retry loop), named inputs
+  (`inputs:` + JSON-object input, defaults, missing-input errors),
+  `foreach` fan-out stages (JSON array or line list, `max_items`,
+  progress in the card), chain resume (per-stage persistence under
+  `<agentDir>/chain-runs/`, `resume: true` seeds completed stages), and
+  cost tracking (per-stage + Σ totals row, `budget_usd` ceiling that
+  fails stages before spawning).
 
 ### 3.1 `core/agents/chains.ts` (~350 LoC)
 - YAML loader (`.pi/chains/*.yaml` + `~/.pi/agent/chains/`), schema validation with

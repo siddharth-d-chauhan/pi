@@ -10,13 +10,21 @@
  *   ╰─────────────────────────────────────────────────╯
  */
 
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type Component, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { getAgentDir } from "../../config.ts";
 import type { Theme, ThemeColor } from "../../modes/interactive/theme/theme.ts";
 import type { AgentSession } from "../agent-session.ts";
-import { type ChainStageResult, loadChains, runChain } from "../agents/chains.ts";
+import {
+	type ChainRunTotals,
+	type ChainSeedStages,
+	type ChainStageResult,
+	loadChains,
+	runChain,
+} from "../agents/chains.ts";
 import { loadAgentDefinitions } from "../agents/index.ts";
 import type { SpawnDeps } from "../agents/spawn.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
@@ -24,7 +32,15 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const chainToolSchema = Type.Object({
 	chain: Type.String({ description: "Name of the chain to run (from .pi/chains/ or ~/.pi/agent/chains/)." }),
-	input: Type.Optional(Type.String({ description: "Input text interpolated as {{input}} in stage prompts." })),
+	input: Type.Optional(
+		Type.String({
+			description:
+				'Chain input. Plain text for {{input}}, or a JSON object for named inputs, e.g. {"topic": "auth"}.',
+		}),
+	),
+	resume: Type.Optional(
+		Type.Boolean({ description: "Resume the chain's last failed run: completed stages are not re-run." }),
+	),
 });
 
 export type ChainToolInput = Static<typeof chainToolSchema>;
@@ -33,6 +49,7 @@ export interface ChainToolDetails {
 	chain: string;
 	status?: "completed" | "failed";
 	stages: ChainStageResult[];
+	totals?: ChainRunTotals;
 	live?: boolean;
 }
 
@@ -53,6 +70,7 @@ const STAGE_GLYPH: Record<ChainStageResult["status"], string> = {
 	pending: "○",
 	running: "▶",
 	verifying: "◈",
+	judging: "⚖",
 	completed: "✓",
 	failed: "✗",
 	skipped: "⊘",
@@ -66,6 +84,7 @@ function stageColor(status: ChainStageResult["status"]): ThemeColor {
 			return "error";
 		case "running":
 		case "verifying":
+		case "judging":
 			return "accent";
 		default:
 			return "dim";
@@ -88,6 +107,10 @@ function formatStageRow(stage: ChainStageResult, theme: Theme): string {
 	const agent = theme.fg("muted", `(${stage.agent})`);
 	const parts: string[] = [];
 	if (stage.status === "verifying") parts.push(`verifying (attempt ${stage.verifyAttempts})`);
+	if (stage.status === "judging") parts.push(`judging (attempt ${stage.verifyAttempts})`);
+	if (stage.itemsTotal !== undefined) parts.push(`${stage.itemsDone ?? 0}/${stage.itemsTotal} items`);
+	if (stage.tokens > 0)
+		parts.push(`${stage.tokens < 1000 ? stage.tokens : `${(stage.tokens / 1000).toFixed(1)}k`} tok`);
 	if (stage.durationMs > 0) parts.push(`${(stage.durationMs / 1000).toFixed(1)}s`);
 	if (stage.error) parts.push(stage.error.split("\n")[0]);
 	const meta = parts.length > 0 ? theme.fg(stage.error ? "error" : "dim", ` · ${parts.join(" · ")}`) : "";
@@ -135,6 +158,16 @@ export class ChainToolCard implements Component {
 		if (stages.length > 0) {
 			body.push(formatFlow(stages, theme));
 			for (const stage of stages) body.push(formatStageRow(stage, theme));
+			const totals = this.details?.totals;
+			if (totals && !this.options.isPartial) {
+				const tok = totals.tokens < 1000 ? `${totals.tokens}` : `${(totals.tokens / 1000).toFixed(1)}k`;
+				body.push(
+					theme.fg(
+						"dim",
+						`Σ ${tok} tok · $${totals.costUsd.toFixed(4)} · ${(totals.durationMs / 1000).toFixed(1)}s`,
+					),
+				);
+			}
 			const last = stages.at(-1);
 			if (!this.options.isPartial && last?.status === "completed" && last.inline) {
 				const lines = last.inline
@@ -186,7 +219,9 @@ export function createChainToolDefinition(
 		label: "chain",
 		description:
 			"Run a declarative multi-agent chain (stages of subagents with dependencies, per-stage models, " +
-			"and shell verify gates that feed failures back to the stage's agent). " +
+			"foreach fan-out, and verify/judge gates that feed failures back to the stage's agent). " +
+			'Named inputs are passed as a JSON object in `input` (e.g. {"topic": "auth"}). ' +
+			"Use resume=true to continue the last failed run without re-running completed stages. " +
 			"Available chains:\n" +
 			roster,
 		promptSnippet: "Run a predefined multi-agent chain from .pi/chains/",
@@ -205,6 +240,30 @@ export function createChainToolDefinition(
 				agentDir,
 				packageAgentDirs: opts.packageAgentDirs,
 			});
+
+			// Run-state persistence: completed stages of a failed run are
+			// seeded on --resume instead of re-running.
+			const runsDir = join(agentDir, "chain-runs");
+			const runFile = join(runsDir, `${definition.name}.json`);
+			const settled: ChainSeedStages = {};
+			let seedStages: ChainSeedStages | undefined;
+			if (args.resume) {
+				try {
+					const persisted = JSON.parse(readFileSync(runFile, "utf8")) as { stages?: ChainSeedStages };
+					seedStages = persisted.stages;
+				} catch {
+					seedStages = undefined;
+				}
+			}
+			const persistRun = (): void => {
+				try {
+					mkdirSync(runsDir, { recursive: true });
+					writeFileSync(runFile, `${JSON.stringify({ input: args.input ?? "", stages: settled }, null, "\t")}\n`);
+				} catch {
+					// Persistence is best-effort; never fail the run over it.
+				}
+			};
+			for (const [id, seed] of Object.entries(seedStages ?? {})) settled[id] = seed;
 
 			let updateTimer: ReturnType<typeof setTimeout> | undefined;
 			let pendingStages: ChainStageResult[] | undefined;
@@ -237,8 +296,16 @@ export function createChainToolDefinition(
 					deps: opts.spawnDeps,
 					cwd: opts.cwd,
 					signal,
+					seedStages,
 					onUpdate: pushUpdate,
+					onStageSettled: (stage) => {
+						if (stage.status === "completed" && stage.inline !== undefined) {
+							settled[stage.id] = { inline: stage.inline, handle: stage.handle };
+							persistRun();
+						}
+					},
 				});
+				persistRun();
 
 				const summary = result.stages
 					.map((stage) => {
@@ -249,9 +316,12 @@ export function createChainToolDefinition(
 						return `${head}${stage.error ? `\n${stage.error}` : ""}`;
 					})
 					.join("\n\n");
+				const totalsLine = `totals: ${result.totals.tokens} tok · $${result.totals.costUsd.toFixed(4)} · ${(result.totals.durationMs / 1000).toFixed(1)}s`;
 				return {
-					content: [{ type: "text", text: `Chain ${result.chain}: ${result.status}\n\n${summary}` }],
-					details: { chain: result.chain, status: result.status, stages: result.stages },
+					content: [
+						{ type: "text", text: `Chain ${result.chain}: ${result.status} (${totalsLine})\n\n${summary}` },
+					],
+					details: { chain: result.chain, status: result.status, stages: result.stages, totals: result.totals },
 					isError: result.status === "failed",
 				};
 			} finally {

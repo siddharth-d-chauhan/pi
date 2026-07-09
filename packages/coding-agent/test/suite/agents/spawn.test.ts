@@ -536,6 +536,77 @@ describe("spawnAgent", () => {
 		expect(captured[2]?.customPrompt).toContain(memoryFile);
 	});
 
+	it("appends external spawn-context provider output to the child prompt (fail-open)", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const captured: CreateChildSessionInput[] = [];
+		const deps: SpawnDeps = {
+			settingsManager: harness.settingsManager,
+			modelRegistry: harness.session.modelRegistry,
+			artifactDir: makeArtifactDir(),
+			createChildSession: recordingFactory(captured),
+		};
+
+		const calls: Array<{ childType: string; brief: string }> = [];
+		(globalThis as Record<string, unknown>).__pi_spawn_context__ = async (input: {
+			childType: string;
+			brief: string;
+		}) => {
+			calls.push(input);
+			return "<knowledge-context>SPAWN-CTX-MARKER</knowledge-context>";
+		};
+		try {
+			await expect(
+				spawnAgent(
+					{
+						definition: makeDefinition({ name: "explore" }),
+						prompt: "scout the auth flow",
+						parent: { session: harness.session, depth: 0 },
+						background: false,
+					},
+					deps,
+				),
+			).rejects.toThrow();
+			expect(captured[0]?.customPrompt).toContain("SPAWN-CTX-MARKER");
+			expect(calls[0]?.childType).toBe("explore");
+			expect(calls[0]?.brief).toContain("scout the auth flow");
+
+			// Ephemeral spawns (judges, foreach items) skip the provider.
+			await expect(
+				spawnAgent(
+					{
+						definition: makeDefinition({ name: "worker", tools: ["read"] }),
+						prompt: "judge this",
+						parent: { session: harness.session, depth: 0 },
+						background: false,
+						ephemeral: true,
+					},
+					deps,
+				),
+			).rejects.toThrow();
+			expect(captured[1]?.customPrompt).not.toContain("SPAWN-CTX-MARKER");
+
+			// A throwing provider must not break the spawn (fail-open).
+			(globalThis as Record<string, unknown>).__pi_spawn_context__ = async () => {
+				throw new Error("broker exploded");
+			};
+			await expect(
+				spawnAgent(
+					{
+						definition: makeDefinition({ name: "explore" }),
+						prompt: "scout again",
+						parent: { session: harness.session, depth: 0 },
+						background: false,
+					},
+					deps,
+				),
+			).rejects.toThrow(/not invoked in this test path/);
+			expect(captured[2]?.customPrompt).toContain("You are an explorer.");
+		} finally {
+			delete (globalThis as Record<string, unknown>).__pi_spawn_context__;
+		}
+	});
+
 	it("exempts delegation-only coordinators from the shared-workspace gate", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

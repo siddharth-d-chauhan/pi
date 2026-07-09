@@ -218,6 +218,9 @@ let mutatingInFlight = 0;
 /** Tools that only delegate to other agents and never write the workspace. */
 const DELEGATION_ONLY_TOOLS = new Set(["agent", "agent_message", "chain"]);
 
+/** Hard deadline for the optional external spawn-context provider. */
+const SPAWN_CONTEXT_TIMEOUT_MS = 2_000;
+
 interface Reservation {
 	agentType: string;
 	/** Counts toward the shared-workspace conflict pool. */
@@ -466,6 +469,34 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 					`\n\n## TEAMMATES (live)\n` +
 					`Team agents you can message directly with agent_message (send to the id) when a quick ` +
 					`question or handoff beats relaying through the lead:\n${rows.join("\n")}`;
+			}
+		}
+	}
+
+	// Optional external spawn-context provider (e.g. a knowledge/context
+	// broker published by an extension via globalThis). Strictly additive and
+	// fail-open: errors and slow providers never delay or fail the spawn.
+	// Ephemeral helpers (gate judges, foreach items) are skipped — judges must
+	// stay fresh-eyes.
+	if (!opts.ephemeral) {
+		const provider = (globalThis as Record<string, unknown>).__pi_spawn_context__;
+		if (typeof provider === "function") {
+			try {
+				const extra = await Promise.race([
+					Promise.resolve(
+						(provider as (input: { childType: string; brief: string; cwd: string }) => Promise<unknown>)({
+							childType: definition.name,
+							brief: prompt.slice(0, 500),
+							cwd: parent.session.sessionManager.getCwd(),
+						}),
+					),
+					new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), SPAWN_CONTEXT_TIMEOUT_MS)),
+				]);
+				if (typeof extra === "string" && extra.trim().length > 0) {
+					customPrompt += `\n\n${extra.trim()}`;
+				}
+			} catch {
+				// fail-open: broker trouble must never block a spawn
 			}
 		}
 	}

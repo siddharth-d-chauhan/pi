@@ -115,6 +115,9 @@ const FOREACH_ITEM_CAP = 1_000;
 const DEFAULT_MAX_ITEMS = 10;
 /** Valid stage `effort` (thinking level) values. */
 const VALID_EFFORT_LEVELS = new Set(["off", "minimal", "low", "medium", "high"]);
+/** Per-stage / total caps for the anti-re-exploration chain digest. */
+const DIGEST_STAGE_CAP = 700;
+const DIGEST_TOTAL_CAP = 4_000;
 
 export class ChainValidationError extends Error {}
 
@@ -548,6 +551,39 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 		totalCostUsd += result.usage.costUsd;
 	};
 
+	// Anti-re-exploration digest: every stage receives what earlier stages
+	// already produced, so agents reuse discovery instead of repeating it.
+	// Judges deliberately do NOT get this (fresh eyes).
+	const chainDigest = (currentStageId: string): string | undefined => {
+		const done: Array<{ id: string; agent: string; result: SpawnResult }> = [];
+		for (const stage of definition.stages) {
+			if (stage.id === currentStageId) continue;
+			const result = spawnResults.get(stage.id);
+			const state = stageResults.get(stage.id);
+			if (result && state?.status === "completed") done.push({ id: stage.id, agent: stage.agent, result });
+		}
+		if (done.length === 0) return undefined;
+		const sections: string[] = [];
+		let total = 0;
+		for (const { id, agent, result } of done) {
+			let body = result.inline.trim();
+			if (body.length > DIGEST_STAGE_CAP) {
+				body = `${body.slice(0, DIGEST_STAGE_CAP)}… ${result.handle ? `(full result: ${result.handle})` : "(truncated)"}`;
+			}
+			const section = `### ${id} (${agent})\n${body}`;
+			if (total + section.length > DIGEST_TOTAL_CAP) break;
+			total += section.length;
+			sections.push(section);
+		}
+		return [
+			`## CHAIN CONTEXT — completed stages of "${definition.name}"`,
+			"Earlier stages already did the discovery and work below. REUSE it: do not re-explore " +
+				"the codebase, re-search, or re-derive these results. Only open files these notes name " +
+				"or your task strictly requires.",
+			...sections,
+		].join("\n\n");
+	};
+
 	const overBudget = (): string | undefined =>
 		budgetUsd !== undefined && totalCostUsd >= budgetUsd
 			? `chain budget exhausted ($${totalCostUsd.toFixed(4)} of $${budgetUsd.toFixed(4)})`
@@ -563,6 +599,8 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 		let spawnDefinition = opts.definitions.get(stage.agent);
 		if (!spawnDefinition) throw new Error(`unknown agent type "${stage.agent}"`);
 		if (stage.effort) spawnDefinition = { ...spawnDefinition, thinkingLevel: stage.effort };
+		const digest = chainDigest(stage.id);
+		const composedContext = [digest, context].filter(Boolean).join("\n\n") || undefined;
 		if (spawnDefinition.isolation === "worktree" && (stage.verify || stage.judge)) {
 			throw new Error(
 				`stage "${stage.id}": agent "${stage.agent}" uses worktree isolation, which cannot combine with ` +
@@ -574,7 +612,7 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 			{
 				definition: spawnDefinition,
 				prompt,
-				context,
+				context: composedContext,
 				parent: opts.parent,
 				parentType: opts.parentType,
 				spawns: opts.spawns,

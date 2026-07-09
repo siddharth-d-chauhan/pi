@@ -544,6 +544,55 @@ stages:
 		expect(maxInFlight).toBe(1);
 	});
 
+	it("injects an anti-re-exploration digest of completed stages into later stages", async () => {
+		const parent = await makeParent();
+		const children = [await createHarness(), await createHarness(), await createHarness()];
+		harnesses.push(...children);
+		children[0].setResponses([fauxAssistantMessage("auth code lives in src/auth.ts (scout findings)")]);
+		children[1].setResponses([fauxAssistantMessage("patched src/auth.ts")]);
+		children[2].setResponses([fauxAssistantMessage("looks good")]);
+
+		const captured: CreateChildSessionInput[] = [];
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: stagedFactory(children, captured),
+		};
+		const chainYaml = `
+name: digest
+stages:
+  - id: scout
+    agent: worker
+    prompt: "find things"
+  - id: fix
+    agent: worker
+    needs: [scout]
+    prompt: "fix things"
+  - id: review
+    agent: worker
+    needs: [fix]
+    prompt: "review things"
+`;
+		const result = await runChain({
+			definition: parseChain(chainYaml, "digest.yaml", "project"),
+			input: "",
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["worker"]),
+			deps,
+			cwd: makeTempDir("pi-chain-cwd-"),
+		});
+		expect(result.status).toBe("completed");
+		// First stage: nothing to reuse yet.
+		expect(captured[0]?.customPrompt).not.toContain("## CHAIN CONTEXT");
+		// Second stage reuses scout's findings; third sees both.
+		expect(captured[1]?.customPrompt).toContain("## CHAIN CONTEXT");
+		expect(captured[1]?.customPrompt).toContain("do not re-explore");
+		expect(captured[1]?.customPrompt).toContain("scout findings");
+		expect(captured[2]?.customPrompt).toContain("### scout (worker)");
+		expect(captured[2]?.customPrompt).toContain("### fix (worker)");
+	});
+
 	it("applies per-stage effort as the child thinking level", async () => {
 		const parent = await makeParent();
 		const child = await createHarness();

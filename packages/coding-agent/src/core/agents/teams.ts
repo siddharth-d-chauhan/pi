@@ -404,6 +404,7 @@ function synthesizeLead(
 		`- Decompose the task and delegate to the right specialist(s); run independent work in parallel (one agent call, multiple tasks).`,
 		`- Give each member a tight, self-contained brief with acceptance criteria; do not forward your whole context.`,
 		`- Members stay addressable after finishing — use agent_message to follow up or relay context between members instead of re-spawning.`,
+		`- Members spawned later see live teammates (with agent ids) in their prompt and can message each other directly; for members spawned together, pass ids from your spawn results when direct member↔member exchange helps.`,
 		`- Members cannot sub-spawn; you are the only coordinator.`,
 		`- The team shares the workspace and a TEAM MEMORY file (shown when it exists). Put relevant shared notes in each brief, and have write-capable members log durable findings to team memory.`,
 		`- Synthesize member reports into one final answer for your caller. Never paste raw member transcripts.`,

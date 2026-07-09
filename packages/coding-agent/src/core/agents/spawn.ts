@@ -212,19 +212,24 @@ function getSemaphore(settings: SettingsManager): Semaphore {
 /** Tracks in-flight spawns per agent type. The reservation is held for the
  *  lifetime of the spawn and is what makes the isolation gate race-free. */
 const inFlightByType = new Map<string, number>();
+/** Count of in-flight agents that can write the shared workspace. */
+let mutatingInFlight = 0;
 
 /** Tools that only delegate to other agents and never write the workspace. */
 const DELEGATION_ONLY_TOOLS = new Set(["agent", "agent_message", "chain"]);
 
 interface Reservation {
 	agentType: string;
+	/** Counts toward the shared-workspace conflict pool. */
+	mutating: boolean;
 	released: boolean;
 }
 
-function tryReserveSpawn(agentType: string): Reservation {
+function tryReserveSpawn(agentType: string, mutating: boolean): Reservation {
 	const next = (inFlightByType.get(agentType) ?? 0) + 1;
 	inFlightByType.set(agentType, next);
-	return { agentType, released: false };
+	if (mutating) mutatingInFlight += 1;
+	return { agentType, mutating, released: false };
 }
 
 function releaseReservation(reservation: Reservation): void {
@@ -236,14 +241,14 @@ function releaseReservation(reservation: Reservation): void {
 	} else {
 		inFlightByType.set(reservation.agentType, current - 1);
 	}
+	if (reservation.mutating) mutatingInFlight = Math.max(0, mutatingInFlight - 1);
 }
 
-function hasConcurrentActiveSpawn(_settings: SettingsManager, agentType: string): boolean {
-	// The current spawn is already in the counter; only flag other in-flight
-	// spawns of the same type as concurrent.
+function hasConcurrentActiveSpawn(_settings: SettingsManager, agentType: string, self: Reservation): boolean {
+	// The current spawn is already in the counters; only flag OTHER in-flight
+	// spawns — same-type runs, or anything else that writes the workspace.
 	if ((inFlightByType.get(agentType) ?? 0) > 1) return true;
-	const reg = getBackgroundProcessRegistry();
-	return reg.list().some((entry) => entry.kind === "subagent" && entry.status === "running");
+	return mutatingInFlight > (self.mutating ? 1 : 0);
 }
 
 /**
@@ -264,9 +269,21 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 		}
 	}
 
+	// Workspace-mutation classification happens BEFORE the reservation so the
+	// reservation can carry it. Delegation tools don't touch the workspace
+	// themselves — the agents they spawn re-enter the gate with their own
+	// tool sets — and worktree-isolated agents write only their own checkout.
+	const mutatesWorkspace = !isReadOnlyToolSet(
+		Array.isArray(definition.tools)
+			? definition.tools.filter((tool) => !DELEGATION_ONLY_TOOLS.has(tool.toLowerCase()))
+			: definition.tools,
+		definition.disallowedTools,
+	);
+	const effectiveIsolation = opts.isolationOverride ?? definition.isolation;
+
 	// Reserve the in-flight slot synchronously so parallel Promise.all
 	// spawns see a coherent concurrent count for the isolation gate.
-	const reservation = tryReserveSpawn(definition.name);
+	const reservation = tryReserveSpawn(definition.name, mutatesWorkspace && effectiveIsolation !== "worktree");
 
 	// ----- Guards (rollback on throw) -------------------------------------
 	const effectiveDisabled = applyTeamToRouting({
@@ -317,20 +334,11 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			: requestedMode;
 	void permissionMode; // Surfaced through customPrompt; enforcement is the runtime's job.
 
-	const effectiveIsolation = opts.isolationOverride ?? definition.isolation;
-
 	// Isolation gate (race-free: reservation is already held). Worktree
-	// isolation exempts the spawn — the worktree IS the isolation.
-	const concurrent = background || hasConcurrentActiveSpawn(settings, definition.name);
-	// Delegation tools don't touch the workspace themselves — the agents they
-	// spawn re-enter this gate with their own tool sets. A coordinator whose
-	// only non-read-only tools are delegation tools is safe to run concurrently.
-	const mutatesWorkspace = !isReadOnlyToolSet(
-		Array.isArray(definition.tools)
-			? definition.tools.filter((tool) => !DELEGATION_ONLY_TOOLS.has(tool.toLowerCase()))
-			: definition.tools,
-		definition.disallowedTools,
-	);
+	// isolation exempts the spawn — the worktree IS the isolation. Only
+	// OTHER write-capable agents count as conflicts: read-only scouts and
+	// delegation-only coordinators running alongside never gate a writer.
+	const concurrent = background || hasConcurrentActiveSpawn(settings, definition.name, reservation);
 	if (
 		effectiveIsolation !== "worktree" &&
 		mutatesWorkspace &&
@@ -394,6 +402,16 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 		if (team && (definition.name === "lead" || team.members[definition.name] !== undefined)) {
 			const teamType = `team-${team.name}`;
 			const teamCanWrite = canWrite && effectiveIsolation !== "worktree";
+			const canRead =
+				effective.tools === undefined
+					? !(effective.excludeTools ?? []).includes("read")
+					: effective.tools.includes("read");
+			const teamMemoryPath = agentMemoryFilePath({
+				agentType: teamType,
+				scope: "project",
+				cwd: parentCwdForMemory,
+				agentDir: parent.session.agentDir,
+			});
 			const teamMemory =
 				loadAgentMemory({
 					agentType: teamType,
@@ -413,16 +431,41 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 					tag: "team-memory",
 					intro: `Shared notes for team "${team.name}" — visible to the lead and every member.`,
 				})}`;
-			} else if (teamCanWrite) {
-				const teamMemoryPath = agentMemoryFilePath({
-					agentType: teamType,
-					scope: "project",
-					cwd: parentCwdForMemory,
-					agentDir: parent.session.agentDir,
-				});
+				// The snapshot above goes stale while you work: teammates may
+				// append. Any reader can poll the live file.
+				if (canRead) {
+					customPrompt +=
+						`\nTeam memory file: ${teamMemory.filePath} — teammates may add findings while you work; ` +
+						`re-read it with your read tool before finishing long tasks.`;
+				}
+			} else if (teamCanWrite || canRead) {
 				customPrompt +=
-					`\n\nTeam memory: no shared notes yet. Record durable, team-relevant findings in ` +
-					`${teamMemoryPath} so the lead and every member of team "${team.name}" see them.`;
+					`\n\nTeam memory: no shared notes yet. The team's shared file is ${teamMemoryPath}` +
+					(teamCanWrite
+						? ` — record durable, team-relevant findings there so the lead and every member of team "${team.name}" see them.`
+						: ` — check it (read tool) during long tasks; teammates may create it while you work.`);
+			}
+
+			// Teammate introductions: live roster agents this one can message
+			// directly (agent_message <id>) when a quick exchange beats
+			// relaying through the lead.
+			const rosterNames = new Set(["lead", ...Object.keys(team.members)]);
+			const teammates = getBackgroundProcessRegistry()
+				.list()
+				.filter(
+					(snap) =>
+						(snap.kind === "subagent" || snap.kind === "delegation") &&
+						snap.agentType !== undefined &&
+						rosterNames.has(snap.agentType) &&
+						snap.agentType !== definition.name &&
+						(snap.status === "running" || snap.status === "idle" || snap.status === "parked"),
+				);
+			if (teammates.length > 0) {
+				const rows = teammates.map((snap) => `- ${snap.agentType} — id ${snap.id} (${snap.status})`);
+				customPrompt +=
+					`\n\n## TEAMMATES (live)\n` +
+					`Team agents you can message directly with agent_message (send to the id) when a quick ` +
+					`question or handoff beats relaying through the lead:\n${rows.join("\n")}`;
 			}
 		}
 	}

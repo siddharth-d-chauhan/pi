@@ -476,6 +476,13 @@ describe("spawnAgent", () => {
 			createChildSession: recordingFactory(captured),
 		};
 
+		// A sibling roster agent is already live — the member should be introduced.
+		const siblingId = getBackgroundProcessRegistry().register({
+			kind: "subagent",
+			label: "lead · coordinate",
+			agentType: "lead",
+		});
+
 		// A member sees the shared file (fenced)...
 		await expect(
 			spawnAgent(
@@ -491,6 +498,12 @@ describe("spawnAgent", () => {
 		expect(captured[0]?.customPrompt).toContain("## TEAM MEMORY (shared)");
 		expect(captured[0]?.customPrompt).toContain("<team-memory>");
 		expect(captured[0]?.customPrompt).toContain("auth flow lives in src/auth.ts");
+		// ...with the live-file pointer for readers (shared findings stay fresh)...
+		expect(captured[0]?.customPrompt).toContain(memoryFile);
+		expect(captured[0]?.customPrompt).toContain("re-read it with your read tool");
+		// ...and a teammates introduction with a messageable id.
+		expect(captured[0]?.customPrompt).toContain("## TEAMMATES (live)");
+		expect(captured[0]?.customPrompt).toContain(siblingId);
 
 		// ...a non-roster agent type does not.
 		await expect(
@@ -518,7 +531,7 @@ describe("spawnAgent", () => {
 				},
 				deps,
 			),
-		).rejects.toThrow();
+		).rejects.toThrow(/not invoked in this test path/);
 		expect(captured[2]?.customPrompt).toContain("Team memory: no shared notes yet.");
 		expect(captured[2]?.customPrompt).toContain(memoryFile);
 	});

@@ -288,6 +288,48 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	// Harness-side enforcement (next-fix #1): risky tool calls consult
+	// pi.pre_action_gate BEFORE execution. Rules with enforce_pattern BLOCK
+	// deterministically; everything else stays prompting. Fail-open: gate
+	// trouble or timeout never blocks work.
+	pi.on("tool_call", async (event) => {
+		const risky = event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash";
+		if (!risky) return;
+		const input = (event as { input?: Record<string, unknown> }).input ?? {};
+		const files = [input.file_path, input.path].filter((value): value is string => typeof value === "string");
+		const command = typeof input.command === "string" ? input.command : undefined;
+		if (files.length === 0 && !command) return;
+		try {
+			const shared = (globalThis as Record<string, unknown>).__pi_kp__ as KpShared | undefined;
+			if (!shared) return;
+			const client = await shared.connect();
+			const result = await client.callTool(
+				{
+					name: "pi.pre_action_gate",
+					arguments: { action: event.toolName, files, command },
+				},
+				undefined,
+				{ timeout: 2_500 },
+			);
+			if (result.isError) return;
+			const text = result.content.find((block) => block.type === "text")?.text;
+			if (!text) return;
+			const gate = JSON.parse(text) as {
+				decision?: string;
+				violated_rules?: Array<{ reason?: string }>;
+			};
+			if (gate.decision === "block") {
+				const reasons = (gate.violated_rules ?? []).map((rule) => rule.reason).filter(Boolean);
+				return {
+					block: true,
+					reason: `Blocked by must_follow rule${reasons.length === 1 ? "" : "s"}: ${reasons.join(" | ")}`,
+				};
+			}
+		} catch {
+			// fail-open
+		}
+	});
+
 	// Debug blocks are for the failure just seen — expire stale ones.
 	pi.on("turn_end", async () => {
 		if (state.debugBlock && state.lastDebug && Date.now() - state.lastDebug.at > 120_000) {

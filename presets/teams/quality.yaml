@@ -1,0 +1,17 @@
+# /team apply quality — strong models where judgment matters (plan/review),
+# cheap models for mechanical work. The shipping-real-code preset.
+name: quality
+description: Strong models for planning/review, fast models for mechanical work
+modelOverrides:
+  explore: pi/smol
+  worker: pi/main
+  reviewer: pi/slow
+  plan: pi/slow
+roles:
+  smol: ["minimax/MiniMax-M2.5-lightning", "minimax/MiniMax-M3"]
+  main: ["minimax/MiniMax-M3"]
+  slow: ["minimax/MiniMax-M3"]
+coordinatorNote: |
+  Quality mode: plan before building; gate non-trivial changes with the
+  reviewer; verification means proving the code works, not confirming it
+  exists. Scouts summarize to ≤20 lines — full detail stays in handles.

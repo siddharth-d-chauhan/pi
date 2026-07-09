@@ -1,0 +1,47 @@
+# /chain review — three parallel lenses over your working diff, then synthesis.
+# Each lens reads the diff itself (your context stays clean); the synthesis
+# dedupes and ranks. Cheap: read-only agents on the small model.
+name: review
+description: Parallel 3-lens review of the working diff (correctness, safety, simplicity)
+budget_usd: 0.60
+inputs:
+  scope: { description: "What to review", default: "the current working-tree diff (git diff HEAD)" }
+stages:
+  - id: correctness
+    agent: reviewer
+    needs: []
+    prompt: |
+      Review {{inputs.scope}} for CORRECTNESS ONLY: logic errors, broken
+      edge cases, wrong conditions, races, missing error handling.
+      Read the diff and surrounding code yourself.
+      Return ≤8 findings, each one line: file:line — defect — concrete failure.
+      No style, no praise. Zero findings = say so.
+  - id: safety
+    agent: reviewer
+    needs: []
+    prompt: |
+      Review {{inputs.scope}} for SAFETY ONLY: injection, path traversal,
+      secrets in code, unsafe shell/exec, resource leaks, unbounded growth.
+      Read the diff and surrounding code yourself.
+      Return ≤8 one-line findings (file:line — risk — trigger). Zero = say so.
+  - id: simplicity
+    agent: reviewer
+    needs: []
+    prompt: |
+      Review {{inputs.scope}} for SIMPLIFICATION ONLY: duplicated logic,
+      dead code, existing helpers reimplemented, needless complexity.
+      Read the diff and the adjacent modules yourself.
+      Return ≤8 one-line findings naming the simpler form. Zero = say so.
+  - id: synthesis
+    agent: worker
+    needs: [correctness, safety, simplicity]
+    prompt: |
+      Merge these three review lenses into one ranked list. Dedupe overlaps,
+      drop anything speculative, keep at most 10 findings, most severe first.
+
+      ## Correctness
+      {{correctness.result}}
+      ## Safety
+      {{safety.result}}
+      ## Simplicity
+      {{simplicity.result}}

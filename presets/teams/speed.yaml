@@ -1,0 +1,14 @@
+# /team apply speed — maximize parallel fan-out with fast models.
+name: speed
+description: Fast models, aggressive parallel fan-out
+modelOverrides:
+  explore: pi/smol
+  worker: pi/smol
+  reviewer: pi/smol
+  plan: pi/smol
+roles:
+  smol: ["minimax/MiniMax-M2.5-highspeed", "minimax/MiniMax-M2.5-lightning", "minimax/MiniMax-M3"]
+coordinatorNote: |
+  Speed mode: never serialize independent work — spawn parallel agents in
+  one call (use isolation: "worktree" for parallel writers). Keep each
+  agent's assignment narrow enough to finish in one pass.

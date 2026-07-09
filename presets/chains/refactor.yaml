@@ -1,0 +1,34 @@
+# /chain refactor {"target": "extract retry logic into a helper", "check": "npm run check"}
+name: refactor
+description: Map usages, plan, apply, and review a refactor
+budget_usd: 1.20
+inputs:
+  target: { description: "What to refactor and toward what shape" }
+  check: { description: "Shell command that must pass", default: "true" }
+stages:
+  - id: map
+    agent: explore
+    prompt: |
+      Map everything this refactor will touch: {{inputs.target}}
+      Return AT MOST 20 lines: every affected file with the symbols/call
+      sites involved (path:line), plus anything that makes this risky
+      (reflection, dynamic dispatch, serialized shapes, public API).
+  - id: apply
+    agent: worker
+    prompt: |
+      Perform this refactor: {{inputs.target}}
+
+      Usage map from the scout:
+      {{map.result}}
+
+      Rules: behavior-preserving; update EVERY call site in the map; no
+      drive-by changes. `{{inputs.check}}` must pass.
+      Reply with ≤10 lines: per-file summary of the mechanical change.
+    verify: "{{inputs.check}}"
+    max_iters: 2
+  - id: review
+    agent: reviewer
+    prompt: |
+      Review the working diff for this refactor: {{inputs.target}}
+      Focus ONLY on: missed call sites (compare against {{map.handle}}),
+      behavior changes, and API breaks. ≤8 one-line findings or "clean".

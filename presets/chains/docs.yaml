@@ -1,0 +1,25 @@
+# /chain docs {"subject": "the extensions API"}
+name: docs
+description: Scan a subsystem's real surface, then write accurate docs for it
+budget_usd: 0.80
+inputs:
+  subject: { description: "What to document" }
+  output: { description: "Where to write", default: "an appropriate docs/ file" }
+stages:
+  - id: surface
+    agent: explore
+    prompt: |
+      Map the ACTUAL public surface of: {{inputs.subject}}
+      Read the code, not existing docs. ≤25 lines: every public
+      entrypoint/type/config with a one-line accurate description and
+      file:line. Flag anything existing docs get wrong.
+  - id: write
+    agent: worker
+    prompt: |
+      Write documentation for {{inputs.subject}} into {{inputs.output}},
+      based ONLY on this verified surface map (do not invent features):
+
+      {{surface.result}}
+
+      Style: task-oriented, one runnable example per major entrypoint,
+      no marketing prose. Reply ≤5 lines: what you wrote where.

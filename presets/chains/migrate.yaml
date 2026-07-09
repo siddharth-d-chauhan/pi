@@ -1,0 +1,36 @@
+# /chain migrate {"change": "rename getUser to fetchUser everywhere", "check": "npm run check"}
+# Scout lists the sites as JSON; a worker fixes them ONE BATCH AT A TIME
+# (serial — safe workspace writes); a final gate verifies the whole tree.
+name: migrate
+description: Sweep a mechanical change across the codebase (scout → serial fix batches → verify)
+budget_usd: 2.00
+inputs:
+  change: { description: "The mechanical change to apply everywhere" }
+  check: { description: "Shell command that must pass at the end", default: "true" }
+stages:
+  - id: scout
+    agent: explore
+    prompt: |
+      Find every site affected by: {{inputs.change}}
+      Group the sites into 3-8 independent batches (by directory/module).
+      Return ONLY a JSON array of batch descriptions, each a single string
+      naming the files in that batch, e.g.
+      ["src/core: a.ts, b.ts", "src/ui: c.ts"]. No prose.
+  - id: apply
+    agent: worker
+    foreach: "{{scout.result}}"
+    serial: true
+    max_items: 8
+    prompt: |
+      Apply this change: {{inputs.change}}
+      ONLY in this batch: {{item}}
+      Change nothing outside the named files. Reply in ≤3 lines.
+  - id: verify
+    agent: worker
+    needs: [apply]
+    prompt: |
+      The sweep "{{inputs.change}}" is applied. Run `{{inputs.check}}` and
+      `git diff --stat`; fix any straggler sites the sweep missed (search
+      for leftovers yourself). Reply ≤6 lines: final state + stragglers fixed.
+    verify: "{{inputs.check}}"
+    max_iters: 2

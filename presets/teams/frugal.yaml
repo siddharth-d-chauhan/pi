@@ -1,0 +1,15 @@
+# /team apply frugal — cheapest viable models everywhere. Day-to-day default
+# when tasks are routine. Pairs with the chains' explore-first structure.
+name: frugal
+description: Cheapest models for every agent type; token discipline enforced
+modelOverrides:
+  explore: pi/smol
+  worker: pi/smol
+  reviewer: pi/smol
+  plan: pi/smol
+roles:
+  smol: ["minimax/MiniMax-M2.5-lightning", "minimax/MiniMax-M2.5-highspeed", "minimax/MiniMax-M3"]
+coordinatorNote: |
+  Frugal mode: delegate reading to explore agents (they carry no project
+  context); never paste large outputs into the conversation — pass
+  agent:// handles. One focused agent beats three vague ones.

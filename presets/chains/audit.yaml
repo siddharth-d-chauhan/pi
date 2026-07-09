@@ -1,0 +1,38 @@
+# /chain audit — three parallel read-only sweeps, one report. No writes.
+name: audit
+description: Parallel repo audit (dependencies, security surface, code health) with a merged report
+budget_usd: 0.80
+inputs:
+  focus: { description: "Optional narrowing (subsystem/path)", default: "the whole repository" }
+stages:
+  - id: deps
+    agent: explore
+    needs: []
+    prompt: |
+      Audit dependencies of {{inputs.focus}}: unpinned versions, known-risky
+      packages, unused declared deps, duplicated functionality across deps.
+      ≤10 one-line findings with evidence (file:line). Zero = say so.
+  - id: security
+    agent: explore
+    needs: []
+    prompt: |
+      Audit the security surface of {{inputs.focus}}: secrets in the tree,
+      shell/exec with interpolated input, network calls with user data,
+      permissive file operations. ≤10 one-line findings (file:line — risk).
+  - id: health
+    agent: explore
+    needs: []
+    prompt: |
+      Audit code health of {{inputs.focus}}: dead files, TODO/FIXME older
+      than the surrounding code, suspiciously large files/functions,
+      copy-paste clusters. ≤10 one-line findings (path — issue).
+  - id: report
+    agent: worker
+    needs: [deps, security, health]
+    prompt: |
+      Merge into one prioritized audit report (≤20 lines): most actionable
+      first, grouped by effort (quick wins vs projects). Dedupe.
+
+      {{deps.result}}
+      {{security.result}}
+      {{health.result}}

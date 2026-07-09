@@ -1,0 +1,44 @@
+# /chain feature {"task": "add dark mode toggle", "check": "npm run check"}
+# Plan → build → review. The scout/planner never pollutes your context —
+# only the distilled plan and the final review reach the conversation.
+name: feature
+description: Plan, implement, and review a feature (plan → build → review)
+budget_usd: 1.00
+inputs:
+  task: { description: "What to build" }
+  check: { description: "Shell command that must pass", default: "true" }
+stages:
+  - id: plan
+    agent: plan
+    prompt: |
+      Design an implementation approach for: {{inputs.task}}
+
+      Return AT MOST 25 lines:
+      # Approach (2-3 sentences)
+      # Files to touch (exact paths)
+      # Steps (numbered, concrete)
+      # Risks (only real ones)
+      Do not paste file contents into your answer — name paths and line ranges.
+  - id: build
+    agent: worker
+    prompt: |
+      Implement this plan exactly. If a step is wrong once you see the code,
+      deviate minimally and say so.
+
+      {{plan.result}}
+
+      # Acceptance
+      - `{{inputs.check}}` passes
+      - No changes outside the plan's file list without justification
+      Reply with ≤10 lines: what changed per file, and any deviations.
+    verify: "{{inputs.check}}"
+    max_iters: 2
+  - id: review
+    agent: reviewer
+    prompt: |
+      Review the working-tree diff (`git diff`) that implemented:
+      {{inputs.task}}
+
+      The plan was: {{plan.handle}} (pull only if the diff looks off-plan).
+      Report ≤10 lines: verdict first, then only findings that would change
+      what the author does next.

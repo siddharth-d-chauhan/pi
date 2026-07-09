@@ -1,0 +1,28 @@
+# /chain tests {"area": "the chains runner", "check": "npm test"}
+name: tests
+description: Find untested behavior in an area, then write passing tests for it
+budget_usd: 1.00
+inputs:
+  area: { description: "Code area or file to cover" }
+  check: { description: "Command that runs the relevant tests", default: "true" }
+stages:
+  - id: gaps
+    agent: explore
+    prompt: |
+      Find the highest-value UNTESTED behavior in: {{inputs.area}}
+      Read the source and the existing tests. Return AT MOST 12 lines:
+      a ranked list of untested behaviors (file:function — behavior — why
+      it matters). Skip trivia; prefer failure paths and edge cases.
+  - id: write
+    agent: worker
+    prompt: |
+      Write tests covering these gaps (highest-ranked first, as many as fit
+      naturally in one focused test file/addition):
+
+      {{gaps.result}}
+
+      Match the project's existing test style and harness exactly.
+      `{{inputs.check}}` must pass — run it yourself before finishing.
+      Reply with ≤8 lines: which behaviors are now covered, in which file.
+    verify: "{{inputs.check}}"
+    max_iters: 2

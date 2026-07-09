@@ -1,0 +1,40 @@
+# /chain investigate {"question": "why is startup slow?"}
+# Three scouts attack the question from different angles in parallel.
+name: investigate
+description: Answer a hard codebase question via three parallel investigation angles
+budget_usd: 0.60
+inputs:
+  question: { description: "The question to answer" }
+stages:
+  - id: direct
+    agent: explore
+    needs: []
+    prompt: |
+      Investigate directly: {{inputs.question}}
+      Follow the code path involved end to end. ≤12 lines: answer first,
+      then the evidence chain (file:line hops).
+  - id: history
+    agent: explore
+    needs: []
+    prompt: |
+      Investigate via history: {{inputs.question}}
+      Use git log/blame on the relevant areas — when did the behavior
+      appear, what changed around it? ≤10 lines: findings with commits.
+  - id: periphery
+    agent: explore
+    needs: []
+    prompt: |
+      Investigate the periphery: {{inputs.question}}
+      Check config, environment handling, dependencies, and tests for
+      assumptions related to the question. ≤10 lines.
+  - id: answer
+    agent: worker
+    needs: [direct, history, periphery]
+    prompt: |
+      Synthesize ONE answer to: {{inputs.question}}
+      Lead with the answer (2-3 sentences), then supporting evidence,
+      then what's still uncertain. ≤15 lines total.
+
+      {{direct.result}}
+      {{history.result}}
+      {{periphery.result}}

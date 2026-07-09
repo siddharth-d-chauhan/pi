@@ -81,6 +81,10 @@ export interface ChainStage {
 	verify?: string;
 	judge?: string;
 	foreach?: string;
+	/** Run foreach items one at a time (safe for workspace-mutating agents). */
+	serial: boolean;
+	/** Per-stage isolation override (wins over the agent definition). */
+	isolation?: "worktree" | "none";
 	maxItems: number;
 	maxIters: number;
 	onFail: "stop" | "continue";
@@ -193,6 +197,11 @@ export function parseChain(rawContent: string, filePath: string, source: ChainDe
 			throw new ChainValidationError(`${filePath}: stage "${id}" max_items must be a positive number`);
 		}
 		const foreach = typeof raw.foreach === "string" && raw.foreach.trim() ? raw.foreach : undefined;
+		const serial = raw.serial === true;
+		const isolationRaw = raw.isolation;
+		if (isolationRaw !== undefined && isolationRaw !== "worktree" && isolationRaw !== "none") {
+			throw new ChainValidationError(`${filePath}: stage "${id}" isolation must be "worktree" or "none"`);
+		}
 		const verify = typeof raw.verify === "string" && raw.verify.trim() ? raw.verify : undefined;
 		const judge = typeof raw.judge === "string" && raw.judge.trim() ? raw.judge : undefined;
 		if (foreach && (verify || judge)) {
@@ -210,6 +219,8 @@ export function parseChain(rawContent: string, filePath: string, source: ChainDe
 			verify,
 			judge,
 			foreach,
+			serial,
+			isolation: isolationRaw as "worktree" | "none" | undefined,
 			maxItems,
 			maxIters,
 			onFail,
@@ -559,6 +570,7 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 				name: `${definition.name}.${stage.id}${nameSuffix}`,
 				group: definition.name,
 				ephemeral: nameSuffix !== "",
+				isolationOverride: stage.isolation,
 				signal: opts.signal,
 				onRegistered: (registryId) => {
 					if (!nameSuffix) state.registryId = registryId;
@@ -581,13 +593,14 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 			if (stage.verify) {
 				state.status = "verifying";
 				emit();
-				const verdict = await execCommand("sh", ["-c", stage.verify], opts.cwd, {
+				const verifyCommand = interpolate(stage.verify, { input, inputs, results: spawnResults });
+				const verdict = await execCommand("sh", ["-c", verifyCommand], opts.cwd, {
 					timeout: VERIFY_TIMEOUT_MS,
 					signal: opts.signal,
 				});
 				if (verdict.code !== 0) {
 					failure =
-						`Your work failed verification (\`${stage.verify}\`, exit ${verdict.code}).\n` +
+						`Your work failed verification (\`${verifyCommand}\`, exit ${verdict.code}).\n` +
 						`Output tail:\n${(verdict.stderr || verdict.stdout).slice(-GATE_FEEDBACK_CAP)}`;
 				}
 			}
@@ -672,17 +685,24 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 				state.itemsTotal = items.length;
 				state.itemsDone = 0;
 				emit();
-				const itemResults = await Promise.all(
-					items.map(async (item, index) => {
-						const budgetErr = overBudget();
-						if (budgetErr) throw new Error(budgetErr);
-						const prompt = interpolate(stage.prompt, { ...baseCtx, item });
-						const itemResult = await spawnStageAgent(stage, state, prompt, context, `[${index + 1}]`);
-						state.itemsDone = (state.itemsDone ?? 0) + 1;
-						emit();
-						return itemResult;
-					}),
-				);
+				const runItem = async (item: string, index: number): Promise<SpawnResult> => {
+					const budgetErr = overBudget();
+					if (budgetErr) throw new Error(budgetErr);
+					const prompt = interpolate(stage.prompt, { ...baseCtx, item });
+					const itemResult = await spawnStageAgent(stage, state, prompt, context, `[${index + 1}]`);
+					state.itemsDone = (state.itemsDone ?? 0) + 1;
+					emit();
+					return itemResult;
+				};
+				let itemResults: SpawnResult[];
+				if (stage.serial) {
+					itemResults = [];
+					for (let index = 0; index < items.length; index++) {
+						itemResults.push(await runItem(items[index], index));
+					}
+				} else {
+					itemResults = await Promise.all(items.map(runItem));
+				}
 				const combined = itemResults
 					.map((itemResult, index) => {
 						const body = itemResult.inline.replace(/\n*_agentId: [^\n]*_\s*$/, "");

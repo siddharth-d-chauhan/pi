@@ -14,6 +14,7 @@ import type { AgentDefinition, AgentDefinitionRegistry } from "../../../src/core
 import { resetLifecycleForTests } from "../../../src/core/agents/lifecycle.ts";
 import type { CreateChildSessionInput, CreateChildSessionResult, SpawnDeps } from "../../../src/core/agents/spawn.ts";
 import { resetForTests as resetRegistry } from "../../../src/core/background-process-registry.ts";
+import { SessionManager } from "../../../src/core/session-manager.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 function makeDefinition(name: string): AgentDefinition {
@@ -453,5 +454,127 @@ stages:
 		expect(result.stages[0].inline).toBe("SEEDED PLAN");
 		expect(result.stages[1].inline).toContain("built from seed");
 		expect(settled).toEqual(["build:completed"]);
+	});
+
+	it("interpolates inputs into verify commands", async () => {
+		const parent = await makeParent();
+		const child = await createHarness();
+		harnesses.push(child);
+		child.setResponses([fauxAssistantMessage("done")]);
+
+		const cwd = makeTempDir("pi-chain-vcmd-");
+		const chainYaml = `
+name: vcmd
+inputs:
+  marker: { description: "file that must exist" }
+stages:
+  - id: work
+    agent: worker
+    prompt: "touch nothing: {{inputs.marker}}"
+    verify: "test -e {{inputs.marker}}"
+    max_iters: 0
+`;
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: stagedFactory([child]),
+		};
+
+		// cwd itself exists, so verify "test -e <cwd>" passes only via interpolation.
+		const result = await runChain({
+			definition: parseChain(chainYaml, "vcmd.yaml", "project"),
+			input: JSON.stringify({ marker: cwd }),
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["worker"]),
+			deps,
+			cwd,
+		});
+		expect(result.status).toBe("completed");
+	});
+
+	it("serial foreach runs items one at a time", async () => {
+		const parent = await makeParent();
+		const children = [await createHarness(), await createHarness(), await createHarness()];
+		harnesses.push(...children);
+		for (const child of children) child.setResponses([fauxAssistantMessage("ok")]);
+
+		let inFlight = 0;
+		let maxInFlight = 0;
+		let index = 0;
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: async () => {
+				inFlight += 1;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				const child = children[index++];
+				return {
+					session: child.session,
+					dispose: () => {
+						inFlight -= 1;
+					},
+				};
+			},
+		};
+
+		const chainYaml = `
+name: ser
+stages:
+  - id: work
+    agent: worker
+    serial: true
+    foreach: |
+      a
+      b
+      c
+    prompt: "do {{item}}"
+`;
+		const result = await runChain({
+			definition: parseChain(chainYaml, "ser.yaml", "project"),
+			input: "",
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["worker"]),
+			deps,
+			cwd: makeTempDir("pi-chain-cwd-"),
+		});
+		expect(result.status).toBe("completed");
+		expect(maxInFlight).toBe(1);
+	});
+
+	it("stage isolation: worktree forwards to spawn (fails clearly outside git)", async () => {
+		// Parent cwd must NOT be a git repo, or spawn would create a real worktree.
+		const parent = await createHarness({
+			sessionManager: SessionManager.inMemory(makeTempDir("pi-chain-parent-")),
+		});
+		harnesses.push(parent);
+		const chainYaml = `
+name: iso
+stages:
+  - id: work
+    agent: worker
+    isolation: worktree
+    prompt: p
+`;
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: async () => {
+				throw new Error("factory should not be reached");
+			},
+		};
+		const result = await runChain({
+			definition: parseChain(chainYaml, "iso.yaml", "project"),
+			input: "",
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["worker"]),
+			deps,
+			cwd: makeTempDir("pi-chain-cwd-"),
+		});
+		expect(result.status).toBe("failed");
+		expect(result.stages[0].error).toContain("git repository");
 	});
 });

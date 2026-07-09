@@ -1,0 +1,35 @@
+# /chain bugfix {"bug": "login times out after 30s", "check": "npm test"}
+# Locate → fix → judge. The judge is adversarial: symptom-patches get rejected.
+name: bugfix
+description: Locate a bug's root cause, fix it, adversarially verify the fix
+budget_usd: 1.00
+inputs:
+  bug: { description: "Bug description or error message" }
+  check: { description: "Shell command that must pass", default: "true" }
+stages:
+  - id: locate
+    agent: explore
+    prompt: |
+      Locate the root cause of this bug: {{inputs.bug}}
+
+      Return AT MOST 15 lines:
+      # Root cause (file:line + one-sentence mechanism)
+      # Evidence (how you know — 2-3 bullets)
+      # Blast radius (what else touches this code)
+      Name paths; do not paste large code blocks.
+  - id: fix
+    agent: worker
+    prompt: |
+      Fix this bug at its root cause (not the symptom):
+      {{inputs.bug}}
+
+      Diagnosis from the scout:
+      {{locate.result}}
+
+      # Acceptance
+      - `{{inputs.check}}` passes
+      - The fix addresses the mechanism named in the diagnosis
+      Reply with ≤8 lines: the change, and why it kills the root cause.
+    verify: "{{inputs.check}}"
+    judge: "Does the diff fix the ROOT CAUSE identified in the diagnosis, or does it paper over the symptom (special-casing, retries, swallowed errors)?"
+    max_iters: 2

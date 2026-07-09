@@ -1,0 +1,16 @@
+# /team apply deep — hard problems: strongest available models everywhere,
+# spend tokens on thinking rather than retries.
+name: deep
+description: Strongest models everywhere for genuinely hard problems
+modelOverrides:
+  explore: pi/main
+  worker: pi/slow
+  reviewer: pi/slow
+  plan: pi/slow
+roles:
+  main: ["minimax/MiniMax-M3"]
+  slow: ["minimax/MiniMax-M3"]
+coordinatorNote: |
+  Deep mode: prefer one thorough agent over many shallow ones; give agents
+  the full problem statement and let them read broadly. Still return
+  distilled results — reasoning happens in the child, not your context.

@@ -104,6 +104,11 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function repoName(cwd: string): string {
+		const parts = cwd.replace(/\/+$/, "").split("/");
+		return parts[parts.length - 1] || "";
+	}
+
 	pi.registerTool({
 		name: "remember",
 		label: "remember",
@@ -112,15 +117,20 @@ export default function (pi: ExtensionAPI) {
 			"Rules/preferences appear in every future session's boot context. " +
 			"Use from_user: true only when the user explicitly stated it.",
 		parameters: rememberSchema,
-		async execute(_id: string, input: RememberInput) {
+		async execute(_id: string, rawInput: RememberInput, _signal, _onUpdate, ctx) {
+			const input = rawInput as RememberInput & { scope?: "global" | "repo" | "file"; file?: string };
 			const evidence = input.from_user
 				? { user_stated: ["explicit user directive"] }
 				: { observed: ["inferred while working"] };
+			const scopeArgs: Record<string, unknown> = {};
+			if (input.scope === "repo") scopeArgs.repository = repoName(ctx?.cwd ?? process.cwd());
+			else if (input.scope === "file" && input.file) scopeArgs.file = input.file;
 			const text = await writeback({
 				kind: input.kind,
 				summary: input.summary,
 				text: input.detail,
 				evidence,
+				...scopeArgs,
 			});
 			return { content: [{ type: "text", text }], details: undefined };
 		},

@@ -31,6 +31,12 @@ const agentTaskSchema = Type.Object({
 	background: Type.Optional(Type.Boolean({ description: "Detach and return registry id." })),
 	/** Display name for the registry entry. */
 	name: Type.Optional(Type.String({ description: "Optional registry label." })),
+	/** Run this task in a disposable git worktree (safe parallel writes). */
+	isolation: Type.Optional(
+		Type.Literal("worktree", {
+			description: "Isolate in a disposable git worktree — required for parallel write-capable tasks.",
+		}),
+	),
 });
 
 const agentToolSchema = Type.Object({
@@ -503,6 +509,7 @@ export function createAgentToolDefinition(
 						modelOverride: task.model,
 						background,
 						name: task.name,
+						isolationOverride: task.isolation,
 						signal,
 						onRegistered: (registryId) => {
 							live[index].registryId = registryId;

@@ -65,8 +65,13 @@ export async function createAgentWorktree(repoCwd: string, id: string): Promise<
 	}
 	const baseSha = head.stdout.trim();
 
-	const id8 = id.replace(/[^A-Za-z0-9]/g, "").slice(0, 8) || Math.random().toString(36).slice(2, 10);
+	// The FULL sanitized id: registry ids share a timestamp prefix, so a
+	// truncated prefix collides for same-call parallel spawns (bg-<ts>-1 vs
+	// bg-<ts>-2 both begin "bg<ts>").
+	const id8 = id.replace(/[^A-Za-z0-9]/g, "") || Math.random().toString(36).slice(2, 10);
 	const branch = `pi-agent/${id8}`;
+	// A crashed prior run can leave the branch behind; it is ours to reclaim.
+	await execCommand("git", ["-C", repoRoot, "branch", "-D", branch], repoRoot).catch(() => undefined);
 	const worktreesRoot = join(tmpdir(), "pi-worktrees");
 	mkdirSync(worktreesRoot, { recursive: true });
 	const worktreePath = join(worktreesRoot, `${basename(repoRoot)}-${id8}`);

@@ -62,6 +62,8 @@ export interface SpawnOptions {
 	 * lifecycle and never persisted to the agent index.
 	 */
 	ephemeral?: boolean;
+	/** Per-spawn isolation override (wins over the definition's isolation). */
+	isolationOverride?: "worktree" | "none";
 	/** Caller-supplied abort signal. */
 	signal?: AbortSignal;
 	/**
@@ -312,12 +314,14 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			: requestedMode;
 	void permissionMode; // Surfaced through customPrompt; enforcement is the runtime's job.
 
+	const effectiveIsolation = opts.isolationOverride ?? definition.isolation;
+
 	// Isolation gate (race-free: reservation is already held). Worktree
 	// isolation exempts the spawn — the worktree IS the isolation.
 	const concurrent = background || hasConcurrentActiveSpawn(settings, definition.name);
 	const mutatesWorkspace = !effective.readOnly;
 	if (
-		definition.isolation !== "worktree" &&
+		effectiveIsolation !== "worktree" &&
 		mutatesWorkspace &&
 		concurrent &&
 		agentSettings.allowSharedWorkspaceWrites !== true
@@ -325,7 +329,7 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 		releaseReservation(reservation);
 		throw new Error(
 			`Agent "${definition.name}" would mutate shared workspace state in parallel. ` +
-				`Set "agents.allowSharedWorkspaceWrites": true or use isolation: "worktree".`,
+				`Pass isolation: "worktree" on the task, use a worktree-isolated agent definition, or set "agents.allowSharedWorkspaceWrites": true.`,
 		);
 	}
 
@@ -369,7 +373,7 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 		if (memory) {
 			// Worktree agents write back to the REAL checkout — keep memory
 			// read-only for them so nothing lands outside their sandbox.
-			customPrompt += `\n\n${formatMemorySection(memory, canWrite && definition.isolation !== "worktree")}`;
+			customPrompt += `\n\n${formatMemorySection(memory, canWrite && effectiveIsolation !== "worktree")}`;
 		}
 	}
 
@@ -437,7 +441,7 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 		// Worktree isolation: the child works in a disposable git worktree.
 		let worktree: AgentWorktree | undefined;
 		let worktreeFinalized = false;
-		if (definition.isolation === "worktree") {
+		if (effectiveIsolation === "worktree") {
 			try {
 				if (!(await isGitRepo(parentCwd))) {
 					throw new Error(`isolation: "worktree" requires a git repository (cwd: ${parentCwd})`);

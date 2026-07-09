@@ -1,0 +1,9 @@
+{
+	"name": "pi-fork-extensions",
+	"private": true,
+	"description": "Runtime deps for the production extensions (loaded from source; resolved relative to this directory).",
+	"dependencies": {
+		"@modelcontextprotocol/sdk": "1.29.0"
+	},
+	"type": "module"
+}

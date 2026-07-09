@@ -19,11 +19,17 @@ class FakeSession {
 	followUps: string[] = [];
 	reply = "fake reply";
 	disposed = false;
+	private totalTokens = 0;
 	private listeners = new Set<(event: { type: string }) => void>();
 
 	async prompt(text: string): Promise<void> {
 		this.prompts.push(text);
+		this.totalTokens += 100;
 		for (const listener of this.listeners) listener({ type: "turn_end" });
+	}
+
+	getSessionStats(): { tokens: { total: number }; cost: number } {
+		return { tokens: { total: this.totalTokens }, cost: this.totalTokens / 100_000 };
 	}
 
 	async followUp(text: string): Promise<void> {
@@ -85,18 +91,27 @@ describe("agent lifecycle", () => {
 		expect(getBackgroundProcessRegistry().get(id)?.status).toBe("idle");
 
 		const receipt = await deliverToAgent(id, "hello there", { from: "main", awaitReply: true });
-		expect(receipt).toEqual({ status: "replied", reply: "fake reply" });
+		expect(receipt).toMatchObject({ status: "replied", reply: "fake reply" });
+		expect(receipt.status === "replied" && receipt.usage?.tokens).toBe(100);
 		expect(fake.prompts[0]).toContain('<agent-message from="main">');
 		expect(fake.prompts[0]).toContain("hello there");
 		expect(getBackgroundProcessRegistry().get(id)?.status).toBe("idle");
 	});
 
-	it("queues via followUp while the agent is running", async () => {
-		const { id, fake } = registerFake({});
+	it("queues in the lifecycle while running and drains on idle", async () => {
+		const { id, fake } = registerFake({ sessionFile: "/tmp/fake.jsonl" });
 		const receipt = await deliverToAgent(id, "note this", { from: "main" });
 		expect(receipt).toEqual({ status: "queued" });
-		expect(fake.followUps[0]).toContain("note this");
+		// Queued in the lifecycle, NOT the session — a park cannot drop it.
+		expect(fake.followUps).toHaveLength(0);
 		expect(fake.prompts).toHaveLength(0);
+		expect(getAgentLifecycle(id)?.queue).toHaveLength(1);
+
+		markAgentIdle(id);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(fake.prompts).toHaveLength(1);
+		expect(fake.prompts[0]).toContain("note this");
+		expect(getAgentLifecycle(id)?.queue).toHaveLength(0);
 	});
 
 	it("parks idle agents after the TTL and revives on delivery", async () => {
@@ -115,7 +130,7 @@ describe("agent lifecycle", () => {
 
 		const receipt = await deliverToAgent(id, "wake up", { from: "main", awaitReply: true });
 		expect(revive).toHaveBeenCalledOnce();
-		expect(receipt).toEqual({ status: "replied", reply: "revived reply" });
+		expect(receipt).toMatchObject({ status: "replied", reply: "revived reply" });
 		expect(getBackgroundProcessRegistry().get(id)?.status).toBe("idle");
 	});
 

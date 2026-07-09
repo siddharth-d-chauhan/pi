@@ -39,11 +39,15 @@ export interface AgentLifecycleEntry {
 	parkTimer?: ReturnType<typeof setTimeout>;
 	/** True while a delivery-triggered turn is in flight. */
 	busy: boolean;
+	/** Messages queued while the agent was running/busy; drained on idle. */
+	queue: Array<{ wrapped: string; from: string }>;
+	/** In-flight revive, memoized so concurrent deliveries share one session. */
+	reviving?: Promise<AgentSession | undefined>;
 }
 
 export type DeliveryReceipt =
 	| { status: "queued" }
-	| { status: "replied"; reply: string }
+	| { status: "replied"; reply: string; usage?: { tokens: number; costUsd: number } }
 	| { status: "failed"; reason: string };
 
 /** Default idle TTL before an agent's session is parked to disk. */
@@ -74,6 +78,28 @@ export function registerRunningAgent(init: {
 		revive: init.revive,
 		idleTtlMs: init.idleTtlMs ?? DEFAULT_IDLE_TTL_MS,
 		busy: false,
+		queue: [],
+	});
+}
+
+/** Register a cold (restart-survived) agent directly as parked. */
+export function registerParkedAgent(init: {
+	registryId: string;
+	agentType: string;
+	sessionFile: string;
+	revive: () => Promise<{ session: AgentSession; dispose: () => void }>;
+	idleTtlMs?: number;
+}): void {
+	if (agents.has(init.registryId)) return;
+	agents.set(init.registryId, {
+		registryId: init.registryId,
+		agentType: init.agentType,
+		state: "parked",
+		sessionFile: init.sessionFile,
+		revive: init.revive,
+		idleTtlMs: init.idleTtlMs ?? DEFAULT_IDLE_TTL_MS,
+		busy: false,
+		queue: [],
 	});
 }
 
@@ -88,7 +114,17 @@ export function markAgentIdle(registryId: string): boolean {
 	entry.state = "idle";
 	getBackgroundProcessRegistry().setStatus(registryId, "idle");
 	schedulePark(entry);
+	if (entry.queue.length > 0) void drainQueue(entry);
 	return true;
+}
+
+/** Deliver queued messages one at a time once the agent is idle. */
+async function drainQueue(entry: AgentLifecycleEntry): Promise<void> {
+	while (entry.queue.length > 0 && agents.get(entry.registryId) === entry && entry.state === "idle" && !entry.busy) {
+		const next = entry.queue.shift();
+		if (!next) return;
+		await runDeliveryTurn(entry, next.wrapped);
+	}
 }
 
 /** The spawn run failed/was cancelled/killed: drop the session entirely. */
@@ -124,6 +160,12 @@ function schedulePark(entry: AgentLifecycleEntry): void {
 export function parkAgent(registryId: string): void {
 	const entry = agents.get(registryId);
 	if (!entry || entry.state !== "idle") return;
+	if (entry.queue.length > 0) {
+		// Never park over undelivered messages — drain and try again later.
+		void drainQueue(entry);
+		schedulePark(entry);
+		return;
+	}
 	clearTimer(entry);
 	entry.dispose?.();
 	entry.session = undefined;
@@ -138,19 +180,31 @@ export function parkAgent(registryId: string): void {
 	}
 }
 
-/** Reopen a parked agent's session. Idempotent for idle agents. */
+/** Reopen a parked agent's session. Idempotent for idle agents; concurrent
+ * revives share one attempt, and a kill during revive disposes the freshly
+ * opened session instead of resurrecting a zombie. */
 export async function reviveAgent(registryId: string): Promise<AgentSession | undefined> {
 	const entry = agents.get(registryId);
 	if (!entry) return undefined;
 	if (entry.state === "idle" || entry.state === "running") return entry.session;
 	if (entry.state !== "parked" || !entry.revive) return undefined;
-	const revived = await entry.revive();
-	entry.session = revived.session;
-	entry.dispose = revived.dispose;
-	entry.state = "idle";
-	getBackgroundProcessRegistry().setStatus(registryId, "idle");
-	schedulePark(entry);
-	return revived.session;
+	entry.reviving ??= (async () => {
+		const revived = await entry.revive!();
+		if (agents.get(registryId) !== entry) {
+			// Killed/disposed while reviving — tear the new session down.
+			revived.dispose();
+			return undefined;
+		}
+		entry.session = revived.session;
+		entry.dispose = revived.dispose;
+		entry.state = "idle";
+		getBackgroundProcessRegistry().setStatus(registryId, "idle");
+		schedulePark(entry);
+		return revived.session;
+	})().finally(() => {
+		entry.reviving = undefined;
+	});
+	return entry.reviving;
 }
 
 export function getAgentLifecycle(registryId: string): AgentLifecycleEntry | undefined {
@@ -161,34 +215,19 @@ export function listLifecycleAgents(): AgentLifecycleEntry[] {
 	return [...agents.values()];
 }
 
-/**
- * Deliver a message to an agent per the delivery matrix. `awaitReply`
- * (idle/parked targets only) runs the turn to completion and returns the
- * agent's reply text.
- */
-export async function deliverToAgent(
-	registryId: string,
-	message: string,
-	opts: { from: string; awaitReply?: boolean } = { from: "main" },
-): Promise<DeliveryReceipt> {
-	const entry = agents.get(registryId);
-	if (!entry) return { status: "failed", reason: `No agent "${registryId}" (it may have been disposed).` };
-
-	const wrapped = `<agent-message from="${opts.from}">\n${message}\n</agent-message>`;
-
-	if (entry.state === "running" || entry.busy) {
-		const session = entry.session;
-		if (!session) return { status: "failed", reason: "Agent is transitioning; retry shortly." };
-		void session.followUp(wrapped);
-		return { status: "queued" };
-	}
-
+/** Run one delivery turn against a live idle session. */
+async function runDeliveryTurn(
+	entry: AgentLifecycleEntry,
+	wrapped: string,
+): Promise<{ reply: string; usage: { tokens: number; costUsd: number } } | { failed: string }> {
+	const registryId = entry.registryId;
 	const session = entry.state === "parked" ? await reviveAgent(registryId) : entry.session;
-	if (!session) return { status: "failed", reason: "Agent could not be revived." };
+	if (!session) return { failed: "Agent could not be revived." };
 
 	clearTimer(entry);
 	entry.busy = true;
 	getBackgroundProcessRegistry().setStatus(registryId, "running");
+	const statsBefore = session.getSessionStats();
 	let turns = 0;
 	const turnUnsub = session.subscribe((event) => {
 		if (event.type !== "turn_end") return;
@@ -201,19 +240,55 @@ export async function deliverToAgent(
 	});
 	try {
 		await session.prompt(wrapped);
-		const reply = session.getLastAssistantText()?.trim() ?? "";
-		return opts.awaitReply ? { status: "replied", reply } : { status: "queued" };
+		const statsAfter = session.getSessionStats();
+		return {
+			reply: session.getLastAssistantText()?.trim() ?? "",
+			usage: {
+				tokens: Math.max(0, statsAfter.tokens.total - statsBefore.tokens.total),
+				costUsd: Math.max(0, statsAfter.cost - statsBefore.cost),
+			},
+		};
 	} catch (err) {
-		return { status: "failed", reason: (err as Error).message };
+		return { failed: (err as Error).message };
 	} finally {
 		turnUnsub();
 		entry.busy = false;
-		if (entry.state === "idle" || entry.state === "parked") {
-			entry.state = "idle";
+		// The entry may have been killed/disposed while the turn ran — never
+		// resurrect its registry status or arm timers on a dead entry.
+		if (agents.get(registryId) === entry) {
+			if (entry.state === "idle" || entry.state === "parked") entry.state = "idle";
+			getBackgroundProcessRegistry().setStatus(registryId, "idle");
+			schedulePark(entry);
+			if (entry.queue.length > 0) void drainQueue(entry);
 		}
-		getBackgroundProcessRegistry().setStatus(registryId, "idle");
-		schedulePark(entry);
 	}
+}
+
+/**
+ * Deliver a message to an agent per the delivery matrix. `awaitReply`
+ * (idle/parked targets only) runs the turn to completion and returns the
+ * agent's reply text plus the tokens/cost the turn consumed.
+ */
+export async function deliverToAgent(
+	registryId: string,
+	message: string,
+	opts: { from: string; awaitReply?: boolean } = { from: "main" },
+): Promise<DeliveryReceipt> {
+	const entry = agents.get(registryId);
+	if (!entry) return { status: "failed", reason: `No agent "${registryId}" (it may have been disposed).` };
+
+	const wrapped = `<agent-message from="${opts.from}">\n${message}\n</agent-message>`;
+
+	if (entry.state === "running" || entry.busy) {
+		// Queued in the LIFECYCLE (not the session) so a park cannot drop it;
+		// markAgentIdle / parkAgent drain this queue.
+		entry.queue.push({ wrapped, from: opts.from });
+		return { status: "queued" };
+	}
+
+	const outcome = await runDeliveryTurn(entry, wrapped);
+	if ("failed" in outcome) return { status: "failed", reason: outcome.failed };
+	return opts.awaitReply ? { status: "replied", reply: outcome.reply, usage: outcome.usage } : { status: "queued" };
 }
 
 /** Kill/park sweep for parent shutdown. */

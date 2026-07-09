@@ -24,10 +24,18 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@earendil-works/pi-ai/compat";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	Model,
+	TextContent,
+} from "@earendil-works/pi-ai/compat";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	completeSimple,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	isRetryableAssistantError,
@@ -51,6 +59,7 @@ import {
 	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
+	serializeConversation,
 	shouldCompact,
 } from "./compaction/index.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -83,7 +92,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
@@ -819,6 +828,51 @@ export class AgentSession {
 	/** Current thinking level */
 	get thinkingLevel(): ThinkingLevel {
 		return this.agent.state.thinkingLevel;
+	}
+
+	/**
+	 * Run a one-off auxiliary completion over the CURRENT conversation
+	 * without touching the transcript: the conversation is serialized (the
+	 * same pipeline compaction uses) and the instruction appended as the
+	 * final user message. Nothing is persisted and no session events fire.
+	 * Powers judges, activity summaries, handoffs, and scaffold generation.
+	 */
+	async sideRequest(
+		prompt: string,
+		opts?: { maxTokens?: number; signal?: AbortSignal; includeConversation?: boolean },
+	): Promise<string> {
+		const model = this.model;
+		if (!model) throw new Error("sideRequest: no model selected");
+		const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) throw new Error(`sideRequest: ${auth.error}`);
+		let text = prompt;
+		if (opts?.includeConversation !== false) {
+			// Cap the serialized transcript (keep the tail — recency wins) so
+			// long sessions can't blow the aux request past the context window.
+			const cap = 24_000;
+			let conversationText = serializeConversation(convertToLlm(this.messages));
+			if (conversationText.length > cap) {
+				conversationText = `[…earlier conversation truncated…]\n${conversationText.slice(-cap)}`;
+			}
+			text = `<conversation>\n${conversationText}\n</conversation>\n\n${prompt}`;
+		}
+		const context: Context = {
+			systemPrompt: "You are a fast auxiliary assistant. Answer the request directly and concisely.",
+			messages: [{ role: "user", content: text, timestamp: Date.now() }],
+			tools: [],
+		};
+		const result = await completeSimple(model, context, {
+			maxTokens: opts?.maxTokens ?? 2_000,
+			apiKey: auth.apiKey,
+			headers: auth.headers,
+			env: auth.env,
+			signal: opts?.signal,
+		});
+		return result.content
+			.filter((block): block is TextContent => block.type === "text")
+			.map((block) => block.text)
+			.join("\n")
+			.trim();
 	}
 
 	/** Whether agent is currently streaming a response */

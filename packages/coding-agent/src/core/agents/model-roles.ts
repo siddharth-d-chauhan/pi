@@ -1,6 +1,7 @@
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SettingsManager } from "../settings-manager.ts";
+import { applyTeamToRouting, type EffectiveAgentRouting } from "./teams.ts";
 
 export interface ResolveAgentModelOptions {
 	spec?: string;
@@ -17,9 +18,17 @@ export interface ResolvedAgentModel {
 
 const MAX_ALIAS_DEPTH = 4;
 
+function teamRouting(options: ResolveAgentModelOptions): EffectiveAgentRouting {
+	return applyTeamToRouting({
+		modelOverrides: options.settings.getAgentModelOverrides(),
+		roles: options.settings.getAgentRoles(),
+		disabled: [],
+	});
+}
+
 export function resolveAgentModel(options: ResolveAgentModelOptions): ResolvedAgentModel {
 	const override = options.agentType
-		? getRecordValue(options.settings.getAgentModelOverrides(), options.agentType)
+		? getRecordValue(teamRouting(options).modelOverrides, options.agentType)
 		: undefined;
 	return resolveModelSpec(override ?? options.spec, options, new Set(), 0);
 }
@@ -59,7 +68,7 @@ function resolveRoleAlias(
 		throw new Error(`Agent model role alias cycle detected at pi/${normalizedRole}`);
 	}
 
-	const roles = options.settings.getAgentRoles();
+	const roles = teamRouting(options).roles;
 	const chain = getRecordValue(roles, normalizedRole) ?? [];
 	if (chain.length === 0) {
 		return { model: options.parent, inherited: true };

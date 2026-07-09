@@ -28,6 +28,7 @@ import {
 import { loadAgentDefinitions } from "../agents/index.ts";
 import type { SpawnDeps } from "../agents/spawn.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { formatElapsed } from "./agent.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const chainToolSchema = Type.Object({
@@ -66,6 +67,8 @@ export interface CreateChainToolOptions {
 // Card rendering
 // ---------------------------------------------------------------------------
 
+const CHAIN_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 const STAGE_GLYPH: Record<ChainStageResult["status"], string> = {
 	pending: "○",
 	running: "▶",
@@ -73,7 +76,7 @@ const STAGE_GLYPH: Record<ChainStageResult["status"], string> = {
 	judging: "⚖",
 	completed: "✓",
 	failed: "✗",
-	skipped: "⊘",
+	skipped: "–",
 };
 
 function stageColor(status: ChainStageResult["status"]): ThemeColor {
@@ -111,7 +114,7 @@ function formatStageRow(stage: ChainStageResult, theme: Theme): string {
 	if (stage.itemsTotal !== undefined) parts.push(`${stage.itemsDone ?? 0}/${stage.itemsTotal} items`);
 	if (stage.tokens > 0)
 		parts.push(`${stage.tokens < 1000 ? stage.tokens : `${(stage.tokens / 1000).toFixed(1)}k`} tok`);
-	if (stage.durationMs > 0) parts.push(`${(stage.durationMs / 1000).toFixed(1)}s`);
+	if (stage.durationMs > 0) parts.push(formatElapsed(stage.durationMs));
 	if (stage.error) parts.push(stage.error.split("\n")[0]);
 	const meta = parts.length > 0 ? theme.fg(stage.error ? "error" : "dim", ` · ${parts.join(" · ")}`) : "";
 	return `${glyph} ${name} ${agent}${meta}`;
@@ -152,7 +155,10 @@ export class ChainToolCard implements Component {
 	private renderCard(width: number): string[] {
 		const theme = this.theme;
 		const name = typeof this.args?.chain === "string" ? this.args.chain : "";
-		const title = `${theme.fg("toolTitle", theme.bold("chain"))} ${theme.fg("accent", name)}`;
+		let title = `${theme.fg("toolTitle", theme.bold("chain"))} ${theme.fg("accent", name)}`;
+		if (this.options.isPartial) {
+			title = `${theme.fg("accent", CHAIN_SPINNER_FRAMES[Math.floor(Date.now() / 80) % CHAIN_SPINNER_FRAMES.length])} ${title}`;
+		}
 		const body: string[] = [];
 		const stages = this.details?.stages ?? [];
 		if (stages.length > 0) {
@@ -170,18 +176,26 @@ export class ChainToolCard implements Component {
 			}
 			const last = stages.at(-1);
 			if (!this.options.isPartial && last?.status === "completed" && last.inline) {
-				const lines = last.inline
-					.replace(/\n*_agentId: [^\n]*_\s*$/, "")
-					.split("\n")
-					.slice(0, this.options.expanded ? undefined : 8);
+				const fullLines = last.inline.replace(/\n*_agentId: [^\n]*_\s*$/, "").split("\n");
+				const lines = this.options.expanded ? fullLines : fullLines.slice(0, 8);
 				body.push("");
 				body.push(...lines.map((line) => theme.fg("toolOutput", `  ${line}`)));
+				if (!this.options.expanded && fullLines.length > 8) {
+					const hidden = fullLines.length - 8;
+					body.push(
+						theme.fg(
+							"muted",
+							`  … ${hidden} more line${hidden === 1 ? "" : "s"} (${theme.fg("accent", "ctrl+o")} to expand)`,
+						),
+					);
+				}
 			}
 		}
 		if (width < 24) {
 			return [truncateToWidth(title, width, "…"), ...body.map((line) => truncateToWidth(line, width, "…"))];
 		}
-		const borderColor = this.isError ? "error" : this.options.isPartial ? "accent" : "dim";
+		const pulse = this.options.isPartial && Math.floor(Date.now() / 500) % 2 === 1;
+		const borderColor = this.isError ? "error" : this.options.isPartial ? (pulse ? "dim" : "accent") : "dim";
 		const edge = (text: string) => theme.fg(borderColor, text);
 		const inner = width - 4;
 		const lines: string[] = [];
@@ -292,6 +306,7 @@ export function createChainToolDefinition(
 						sessionFile: opts.parentSession.sessionFile,
 					},
 					parentType: opts.parentSession.subagentType,
+					spawns: opts.parentSession.subagentSpawns,
 					definitions,
 					deps: opts.spawnDeps,
 					cwd: opts.cwd,
@@ -316,7 +331,7 @@ export function createChainToolDefinition(
 						return `${head}${stage.error ? `\n${stage.error}` : ""}`;
 					})
 					.join("\n\n");
-				const totalsLine = `totals: ${result.totals.tokens} tok · $${result.totals.costUsd.toFixed(4)} · ${(result.totals.durationMs / 1000).toFixed(1)}s`;
+				const totalsLine = `totals: ${result.totals.tokens} tok · $${result.totals.costUsd.toFixed(4)} · ${formatElapsed(result.totals.durationMs)}`;
 				return {
 					content: [
 						{ type: "text", text: `Chain ${result.chain}: ${result.status} (${totalsLine})\n\n${summary}` },

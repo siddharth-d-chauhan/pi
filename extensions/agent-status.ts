@@ -26,7 +26,12 @@ function isAgent(snap: BackgroundProcessSnapshot): boolean {
 function segmentText(): string | undefined {
 	const agents = getBackgroundProcessRegistry().list().filter(isAgent);
 	const running = agents.filter((snap) => snap.status === "running").length;
-	if (running === 0) return undefined; // all done (or none) — disappear
+	if (running === 0) {
+		// No live work — but idle/parked agents are still addressable; hint at them.
+		const dormant = agents.filter((snap) => snap.status === "idle" || snap.status === "parked").length;
+		if (dormant === 0) return undefined;
+		return `${theme.fg("dim", "◌")} ${theme.fg("dim", `${dormant} idle agent${dormant === 1 ? "" : "s"} · /agents`)}`;
+	}
 	const done = agents.filter((snap) => snap.status === "completed").length;
 	const someDoneOfMany = agents.length > 1 && done > 0;
 	const circle = theme.fg(someDoneOfMany ? "success" : "accent", "●");

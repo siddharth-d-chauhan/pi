@@ -1,0 +1,10 @@
+# Example team preset — try: /team apply fast
+name: fast
+description: Cheap models for every agent type; plan agent disabled
+modelOverrides:
+  worker: pi/smol
+  explore: pi/smol
+  reviewer: pi/smol
+disabled: [plan]
+coordinatorNote: |
+  Prefer several small parallel workers over one large one.

@@ -1,12 +1,14 @@
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { type Component, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { getAgentDir } from "../../config.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { AgentSession } from "../agent-session.ts";
-import type { AgentDefinition } from "../agents/definitions.ts";
+import { coldAgentsForParent, removeAgentIndexEntry } from "../agents/agent-index.ts";
+import type { AgentDefinition, AgentSpawnPolicy } from "../agents/definitions.ts";
 import { formatAgentDefinitionsForPrompt, loadAgentDefinitions, spawnAgent } from "../agents/index.ts";
+import { deliverToAgent, registerParkedAgent, releaseAgent } from "../agents/lifecycle.ts";
 import type { CreateChildSessionInput, CreateChildSessionResult, SpawnDeps } from "../agents/spawn.ts";
 import { getBackgroundProcessRegistry, sanitizeLogLine } from "../background-process-registry.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
@@ -158,7 +160,8 @@ function formatTokens(tokens: number): string {
 	return `${(tokens / 1000).toFixed(1)}k`;
 }
 
-function formatElapsed(durationMs: number): string {
+/** Shared elapsed formatter (also used by the chain card). */
+export function formatElapsed(durationMs: number): string {
 	const seconds = durationMs / 1000;
 	if (seconds < 60) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
 	return `${Math.floor(seconds / 60)}m${Math.round(seconds % 60)}s`;
@@ -414,7 +417,9 @@ export function createAgentToolDefinition(
 					throw new Error(`Unknown agent type "${task.agent}". Available agents:\n${roster}`);
 				}
 				if (disabled.has(definition.name)) {
-					throw new Error(`Agent "${definition.name}" is disabled in settings.`);
+					throw new Error(
+						`Agent "${definition.name}" is disabled (settings "agents.disabled" or the active team — check /team, or pick another agent from the roster).`,
+					);
 				}
 				return {
 					task,
@@ -594,6 +599,84 @@ export interface CreateAgentToolOptions {
 	agentDir?: string;
 	packageAgentDirs?: string[];
 	parentSession: AgentSession;
+}
+
+/**
+ * Cold-revival scan: re-register this session's parked child agents from a
+ * previous pi run so they show up in /agents and can be messaged (revive
+ * reopens their session files). Call whenever the active session changes.
+ */
+export function registerColdAgents(options: CreateAgentToolOptions): number {
+	const agentDir = options.agentDir ?? getAgentDir();
+	const parentSessionFile = options.parentSession.sessionFile;
+	const entries = coldAgentsForParent(agentDir, parentSessionFile);
+	if (entries.length === 0) return 0;
+	const registry = getBackgroundProcessRegistry();
+	const factory = defaultCreateChildSessionFactory({
+		cwd: options.cwd,
+		agentDir,
+		settingsManager: options.parentSession.settingsManager,
+		modelRegistry: options.parentSession.modelRegistry,
+		parentSession: options.parentSession,
+		packageAgentDirs: options.packageAgentDirs,
+	});
+	let registered = 0;
+	for (const entry of entries) {
+		if (registry.get(entry.registryId)) continue;
+		const model =
+			options.parentSession.modelRegistry.find(entry.modelProvider, entry.modelId) ?? options.parentSession.model;
+		if (!model) {
+			removeAgentIndexEntry(agentDir, entry.registryId);
+			continue;
+		}
+		registry.register({
+			id: entry.registryId,
+			kind: "subagent",
+			label: entry.label,
+			agentType: entry.agentType,
+			sessionFile: entry.sessionFile,
+			status: "parked",
+			onKill: () => {
+				releaseAgent(entry.registryId);
+				removeAgentIndexEntry(agentDir, entry.registryId);
+				registry.setStatus(entry.registryId, "cancelled");
+			},
+			onSteer: (text) => {
+				void deliverToAgent(entry.registryId, text, { from: "user" });
+			},
+		});
+		registerParkedAgent({
+			registryId: entry.registryId,
+			agentType: entry.agentType,
+			sessionFile: entry.sessionFile,
+			idleTtlMs: options.parentSession.settingsManager.getAgentSettings().idleTtlMs,
+			revive: async () => {
+				const revived = await factory({
+					cwd: options.cwd,
+					agentDir,
+					model,
+					tools: entry.tools,
+					excludeTools: entry.excludeTools,
+					customPrompt: entry.customPrompt,
+					omitProjectContext: entry.omitProjectContext,
+					settingsManager: options.parentSession.settingsManager,
+					modelRegistry: options.parentSession.modelRegistry,
+					persist: true,
+					parentSessionFile: entry.parentSessionFile,
+					parentSession: options.parentSession,
+					selfRegistryId: entry.registryId,
+					subagentDepth: entry.subagentDepth,
+					subagentType: entry.agentType,
+					subagentSpawns: entry.spawns as AgentSpawnPolicy | undefined,
+					thinkingLevel: entry.thinkingLevel as ThinkingLevel | undefined,
+					resumeSessionFile: entry.sessionFile,
+				});
+				return { session: revived.session, dispose: revived.dispose };
+			},
+		});
+		registered += 1;
+	}
+	return registered;
 }
 
 export function createAgentTool(options: CreateAgentToolOptions): AgentTool<typeof agentToolSchema> {

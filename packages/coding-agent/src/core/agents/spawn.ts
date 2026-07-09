@@ -16,11 +16,15 @@ import type { AgentSession } from "../agent-session.ts";
 import { getBackgroundProcessRegistry } from "../background-process-registry.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SettingsManager } from "../settings-manager.ts";
+import { removeAgentIndexEntry, saveAgentIndexEntry } from "./agent-index.ts";
 import type { AgentDefinition, AgentPermissionMode, AgentSpawnPolicy, AgentToolList } from "./definitions.ts";
 import { canOmitProjectContext, isReadOnlyToolSet } from "./definitions.ts";
 import { type AgentReturn, capReturn } from "./handles.ts";
 import { markAgentIdle, registerRunningAgent, releaseAgent } from "./lifecycle.ts";
+import { formatMemorySection, loadAgentMemory } from "./memory.ts";
 import { resolveAgentModel } from "./model-roles.ts";
+import { applyTeamToRouting } from "./teams.ts";
+import { type AgentWorktree, createAgentWorktree, finalizeAgentWorktree, isGitRepo } from "./worktree.ts";
 
 /** Effective per-spawn tool set after applying allowlist + denylist + spawn policy. */
 export interface EffectiveToolSet {
@@ -51,6 +55,13 @@ export interface SpawnOptions {
 	background: boolean;
 	/** Display name for the registry. */
 	name?: string;
+	/** UI grouping key (e.g. the chain name for chain-stage spawns). */
+	group?: string;
+	/**
+	 * One-shot helper (judges, foreach items): never adopted into the idle
+	 * lifecycle and never persisted to the agent index.
+	 */
+	ephemeral?: boolean;
 	/** Caller-supplied abort signal. */
 	signal?: AbortSignal;
 	/**
@@ -253,9 +264,14 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 	const reservation = tryReserveSpawn(definition.name);
 
 	// ----- Guards (rollback on throw) -------------------------------------
-	if (agentSettings.disabled?.includes(definition.name)) {
+	const effectiveDisabled = applyTeamToRouting({
+		modelOverrides: {},
+		roles: {},
+		disabled: agentSettings.disabled ?? [],
+	}).disabled;
+	if (effectiveDisabled.includes(definition.name)) {
 		releaseReservation(reservation);
-		throw new Error(`Agent type "${definition.name}" is disabled in settings.`);
+		throw new Error(`Agent type "${definition.name}" is disabled (settings or active team).`);
 	}
 	if (parent.depth + 1 > (agentSettings.maxDepth ?? 2)) {
 		releaseReservation(reservation);
@@ -267,7 +283,9 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 	}
 	if (opts.spawns === "none") {
 		releaseReservation(reservation);
-		throw new Error(`Agent "${opts.parentType ?? "parent"}" has spawns: none and cannot delegate.`);
+		throw new Error(
+			`Agent "${opts.parentType ?? "parent"}" has spawns: none and cannot delegate. Remove "spawns": "none" from its definition to allow delegation.`,
+		);
 	}
 	if (Array.isArray(opts.spawns) && !opts.spawns.includes(definition.name)) {
 		releaseReservation(reservation);
@@ -277,7 +295,9 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 	}
 	if (opts.parentType && opts.spawns === undefined) {
 		releaseReservation(reservation);
-		throw new Error(`Agent "${opts.parentType}" has no spawn policy and cannot delegate.`);
+		throw new Error(
+			`Agent "${opts.parentType}" has no spawn policy and cannot delegate. Add a "spawns" list (or "*") to its definition to declare what it may spawn.`,
+		);
 	}
 
 	// ----- Effective tools -------------------------------------------------
@@ -292,10 +312,16 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			: requestedMode;
 	void permissionMode; // Surfaced through customPrompt; enforcement is the runtime's job.
 
-	// Isolation gate (race-free: reservation is already held).
+	// Isolation gate (race-free: reservation is already held). Worktree
+	// isolation exempts the spawn — the worktree IS the isolation.
 	const concurrent = background || hasConcurrentActiveSpawn(settings, definition.name);
 	const mutatesWorkspace = !effective.readOnly;
-	if (mutatesWorkspace && concurrent && agentSettings.allowSharedWorkspaceWrites !== true) {
+	if (
+		definition.isolation !== "worktree" &&
+		mutatesWorkspace &&
+		concurrent &&
+		agentSettings.allowSharedWorkspaceWrites !== true
+	) {
 		releaseReservation(reservation);
 		throw new Error(
 			`Agent "${definition.name}" would mutate shared workspace state in parallel. ` +
@@ -318,7 +344,34 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 	});
 
 	// ----- System prompt composition ---------------------------------------
-	const customPrompt = composeChildSystemPrompt(definition, context, permissionMode);
+	let customPrompt = composeChildSystemPrompt(definition, context, permissionMode);
+	{
+		// Per-agent-type persistent memory (project scope wins over user).
+		const canWrite =
+			!effective.readOnly &&
+			(effective.tools === undefined
+				? !(effective.excludeTools ?? []).some((tool) => tool === "write" || tool === "edit")
+				: effective.tools.some((tool) => tool === "write" || tool === "edit"));
+		const parentCwdForMemory = parent.session.sessionManager.getCwd();
+		const memory =
+			loadAgentMemory({
+				agentType: definition.name,
+				scope: "project",
+				cwd: parentCwdForMemory,
+				agentDir: parent.session.agentDir,
+			}) ??
+			loadAgentMemory({
+				agentType: definition.name,
+				scope: "user",
+				cwd: parentCwdForMemory,
+				agentDir: parent.session.agentDir,
+			});
+		if (memory) {
+			// Worktree agents write back to the REAL checkout — keep memory
+			// read-only for them so nothing lands outside their sandbox.
+			customPrompt += `\n\n${formatMemorySection(memory, canWrite && definition.isolation !== "worktree")}`;
+		}
+	}
 
 	const omitProjectContext = canOmitProjectContext(definition, {
 		allowUserProject: agentSettings.allowOmitProjectContext === true,
@@ -349,10 +402,12 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 		summary: truncateForLabel(prompt, 200),
 		agentType: definition.name,
 		parentId: parent.session.sessionId,
+		group: opts.group,
 		onKill: () => {
 			runAbortController.abort();
 			childForControl?.session.abort();
 			releaseAgent(registryId);
+			removeAgentIndexEntry(parent.session.agentDir, registryId);
 			registry.setStatus(registryId, "cancelled");
 		},
 		onSteer: (text) => {
@@ -379,8 +434,27 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 
 		const startedAt = Date.now();
 
+		// Worktree isolation: the child works in a disposable git worktree.
+		let worktree: AgentWorktree | undefined;
+		let worktreeFinalized = false;
+		if (definition.isolation === "worktree") {
+			try {
+				if (!(await isGitRepo(parentCwd))) {
+					throw new Error(`isolation: "worktree" requires a git repository (cwd: ${parentCwd})`);
+				}
+				worktree = await createAgentWorktree(parentCwd, registryId);
+				registry.appendLog(registryId, `worktree: ${worktree.path}`);
+			} catch (err) {
+				releaseReservation(reservation);
+				registry.setStatus(registryId, "failed");
+				if (acquiredSemaphore) sem.release();
+				signal?.removeEventListener("abort", abortFromParent);
+				throw err;
+			}
+		}
+
 		const childInput: CreateChildSessionInput = {
-			cwd: parentCwd,
+			cwd: worktree?.path ?? parentCwd,
 			agentDir: parentAgentDir,
 			model: resolved.model,
 			thinkingLevel: definition.thinkingLevel,
@@ -411,12 +485,13 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 				session: child.session,
 				dispose: child.dispose,
 				sessionFile: child.sessionFile,
-				revive: child.sessionFile
-					? async () => {
-							const revived = await factory({ ...childInput, resumeSessionFile: child.sessionFile });
-							return { session: revived.session, dispose: revived.dispose };
-						}
-					: undefined,
+				revive:
+					child.sessionFile && !worktree
+						? async () => {
+								const revived = await factory({ ...childInput, resumeSessionFile: child.sessionFile });
+								return { session: revived.session, dispose: revived.dispose };
+							}
+						: undefined,
 				idleTtlMs: settings.getAgentSettings().idleTtlMs,
 			});
 		} catch (err) {
@@ -424,6 +499,13 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			registry.setStatus(registryId, "failed");
 			if (acquiredSemaphore) sem.release();
 			signal?.removeEventListener("abort", abortFromParent);
+			if (worktree) {
+				try {
+					await finalizeAgentWorktree(parentCwd, worktree);
+				} catch {
+					// Best-effort cleanup of the never-used checkout.
+				}
+			}
 			throw err;
 		}
 
@@ -476,7 +558,25 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			}
 
 			const lastText = child.session.getLastAssistantText()?.trim() ?? "";
-			const inline = lastText.length > 0 ? lastText : "(Subagent completed but returned no output.)";
+			let inline = lastText.length > 0 ? lastText : "(Subagent completed but returned no output.)";
+			if (worktree) {
+				try {
+					const outcome = await finalizeAgentWorktree(parentCwd, worktree);
+					worktreeFinalized = true;
+					if (outcome.kept) {
+						inline += `\n\n[worktree kept: ${outcome.path} — branch ${outcome.branch}, ${outcome.changedFiles} file(s) changed. Merge with \`git merge ${outcome.branch}\` or cherry-pick.]`;
+						registry.update(registryId, {
+							summary: `changes kept in ${outcome.path} (branch ${outcome.branch})`,
+						});
+						registry.appendLog(registryId, `worktree kept: ${outcome.path}`);
+					} else {
+						inline += "\n\n[worktree removed — the agent made no changes]";
+						registry.appendLog(registryId, "worktree removed (no changes)");
+					}
+				} catch (err) {
+					registry.appendLog(registryId, `[worktree finalize error: ${(err as Error).message}]`);
+				}
+			}
 
 			const artifactId = `${registryId}-${Date.now().toString(36)}`;
 			const capped: AgentReturn = capReturn(artifactId, inline, {
@@ -494,8 +594,31 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 				resultHandle: capped.handle,
 				sessionFile: child.sessionFile,
 			});
-			adopted = markAgentIdle(registryId);
+			// Worktree children are never adopted (a clean finalize removes
+			// their checkout); ephemeral helpers (judges, foreach items) are
+			// one-shots that must not pile up as idle agents.
+			adopted = worktree || opts.ephemeral ? false : markAgentIdle(registryId);
 			if (!adopted) registry.setStatus(registryId, "completed");
+			if (adopted && child.sessionFile) {
+				// Persist for cold revival after a pi restart.
+				saveAgentIndexEntry(parent.session.agentDir, {
+					registryId,
+					agentType: definition.name,
+					label,
+					sessionFile: child.sessionFile,
+					parentSessionFile: parent.sessionFile,
+					subagentDepth: parent.depth + 1,
+					tools: effective.tools,
+					excludeTools: effective.excludeTools,
+					customPrompt,
+					omitProjectContext,
+					spawns: definition.spawns,
+					thinkingLevel: definition.thinkingLevel,
+					modelProvider: resolved.model.provider,
+					modelId: resolved.model.id,
+					savedAt: Date.now(),
+				});
+			}
 
 			return {
 				status: "completed",
@@ -549,6 +672,19 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			if (!adopted) {
 				child.dispose();
 				releaseAgent(registryId);
+			}
+			if (worktree && !worktreeFinalized) {
+				try {
+					const outcome = await finalizeAgentWorktree(parentCwd, worktree);
+					registry.appendLog(
+						registryId,
+						outcome.kept
+							? `worktree kept: ${outcome.path} (branch ${outcome.branch}, ${outcome.changedFiles} changed)`
+							: "worktree removed (no changes)",
+					);
+				} catch {
+					// Worktree cleanup is best-effort; never mask the run result.
+				}
 			}
 			childForControl = undefined;
 			if (acquiredSemaphore) sem.release();

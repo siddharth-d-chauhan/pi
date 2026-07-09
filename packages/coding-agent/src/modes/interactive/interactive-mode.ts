@@ -88,6 +88,7 @@ import { type SessionEntry, SessionManager, sessionEntryToContextMessages } from
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
+import { registerColdAgents } from "../../core/tools/agent.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
@@ -762,6 +763,7 @@ export class InteractiveMode {
 		// Re-apply the user's tool selection from the most recent
 		// tools-config entry on the branch (no-op if none).
 		this.restoreToolsConfig();
+		this.registerColdAgentsSafely();
 
 		await this.themeController.applyFromSettings();
 		// Add header with keybindings from config (unless silenced)
@@ -5106,6 +5108,7 @@ export class InteractiveMode {
 			if (result.cancelled) {
 				return result;
 			}
+			this.registerColdAgentsSafely();
 			this.showStatus("Resumed session");
 			return result;
 		} catch (error: unknown) {
@@ -5123,6 +5126,7 @@ export class InteractiveMode {
 				if (result.cancelled) {
 					return result;
 				}
+				this.registerColdAgentsSafely();
 				this.showStatus("Resumed session in current cwd");
 				return result;
 			}
@@ -6299,6 +6303,22 @@ export class InteractiveMode {
 			await this.session.compact(customInstructions);
 		} catch {
 			// Ignore, will be emitted as an event
+		}
+	}
+
+	/** Cold-revival scan: parked child agents from previous runs reappear. */
+	private registerColdAgentsSafely(): void {
+		try {
+			const count = registerColdAgents({
+				cwd: this.session.sessionManager.getCwd(),
+				agentDir: this.session.agentDir,
+				parentSession: this.session,
+			});
+			if (count > 0) {
+				this.showStatus(`${count} parked agent${count === 1 ? "" : "s"} available (/agents)`);
+			}
+		} catch {
+			// Cold revival is best-effort.
 		}
 	}
 

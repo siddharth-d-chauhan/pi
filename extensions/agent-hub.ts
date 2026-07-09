@@ -6,7 +6,7 @@
  *
  *   ↑/↓  select        x  kill the selected running agent
  *   s    steer/message (running: steer; idle/parked: wake with a message)
- *   r    revive a parked agent   Esc  close
+ *   r    revive a parked agent   q/Esc  close
  *
  * Everything comes from the core BackgroundProcessRegistry — imported from
  * "@earendil-works/pi-coding-agent", which shares the core module graph, so
@@ -72,7 +72,9 @@ class AgentHubComponent implements Component {
 	private refresh(): void {
 		this.snapshots = getBackgroundProcessRegistry()
 			.list()
-			.filter((snap) => snap.kind === "subagent" || snap.kind === "delegation");
+			.filter((snap) => snap.kind === "subagent" || snap.kind === "delegation")
+			// Cluster chain members under their group, newest groups first.
+			.sort((a, b) => (a.group ?? "").localeCompare(b.group ?? "") || b.startedAt - a.startedAt);
 		if (this.selected >= this.snapshots.length) {
 			this.selected = Math.max(0, this.snapshots.length - 1);
 		}
@@ -141,11 +143,24 @@ class AgentHubComponent implements Component {
 		if (this.snapshots.length === 0) {
 			lines.push(pad(theme.fg("muted", "  No subagents this session. Spawn one with the agent tool.")));
 		}
+		let lastGroup: string | undefined;
 		for (let i = 0; i < this.snapshots.length; i++) {
 			const snap = this.snapshots[i];
-			const cursor = i === this.selected ? theme.fg("accent", "› ") : "  ";
+			if (snap.group && snap.group !== lastGroup) {
+				lines.push(pad(theme.fg("muted", `  ⛓ chain ${theme.bold(snap.group)}`)));
+			}
+			lastGroup = snap.group;
+			const indent = snap.group ? "  " : "";
+			const cursor = (i === this.selected ? theme.fg("accent", "› ") : "  ") + indent;
 			const glyph = STATUS_GLYPH[snap.status] ?? "·";
-			const glyphColor = snap.status === "running" ? "accent" : snap.status === "failed" ? "error" : "dim";
+			const glyphColor =
+				snap.status === "running"
+					? "accent"
+					: snap.status === "failed"
+						? "error"
+						: snap.status === "cancelled"
+							? "warning"
+							: "dim";
 			const name = theme.fg("accent", theme.bold(snap.agentType ?? "agent"));
 			const metricsParts: string[] = [formatTaskAge(snap)];
 			if (snap.metrics?.tokens) metricsParts.push(`${formatTokens(snap.metrics.tokens)} tok`);
@@ -167,7 +182,7 @@ class AgentHubComponent implements Component {
 			);
 			lines.push(pad(theme.fg("dim", "  Enter to send · Esc to cancel")));
 		} else {
-			lines.push(pad(theme.fg("dim", "  ↑/↓ select · x kill · s steer/message · r revive · Esc close")));
+			lines.push(pad(theme.fg("dim", "  ↑/↓ select · x kill · s steer/message · r revive · q/Esc close")));
 		}
 		return lines;
 	}

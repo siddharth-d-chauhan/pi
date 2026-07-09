@@ -58,7 +58,7 @@ import { parse as parseYaml } from "yaml";
 import type { AgentSession } from "../agent-session.ts";
 import { getBackgroundProcessRegistry } from "../background-process-registry.ts";
 import { execCommand } from "../exec.ts";
-import type { AgentDefinition, AgentDefinitionRegistry } from "./definitions.ts";
+import type { AgentDefinition, AgentDefinitionRegistry, AgentSpawnPolicy } from "./definitions.ts";
 import { deliverToAgent } from "./lifecycle.ts";
 import { type SpawnDeps, type SpawnResult, spawnAgent } from "./spawn.ts";
 
@@ -390,6 +390,8 @@ export interface RunChainOptions {
 	input: string;
 	parent: { session: AgentSession; depth: number; sessionFile?: string };
 	parentType?: string;
+	/** The parent's spawn policy — forwarded so chains work from subagents too. */
+	spawns?: AgentSpawnPolicy;
 	definitions: AgentDefinitionRegistry;
 	deps: SpawnDeps;
 	cwd: string;
@@ -537,6 +539,13 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 	): Promise<SpawnResult> => {
 		const spawnDefinition = opts.definitions.get(stage.agent);
 		if (!spawnDefinition) throw new Error(`unknown agent type "${stage.agent}"`);
+		if (spawnDefinition.isolation === "worktree" && (stage.verify || stage.judge)) {
+			throw new Error(
+				`stage "${stage.id}": agent "${stage.agent}" uses worktree isolation, which cannot combine with ` +
+					"verify/judge gates (the work lives in the worktree, not the checkout the gate inspects; " +
+					"gate a follow-up stage after merging instead)",
+			);
+		}
 		const result = await spawnAgent(
 			{
 				definition: spawnDefinition,
@@ -544,9 +553,12 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 				context,
 				parent: opts.parent,
 				parentType: opts.parentType,
+				spawns: opts.spawns,
 				modelOverride: stage.model,
 				background: false,
 				name: `${definition.name}.${stage.id}${nameSuffix}`,
+				group: definition.name,
+				ephemeral: nameSuffix !== "",
 				signal: opts.signal,
 				onRegistered: (registryId) => {
 					if (!nameSuffix) state.registryId = registryId;
@@ -594,8 +606,11 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 						prompt: judgePrompt,
 						parent: opts.parent,
 						parentType: opts.parentType,
+						spawns: opts.spawns,
 						background: false,
 						name: `${definition.name}.${stage.id}.judge`,
+						group: definition.name,
+						ephemeral: true,
 						signal: opts.signal,
 					},
 					deps,
@@ -618,12 +633,22 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 			if (!state.registryId) throw new Error("gate retry impossible: stage has no registry id");
 			state.status = "running";
 			emit();
+			const budgetError = overBudget();
+			if (budgetError) throw new Error(budgetError);
 			const receipt = await deliverToAgent(state.registryId, `${failure}\nFix the problem, then stop.`, {
 				from: `chain:${definition.name}`,
 				awaitReply: true,
 			});
 			if (receipt.status === "failed") throw new Error(`gate retry delivery failed: ${receipt.reason}`);
-			if (receipt.status === "replied") current = { ...current, inline: receipt.reply };
+			if (receipt.status === "replied") {
+				current = { ...current, inline: receipt.reply };
+				if (receipt.usage) {
+					state.tokens += receipt.usage.tokens;
+					state.costUsd += receipt.usage.costUsd;
+					totalTokens += receipt.usage.tokens;
+					totalCostUsd += receipt.usage.costUsd;
+				}
+			}
 		}
 	};
 

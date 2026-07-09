@@ -59,3 +59,15 @@ export {
 	type SpawnUsage,
 	spawnAgent,
 } from "./spawn.ts";
+export {
+	applyTeamToRouting,
+	type EffectiveAgentRouting,
+	getActiveTeam,
+	loadTeams,
+	onTeamChange,
+	parseTeam,
+	resetTeamsForTests,
+	setActiveTeam,
+	type TeamDefinition,
+	TeamValidationError,
+} from "./teams.ts";

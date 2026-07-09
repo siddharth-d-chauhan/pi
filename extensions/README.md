@@ -24,10 +24,12 @@ Or per-invocation: `pi --extension /home/siddharth/pi/extensions/plan.ts`.
 | `plan.ts` | `update_plan` tool + live checklist widget above the editor; restores from the session branch (survives resume) |
 | `agent-status.ts` | Claude-style footer segment: `● N agents`, green circle when some of several are done, clears when all finish |
 | `prompt-history.ts` | Persistent shell-style prompt history: Up arrow recalls your last 100 prompts across all sessions |
-| `agent-hub.ts` | `/agents` overlay: live subagent roster with kill (`x`) and steer (`s`) |
+| `agent-hub.ts` | `/agents` overlay: live roster — kill (`x`), steer/message running or idle/parked agents (`s`), revive parked (`r`) |
 | `agent-notify.ts` | Desktop + in-TUI notification when a background subagent completes or fails |
 | `agent-footer.ts` | `/agentfooter` toggles a footer focused on subagent activity |
-| `chain-command.ts` | `/chain <name> [input]` runs a declarative multi-agent chain; `/chain` lists them |
+| `chain-command.ts` | `/chain <name> [input]` runs a chain; `/chain new <desc>` scaffolds one; `/chain` lists |
+| `team.ts` | `/team apply <name>` activates a team preset (.pi/teams/*.yaml): per-type model overrides + disabled agents |
+| `agent-watch.ts` | Watches agent/chain/team definition dirs and re-announces changes to you and the model |
 | `tool-cards.ts` | omp-style colorful rounded-border cards for all built-in tool calls (per-tool colors) |
 
 ## Rules

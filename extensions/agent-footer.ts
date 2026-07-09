@@ -67,7 +67,9 @@ export default function (pi: ExtensionAPI) {
 					},
 					invalidate() {},
 					render(width: number): string[] {
-						const agents = registry.list().filter((snap) => snap.kind === "subagent");
+						const agents = registry
+							.list()
+							.filter((snap) => snap.kind === "subagent" || snap.kind === "delegation");
 						const running = agents.filter((snap) => snap.status === "running");
 						const done = agents.filter((snap) => snap.status === "completed").length;
 						const failed = agents.filter((snap) => snap.status === "failed").length;

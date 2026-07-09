@@ -48,6 +48,7 @@ export {
 	deliverToAgent,
 	disposeAllAgents,
 	formatAgentDefinitionsForPrompt,
+	getActiveTeam,
 	getAgentLifecycle,
 	inferAgentNameFromFile,
 	isReadOnlyToolSet,
@@ -55,11 +56,15 @@ export {
 	listLifecycleAgents,
 	loadAgentDefinitions,
 	loadChains,
+	loadTeams,
+	onTeamChange,
 	parkAgent,
 	parseChain,
 	pullHandle,
 	reviveAgent,
 	runChain,
+	setActiveTeam,
+	type TeamDefinition,
 } from "./core/agents/index.ts";
 // Auth and model registry
 export {

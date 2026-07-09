@@ -471,6 +471,36 @@ permission/isolation gates as direct agent spawns.
 
 ## Phase 4 — Teams, side-requests, memory, fork spawns
 
+Status (2026-07-09): ✅ shipped (fork spawns intentionally deferred).
+- Cold revival: `<agentDir>/agent-index.json` persists adopted agents
+  (tools/spawns/model/thinkingLevel); `registerColdAgents` re-registers a
+  session's parked children on start/resume/switch with real kill/steer
+  callbacks. Verified live across a pi restart (secret-word recall).
+- `session.sideRequest(prompt)` — aux completion over the (tail-capped)
+  serialized conversation; never touches the transcript.
+- Per-agent-type memory: `.pi/agent-memory/<type>/MEMORY.md` (project) /
+  `<agentDir>/agent-memory/<type>/` (user), fenced as untrusted data,
+  front-truncated at 8k; write-back instruction when the agent has
+  write/edit (suppressed for worktree agents).
+- Worktree isolation: `isolation: worktree` spawns work in a disposable
+  `git worktree` (branch pi-agent/<id8>); auto-removed when unchanged,
+  kept + surfaced (result, registry summary) when changed. Worktree
+  agents are never adopted; leak-safe on factory failure.
+- Team presets: `.pi/teams/*.yaml` (+ user dir) — per-type model
+  overrides, role chains, disabled types, coordinatorNote; `/team`
+  extension applies/clears; routing merged in model-roles + spawn gate.
+- UX pass: chain card spinner/pulse/truncation-hint, shared elapsed
+  formatting, glyph/color consistency, dormant-agents footer hint,
+  actionable error messages, hub grouping (⛓ chain headers), /chain new
+  scaffolding, definitions file-watcher (agent-watch extension).
+- Correctness pass (14 findings fixed): revive memoization + kill-during-
+  revive teardown, delivery finally liveness checks, lifecycle-owned
+  message queue with drain-on-idle (no droppable followUp queue), worktree
+  cleanup on factory failure, killed agents removed from the cold index,
+  ephemeral judge/foreach spawns (no idle pile-up, no index pollution),
+  chains usable from subagents (spawns forwarded), gate-retry cost counted
+  against budgets, memory prompt-injection fencing, sideRequest tail cap.
+
 - `core/agents/teams.ts`: team preset loader (`.pi/teams/*.yaml`), `/team <name>` applies
   modelOverrides/disabled/roles + coordinator system-prompt snippet; footer badge.
 - **`session.sideRequest()` seam** (upstream AgentSession, hook-sized optional method):

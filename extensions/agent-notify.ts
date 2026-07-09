@@ -55,10 +55,11 @@ class NotificationCard implements Component {
 		if (usage?.durationMs) metrics.push(`${(usage.durationMs / 1000).toFixed(1)}s`);
 		const metricsText = metrics.length > 0 ? theme.fg("dim", ` · ${metrics.join(" · ")}`) : "";
 		this.title = `${glyph} ${name} ${theme.fg("muted", verb)}${metricsText}`;
-		this.body = extractInline(content)
-			.split("\n")
-			.slice(0, 12)
-			.map((line) => theme.fg("toolOutput", line));
+		const all = extractInline(content).split("\n");
+		this.body = all.slice(0, 12).map((line) => theme.fg("toolOutput", line));
+		if (all.length > 12) {
+			this.body.push(theme.fg("dim", `… ${all.length - 12} more lines`));
+		}
 		if (details.handle) {
 			this.body.push(theme.fg("dim", `⤷ ${details.handle} (agent_pull)`));
 		}

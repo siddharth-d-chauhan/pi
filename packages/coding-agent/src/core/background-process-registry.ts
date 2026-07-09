@@ -44,6 +44,8 @@ export interface BackgroundProcess {
 	sessionFile?: string;
 	resultHandle?: string;
 	parentId?: string;
+	/** Grouping key for the UI (e.g. a chain name groups its stage agents). */
+	group?: string;
 	onKill?: () => void;
 	onSteer?: (text: string) => void;
 }
@@ -66,6 +68,7 @@ export interface BackgroundProcessSnapshot {
 	sessionFile?: string;
 	resultHandle?: string;
 	parentId?: string;
+	group?: string;
 	canKill: boolean;
 	canSteer: boolean;
 	/** Current size of the log buffer. */
@@ -146,6 +149,7 @@ class BackgroundProcessRegistry {
 			sessionFile: init.sessionFile,
 			resultHandle: init.resultHandle,
 			parentId: init.parentId,
+			group: init.group,
 			onKill: init.onKill,
 			onSteer: init.onSteer,
 			log: [],
@@ -240,6 +244,7 @@ class BackgroundProcessRegistry {
 				sessionFile: e.sessionFile,
 				resultHandle: e.resultHandle,
 				parentId: e.parentId,
+				group: e.group,
 				canKill: e.onKill !== undefined,
 				canSteer: e.onSteer !== undefined,
 				logSize: e.log.length,

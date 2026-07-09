@@ -145,6 +145,19 @@ class OrchestraWidget implements Component {
 		const team = getActiveTeam();
 		if (team) lines.push(teamLine(team, theme));
 
+		// Active WorkFrame from the knowledge broker (context-broker publishes it).
+		const wf = (globalThis as Record<string, unknown>).__pi_workframe__ as
+			| { id?: string; epoch?: number; task?: string }
+			| undefined;
+		if (wf?.id) {
+			const shortTask = (wf.task ?? "").replace(/\s+/g, " ").trim().slice(0, 48);
+			lines.push(
+				`${theme.fg("accent", icon("chain"))} ${theme.fg("muted", `frame e${wf.epoch ?? 1}`)}${
+					shortTask ? theme.fg("dim", ` — ${shortTask}`) : ""
+				}`,
+			);
+		}
+
 		const agents = getBackgroundProcessRegistry().list().filter(isAgent);
 		const anyRunning = agents.some((snap) => snap.status === "running");
 		if (anyRunning) {

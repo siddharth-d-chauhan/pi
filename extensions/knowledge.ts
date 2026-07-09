@@ -42,6 +42,7 @@ const CORE = new Set([
 	"pi_memory_writeback",
 	"pi_semantic_search",
 	"pi_semantic_expand",
+	"pi_knowledge_coverage",
 ]);
 
 /** pi-normalized names of the mountable KP surface (server uses dots). */
@@ -51,6 +52,7 @@ const READ_ONLY = new Set([
 	"pi_context_spawn",
 	"pi_semantic_backfill",
 	"pi_warm_mirror_sync",
+	"pi_knowledge_refresh",
 	"pi_inject_backfill",
 	"pi_pre_action_gate",
 	"knowledge_find_code",

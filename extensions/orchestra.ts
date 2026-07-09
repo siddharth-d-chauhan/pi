@@ -25,6 +25,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { icon, onIconModeChange } from "./lib/icons.ts";
 
 const WIDGET_KEY = "orchestra";
 const MAX_TREE_LINES = 10;
@@ -41,15 +42,15 @@ function isAgent(snap: BackgroundProcessSnapshot): boolean {
 function statusGlyph(status: BackgroundProcessSnapshot["status"], theme: ThemeLike): string {
 	switch (status) {
 		case "running":
-			return theme.fg("accent", "▶");
+			return theme.fg("accent", icon("running"));
 		case "completed":
-			return theme.fg("success", "✓");
+			return theme.fg("success", icon("ok"));
 		case "failed":
-			return theme.fg("error", "✗");
+			return theme.fg("error", icon("fail"));
 		case "cancelled":
-			return theme.fg("warning", "⊘");
+			return theme.fg("warning", icon("cancelled"));
 		default: // idle | parked
-			return theme.fg("dim", "◌");
+			return theme.fg("dim", icon("idle"));
 	}
 }
 
@@ -80,7 +81,7 @@ function teamLine(team: TeamDefinition, theme: ThemeLike): string {
 		memberBits.length > 0
 			? ` — ${leadTraits ? `lead(${leadTraits})` : "lead"} + ${memberBits.join(", ")}`
 			: ` — routing only`;
-	return `${theme.fg("accent", "⛭")} ${theme.fg("muted", `team ${theme.bold(team.name)}`)}${theme.fg("dim", roster)}`;
+	return `${theme.fg("accent", icon("team"))} ${theme.fg("muted", `team ${theme.bold(team.name)}`)}${theme.fg("dim", roster)}`;
 }
 
 /** parent→children map: registry parentId is the parent SESSION id. */
@@ -117,6 +118,7 @@ class OrchestraWidget implements Component {
 		this.unsubscribers.push(
 			getBackgroundProcessRegistry().subscribe(() => tui.requestRender()),
 			onTeamChange(() => tui.requestRender()),
+			onIconModeChange(() => tui.requestRender()),
 		);
 	}
 
@@ -162,7 +164,9 @@ class OrchestraWidget implements Component {
 				const flow = members
 					.map((snap) => `${statusGlyph(snap.status, theme)}${theme.fg("text", ` ${snap.agentType ?? ""}`)}`)
 					.join(theme.fg("dim", " → "));
-				treeLines.push(`${theme.fg("accent", "⛓")} ${theme.fg("muted", `chain ${theme.bold(group)}`)}  ${flow}`);
+				treeLines.push(
+					`${theme.fg("accent", icon("chain"))} ${theme.fg("muted", `chain ${theme.bold(group)}`)}  ${flow}`,
+				);
 			}
 			const { roots, children } = buildTree(ungrouped);
 			const pushNode = (snap: BackgroundProcessSnapshot, depth: number, isLast: boolean): void => {

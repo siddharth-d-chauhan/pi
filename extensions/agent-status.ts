@@ -16,6 +16,7 @@ import {
 	getBackgroundProcessRegistry,
 	theme,
 } from "@earendil-works/pi-coding-agent";
+import { icon, onIconModeChange } from "./lib/icons.ts";
 
 const STATUS_KEY = "agent-status";
 
@@ -30,11 +31,11 @@ function segmentText(): string | undefined {
 		// No live work — but idle/parked agents are still addressable; hint at them.
 		const dormant = agents.filter((snap) => snap.status === "idle" || snap.status === "parked").length;
 		if (dormant === 0) return undefined;
-		return `${theme.fg("dim", "◌")} ${theme.fg("dim", `${dormant} idle agent${dormant === 1 ? "" : "s"} · /agents`)}`;
+		return `${theme.fg("dim", icon("idle"))} ${theme.fg("dim", `${dormant} idle agent${dormant === 1 ? "" : "s"} · /agents`)}`;
 	}
 	const done = agents.filter((snap) => snap.status === "completed").length;
 	const someDoneOfMany = agents.length > 1 && done > 0;
-	const circle = theme.fg(someDoneOfMany ? "success" : "accent", "●");
+	const circle = theme.fg(someDoneOfMany ? "success" : "accent", icon("agent"));
 	const label = `${running} agent${running === 1 ? "" : "s"}`;
 	const doneNote = someDoneOfMany ? theme.fg("dim", ` · ${done} done`) : "";
 	return `${circle} ${theme.fg("muted", label)}${doneNote}`;
@@ -45,6 +46,9 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 		ctx.ui.setStatus(STATUS_KEY, segmentText());
 		getBackgroundProcessRegistry().subscribe(() => {
+			ctx.ui.setStatus(STATUS_KEY, segmentText());
+		});
+		onIconModeChange(() => {
 			ctx.ui.setStatus(STATUS_KEY, segmentText());
 		});
 	});

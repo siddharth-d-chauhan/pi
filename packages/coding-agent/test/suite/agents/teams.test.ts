@@ -218,11 +218,13 @@ name: Squad
 lead:
   agent: plan
   model: pi/main
+  effort: high
   briefing: Ship small; verify before reporting done.
 members:
   Frontend:
     agent: worker
     model: pi/smol
+    effort: low
     persona: |
       UI specialist: components, styling.
       Keep bundles small.
@@ -235,14 +237,24 @@ describe("parseTeam roster", () => {
 	it("parses members and lead, lowercasing names and base types", () => {
 		const team = parseTeam(ROSTER_TEAM, "squad.yaml", "project");
 		expect(Object.keys(team.members).sort()).toEqual(["frontend", "qa"]);
-		expect(team.members.frontend).toMatchObject({ agent: "worker", model: "pi/smol" });
+		expect(team.members.frontend).toMatchObject({ agent: "worker", model: "pi/smol", effort: "low" });
 		expect(team.members.frontend.persona).toContain("UI specialist");
-		expect(team.members.qa).toEqual({ agent: "reviewer", persona: "Verify the team's work.", model: undefined });
+		expect(team.members.qa).toMatchObject({ agent: "reviewer", persona: "Verify the team's work." });
 		expect(team.lead).toEqual({
 			agent: "plan",
 			model: "pi/main",
+			effort: "high",
 			briefing: "Ship small; verify before reporting done.",
 		});
+	});
+
+	it("rejects invalid effort levels", () => {
+		expect(() => parseTeam("name: t\nmembers:\n  fe: {agent: worker, effort: turbo}", "t.yaml", "project")).toThrow(
+			/"members\.fe\.effort" must be one of/,
+		);
+		expect(() => parseTeam("name: t\nlead: {effort: 11}", "t.yaml", "project")).toThrow(
+			/"lead\.effort" must be one of/,
+		);
 	});
 
 	it("defaults to no roster when members/lead are omitted", () => {
@@ -313,6 +325,7 @@ describe("applyTeamToDefinitions", () => {
 		const frontend = merged.get("frontend");
 		expect(frontend).toBeDefined();
 		expect(frontend?.model).toBe("pi/smol");
+		expect(frontend?.thinkingLevel).toBe("low");
 		expect(frontend?.spawns).toBe("none");
 		expect(frontend?.systemPrompt).toContain("You are worker.");
 		expect(frontend?.systemPrompt).toContain("UI specialist");
@@ -332,12 +345,13 @@ describe("applyTeamToDefinitions", () => {
 		expect(lead).toBeDefined();
 		expect([...(lead?.spawns as string[])].sort()).toEqual(["frontend", "qa"]);
 		expect(lead?.model).toBe("pi/main");
+		expect(lead?.thinkingLevel).toBe("high");
 		// Delegation tools are forced in even when the base is read-only.
 		expect(lead?.tools).toContain("agent");
 		expect(lead?.tools).toContain("agent_message");
 		// Roster + protocol + briefing all present.
 		expect(lead?.systemPrompt).toContain("You are plan.");
-		expect(lead?.systemPrompt).toContain("- frontend (base: worker, model: pi/smol)");
+		expect(lead?.systemPrompt).toContain("- frontend (base: worker, model: pi/smol, effort: low)");
 		expect(lead?.systemPrompt).toContain("Ship small; verify before reporting done.");
 		// Members shadow, everything else survives, list() has no duplicates.
 		const names = merged.list().map((definition) => definition.name);

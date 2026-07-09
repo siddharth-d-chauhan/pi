@@ -1,9 +1,9 @@
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { spawnAgent } from "../../../src/core/agents/index.ts";
+import { parseTeam, resetTeamsForTests, setActiveTeam, spawnAgent } from "../../../src/core/agents/index.ts";
 import { resetLifecycleForTests } from "../../../src/core/agents/lifecycle.ts";
 import type { CreateChildSessionInput, CreateChildSessionResult, SpawnDeps } from "../../../src/core/agents/spawn.ts";
 import {
@@ -19,6 +19,7 @@ describe("spawnAgent", () => {
 
 	afterEach(() => {
 		resetLifecycleForTests();
+		resetTeamsForTests();
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
@@ -456,6 +457,70 @@ describe("spawnAgent", () => {
 		// will fail but the call site resolves with a registry id.
 		const result = await second;
 		expect(result.registryId).toMatch(/^bg-/);
+	});
+
+	it("injects shared team memory into lead and member prompts", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const cwd = harness.sessionManager.getCwd();
+		const memoryFile = join(cwd, ".pi", "agent-memory", "team-squad", "MEMORY.md");
+		mkdirSync(join(cwd, ".pi", "agent-memory", "team-squad"), { recursive: true });
+		writeFileSync(memoryFile, "auth flow lives in src/auth.ts\n");
+		setActiveTeam(parseTeam("name: squad\nmembers:\n  qa: {agent: reviewer}", "squad.yaml", "project"));
+
+		const captured: CreateChildSessionInput[] = [];
+		const deps: SpawnDeps = {
+			settingsManager: harness.settingsManager,
+			modelRegistry: harness.session.modelRegistry,
+			artifactDir: makeArtifactDir(),
+			createChildSession: recordingFactory(captured),
+		};
+
+		// A member sees the shared file (fenced)...
+		await expect(
+			spawnAgent(
+				{
+					definition: makeDefinition({ name: "qa" }),
+					prompt: "verify",
+					parent: { session: harness.session, depth: 0 },
+					background: false,
+				},
+				deps,
+			),
+		).rejects.toThrow();
+		expect(captured[0]?.customPrompt).toContain("## TEAM MEMORY (shared)");
+		expect(captured[0]?.customPrompt).toContain("<team-memory>");
+		expect(captured[0]?.customPrompt).toContain("auth flow lives in src/auth.ts");
+
+		// ...a non-roster agent type does not.
+		await expect(
+			spawnAgent(
+				{
+					definition: makeDefinition({ name: "explore" }),
+					prompt: "scout",
+					parent: { session: harness.session, depth: 0 },
+					background: false,
+				},
+				deps,
+			),
+		).rejects.toThrow();
+		expect(captured[1]?.customPrompt).not.toContain("## TEAM MEMORY (shared)");
+
+		// A write-capable member with NO memory file yet is told where to start one.
+		rmSync(memoryFile);
+		await expect(
+			spawnAgent(
+				{
+					definition: makeDefinition({ name: "qa", tools: ["read", "write", "edit"], permissionMode: "bubble" }),
+					prompt: "verify",
+					parent: { session: harness.session, depth: 0 },
+					background: false,
+				},
+				deps,
+			),
+		).rejects.toThrow();
+		expect(captured[2]?.customPrompt).toContain("Team memory: no shared notes yet.");
+		expect(captured[2]?.customPrompt).toContain(memoryFile);
 	});
 
 	it("exempts delegation-only coordinators from the shared-workspace gate", async () => {

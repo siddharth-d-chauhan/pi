@@ -21,9 +21,9 @@ import type { AgentDefinition, AgentPermissionMode, AgentSpawnPolicy, AgentToolL
 import { canOmitProjectContext, isReadOnlyToolSet } from "./definitions.ts";
 import { type AgentReturn, capReturn } from "./handles.ts";
 import { markAgentIdle, registerRunningAgent, releaseAgent } from "./lifecycle.ts";
-import { formatMemorySection, loadAgentMemory } from "./memory.ts";
+import { agentMemoryFilePath, formatMemorySection, loadAgentMemory } from "./memory.ts";
 import { resolveAgentModel } from "./model-roles.ts";
-import { applyTeamToRouting } from "./teams.ts";
+import { applyTeamToRouting, getActiveTeam } from "./teams.ts";
 import { type AgentWorktree, createAgentWorktree, finalizeAgentWorktree, isGitRepo } from "./worktree.ts";
 
 /** Effective per-spawn tool set after applying allowlist + denylist + spawn policy. */
@@ -385,6 +385,45 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			// Worktree agents write back to the REAL checkout — keep memory
 			// read-only for them so nothing lands outside their sandbox.
 			customPrompt += `\n\n${formatMemorySection(memory, canWrite && effectiveIsolation !== "worktree")}`;
+		}
+
+		// Team memory: one shared file the lead and every member see. The
+		// roster shares the parent workspace, so shared knowledge lives with
+		// the project (user scope as fallback).
+		const team = getActiveTeam();
+		if (team && (definition.name === "lead" || team.members[definition.name] !== undefined)) {
+			const teamType = `team-${team.name}`;
+			const teamCanWrite = canWrite && effectiveIsolation !== "worktree";
+			const teamMemory =
+				loadAgentMemory({
+					agentType: teamType,
+					scope: "project",
+					cwd: parentCwdForMemory,
+					agentDir: parent.session.agentDir,
+				}) ??
+				loadAgentMemory({
+					agentType: teamType,
+					scope: "user",
+					cwd: parentCwdForMemory,
+					agentDir: parent.session.agentDir,
+				});
+			if (teamMemory) {
+				customPrompt += `\n\n${formatMemorySection(teamMemory, teamCanWrite, {
+					title: "## TEAM MEMORY (shared)",
+					tag: "team-memory",
+					intro: `Shared notes for team "${team.name}" — visible to the lead and every member.`,
+				})}`;
+			} else if (teamCanWrite) {
+				const teamMemoryPath = agentMemoryFilePath({
+					agentType: teamType,
+					scope: "project",
+					cwd: parentCwdForMemory,
+					agentDir: parent.session.agentDir,
+				});
+				customPrompt +=
+					`\n\nTeam memory: no shared notes yet. Record durable, team-relevant findings in ` +
+					`${teamMemoryPath} so the lead and every member of team "${team.name}" see them.`;
+			}
 		}
 	}
 

@@ -54,6 +54,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parse as parseYaml } from "yaml";
 import type { AgentSession } from "../agent-session.ts";
 import { getBackgroundProcessRegistry } from "../background-process-registry.ts";
@@ -76,6 +77,8 @@ export interface ChainStage {
 	agent: string;
 	prompt: string;
 	model?: string;
+	/** Per-stage reasoning effort (thinking level) override. */
+	effort?: ThinkingLevel;
 	context?: string;
 	needs: string[];
 	verify?: string;
@@ -110,6 +113,8 @@ const GATE_FEEDBACK_CAP = 4_000;
 const FOREACH_ITEM_CAP = 1_000;
 /** Default foreach item ceiling. */
 const DEFAULT_MAX_ITEMS = 10;
+/** Valid stage `effort` (thinking level) values. */
+const VALID_EFFORT_LEVELS = new Set(["off", "minimal", "low", "medium", "high"]);
 
 export class ChainValidationError extends Error {}
 
@@ -202,6 +207,12 @@ export function parseChain(rawContent: string, filePath: string, source: ChainDe
 		if (isolationRaw !== undefined && isolationRaw !== "worktree" && isolationRaw !== "none") {
 			throw new ChainValidationError(`${filePath}: stage "${id}" isolation must be "worktree" or "none"`);
 		}
+		const effortRaw = raw.effort ?? raw.thinking;
+		if (effortRaw !== undefined && !VALID_EFFORT_LEVELS.has(effortRaw as string)) {
+			throw new ChainValidationError(
+				`${filePath}: stage "${id}" effort must be one of ${[...VALID_EFFORT_LEVELS].join(", ")}`,
+			);
+		}
 		const verify = typeof raw.verify === "string" && raw.verify.trim() ? raw.verify : undefined;
 		const judge = typeof raw.judge === "string" && raw.judge.trim() ? raw.judge : undefined;
 		if (foreach && (verify || judge)) {
@@ -214,6 +225,7 @@ export function parseChain(rawContent: string, filePath: string, source: ChainDe
 			agent,
 			prompt,
 			model: typeof raw.model === "string" ? raw.model : undefined,
+			effort: effortRaw as ThinkingLevel | undefined,
 			context: typeof raw.context === "string" ? raw.context : undefined,
 			needs,
 			verify,
@@ -548,8 +560,9 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 		context: string | undefined,
 		nameSuffix = "",
 	): Promise<SpawnResult> => {
-		const spawnDefinition = opts.definitions.get(stage.agent);
+		let spawnDefinition = opts.definitions.get(stage.agent);
 		if (!spawnDefinition) throw new Error(`unknown agent type "${stage.agent}"`);
+		if (stage.effort) spawnDefinition = { ...spawnDefinition, thinkingLevel: stage.effort };
 		if (spawnDefinition.isolation === "worktree" && (stage.verify || stage.judge)) {
 			throw new Error(
 				`stage "${stage.id}": agent "${stage.agent}" uses worktree isolation, which cannot combine with ` +

@@ -4,6 +4,7 @@ description: Feature squad — a lead coordinating scout, builder, and qa specia
 lead:
   agent: plan
   model: pi/main
+  effort: medium
   briefing: |
     Ship in small verified increments. Send scout ahead before builder touches
     anything; qa signs off before you report done. If qa fails the work, send
@@ -14,12 +15,14 @@ members:
   scout:
     agent: explore
     model: pi/smol
+    effort: low
     persona: |
       Codebase scout: find the files, conventions, and existing helpers relevant
       to the task. Return file:line pointers and a 10-line map, never file dumps.
   builder:
     agent: worker
     model: pi/main
+    effort: medium
     persona: |
       Implementer: make the change scout mapped out, match surrounding style,
       run the narrowest relevant test or typecheck before reporting. Report the
@@ -27,6 +30,7 @@ members:
   qa:
     agent: reviewer
     model: pi/main
+    effort: medium
     persona: |
       Quality gate: verify builder's work against the acceptance criteria the
       lead gives you. Actually read the changed code. Verdict first (PASS/FAIL),

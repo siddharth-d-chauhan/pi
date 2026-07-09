@@ -24,6 +24,7 @@ Versioned here in the fork; live everywhere via symlinks:
 All chains carry a `budget_usd` ceiling and take a `check` input (default
 `true` = no gate) — pass your repo's real command, e.g.
 `/chain feature {"task": "add X", "check": "npm run check"}`.
+Stages accept `model:` and `effort:` (thinking level) overrides.
 
 ## Teams (`/team apply <name>`)
 
@@ -40,11 +41,25 @@ Two kinds. **Routing teams** re-map which model each agent type uses:
 coordinating `lead` (spawn `lead` with the agent tool, or just ask the
 main agent to "have the team do X"). The lead hires members by name and
 converses with them over `agent_message`; members can't sub-spawn.
+Every member and the lead take `model:` and `effort:` (off/minimal/low/
+medium/high) so you decide exactly what each seat costs.
 
 | Team | Roster | Use for |
 |---|---|---|
 | `squad` | lead + scout, builder, qa | Feature work: map → build → sign-off |
 | `bughunt` | lead + repro, diagnost, fixer, verifier | Bugs: repro + root-cause in parallel, minimal fix, verified against the repro |
+
+Roster teams share the workspace (same working tree) and a **team
+memory** file (`.pi/agent-memory/team-<name>/MEMORY.md`) injected into
+the lead and every member — durable findings accumulate across runs.
+
+## Managing presets from the UI
+
+- `/presets` — create / edit / duplicate / delete chains, teams, and
+  agent definitions with validated templates (bad YAML never saves).
+- The **orchestra widget** above the prompt shows the active team's
+  roster (model·effort per seat), running chains, and the live
+  parent → child agent tree while anything is running.
 
 ## Context-rot rules baked into every chain
 

@@ -21,12 +21,14 @@
  *   lead:                      # optional; synthesized whenever members exist
  *     agent: plan              # base definition for the lead (optional)
  *     model: pi/main
+ *     effort: high             # reasoning effort (thinking level) override
  *     briefing: |              # appended to the lead's coordination protocol
  *       Ship small; verify before reporting done.
  *   members:                   # member name -> specialist built on a base type
  *     frontend:
  *       agent: worker
  *       model: pi/smol
+ *       effort: low
  *       persona: "UI specialist: components, styling, accessibility."
  *     qa:
  *       agent: reviewer
@@ -47,6 +49,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parse as parseYaml } from "yaml";
 import type { AgentDefinition, AgentDefinitionRegistry } from "./definitions.ts";
 
@@ -57,6 +60,8 @@ export interface TeamMember {
 	persona?: string;
 	/** Model spec or `pi/<role>` alias override for this member. */
 	model?: string;
+	/** Reasoning effort (thinking level) override for this member. */
+	effort?: ThinkingLevel;
 }
 
 export interface TeamLead {
@@ -64,6 +69,8 @@ export interface TeamLead {
 	agent?: string;
 	/** Model spec or `pi/<role>` alias override for the lead. */
 	model?: string;
+	/** Reasoning effort (thinking level) override for the lead. */
+	effort?: ThinkingLevel;
 	/** Extra briefing appended to the lead's coordination protocol. */
 	briefing?: string;
 }
@@ -149,6 +156,19 @@ function optionalString(
 	return value;
 }
 
+const VALID_EFFORT_LEVELS = new Set(["off", "minimal", "low", "medium", "high"]);
+
+function optionalEffort(record: Record<string, unknown>, filePath: string, where: string): ThinkingLevel | undefined {
+	const value = record.effort ?? record.thinking;
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || !VALID_EFFORT_LEVELS.has(value)) {
+		throw new TeamValidationError(
+			`${filePath}: "${where}.effort" must be one of ${[...VALID_EFFORT_LEVELS].join(", ")}`,
+		);
+	}
+	return value as ThinkingLevel;
+}
+
 function parseMembers(value: unknown, filePath: string): Record<string, TeamMember> {
 	if (value === undefined) return {};
 	const record = asRecord(value);
@@ -176,6 +196,7 @@ function parseMembers(value: unknown, filePath: string): Record<string, TeamMemb
 			agent: agent.trim().toLowerCase(),
 			persona: optionalString(member, "persona", filePath, `members.${name}`),
 			model: optionalString(member, "model", filePath, `members.${name}`),
+			effort: optionalEffort(member, filePath, `members.${name}`),
 		};
 	}
 	return result;
@@ -190,6 +211,7 @@ function parseLead(value: unknown, filePath: string): TeamLead | undefined {
 	return {
 		agent: optionalString(record, "agent", filePath, "lead")?.trim().toLowerCase(),
 		model: optionalString(record, "model", filePath, "lead"),
+		effort: optionalEffort(record, filePath, "lead"),
 		briefing: optionalString(record, "briefing", filePath, "lead"),
 	};
 }
@@ -339,6 +361,7 @@ function synthesizeMember(
 		persona ? `Specialty: ${persona}` : undefined,
 		`Stay inside your specialty; report back to your lead with a tight, self-contained summary (≤15 lines).`,
 		`You cannot spawn further agents — if work is out of scope, say so in your report instead of attempting it.`,
+		`You share the repository working tree with your teammates. If a TEAM MEMORY section is present, read it before starting; if you can write, record durable team-relevant findings there.`,
 	]
 		.filter(Boolean)
 		.join("\n");
@@ -348,6 +371,7 @@ function synthesizeMember(
 		description: persona ? firstLine(persona) : `${base.description} (team "${team.name}" member)`,
 		systemPrompt: `${base.systemPrompt.trim()}\n\n${rolePrompt}`,
 		model: member.model ?? base.model,
+		thinkingLevel: member.effort ?? base.thinkingLevel,
 		spawns: "none",
 		source: team.source,
 		filePath: team.filePath,
@@ -361,8 +385,13 @@ function synthesizeLead(
 ): AgentDefinition {
 	const memberNames = [...memberDefs.keys()];
 	const rosterLines = [...memberDefs.entries()].map(([name, def]) => {
-		const model = team.members[name]?.model;
-		return `- ${name} (base: ${team.members[name]?.agent}${model ? `, model: ${model}` : ""}): ${def.description}`;
+		const member = team.members[name];
+		const traits = [
+			`base: ${member?.agent}`,
+			member?.model ? `model: ${member.model}` : undefined,
+			member?.effort ? `effort: ${member.effort}` : undefined,
+		].filter(Boolean);
+		return `- ${name} (${traits.join(", ")}): ${def.description}`;
 	});
 	const protocol = [
 		`## YOUR TEAM ("${team.name}")`,
@@ -376,6 +405,7 @@ function synthesizeLead(
 		`- Give each member a tight, self-contained brief with acceptance criteria; do not forward your whole context.`,
 		`- Members stay addressable after finishing — use agent_message to follow up or relay context between members instead of re-spawning.`,
 		`- Members cannot sub-spawn; you are the only coordinator.`,
+		`- The team shares the workspace and a TEAM MEMORY file (shown when it exists). Put relevant shared notes in each brief, and have write-capable members log durable findings to team memory.`,
 		`- Synthesize member reports into one final answer for your caller. Never paste raw member transcripts.`,
 		team.coordinatorNote ? `\n${team.coordinatorNote.trim()}` : undefined,
 		team.lead?.briefing ? `\n${team.lead.briefing.trim()}` : undefined,
@@ -397,7 +427,7 @@ function synthesizeLead(
 		permissionMode: base?.permissionMode === "read-only" ? "bubble" : (base?.permissionMode ?? "bubble"),
 		spawns: memberNames,
 		model: team.lead?.model ?? base?.model,
-		thinkingLevel: base?.thinkingLevel ?? "medium",
+		thinkingLevel: team.lead?.effort ?? base?.thinkingLevel ?? "medium",
 		maxTurns: Math.max(base?.maxTurns ?? 0, 40),
 		background: base?.background,
 		isolation: "none",

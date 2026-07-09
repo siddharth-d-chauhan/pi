@@ -544,6 +544,46 @@ stages:
 		expect(maxInFlight).toBe(1);
 	});
 
+	it("applies per-stage effort as the child thinking level", async () => {
+		const parent = await makeParent();
+		const child = await createHarness();
+		harnesses.push(child);
+		child.setResponses([fauxAssistantMessage("done")]);
+
+		const captured: CreateChildSessionInput[] = [];
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: stagedFactory([child], captured),
+		};
+		const chainYaml = `
+name: eff
+stages:
+  - id: think
+    agent: worker
+    effort: high
+    prompt: p
+`;
+		expect(() =>
+			parseChain(
+				"name: bad\nstages:\n  - id: a\n    agent: worker\n    effort: turbo\n    prompt: p",
+				"b.yaml",
+				"project",
+			),
+		).toThrow(/effort must be one of/);
+		const result = await runChain({
+			definition: parseChain(chainYaml, "eff.yaml", "project"),
+			input: "",
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["worker"]),
+			deps,
+			cwd: makeTempDir("pi-chain-cwd-"),
+		});
+		expect(result.status).toBe("completed");
+		expect(captured[0]?.thinkingLevel).toBe("high");
+	});
+
 	it("stage isolation: worktree forwards to spawn (fails clearly outside git)", async () => {
 		// Parent cwd must NOT be a git repo, or spawn would create a real worktree.
 		const parent = await createHarness({

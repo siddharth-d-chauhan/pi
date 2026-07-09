@@ -27,6 +27,7 @@ export {
 	isReadOnlyToolSet,
 	type LoadAgentDefinitionsOptions,
 	loadAgentDefinitions,
+	parseAgentDefinitionContent,
 } from "./definitions.ts";
 export {
 	type AgentArtifact,

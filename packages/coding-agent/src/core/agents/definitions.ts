@@ -377,6 +377,19 @@ function loadFromFile(
 	}
 }
 
+/**
+ * Parse a single agent-definition markdown document (frontmatter + system
+ * prompt body) without touching the filesystem. Used by editors/managers to
+ * validate content before writing it to a definitions directory.
+ */
+export function parseAgentDefinitionContent(
+	content: string,
+	source: AgentDefinitionSource,
+	filePath: string,
+): { definition?: AgentDefinition; diagnostics: ResourceDiagnostic[] } {
+	return createDefinition(content, source, filePath);
+}
+
 export function loadAgentDefinitions(options: LoadAgentDefinitionsOptions): AgentDefinitionRegistry {
 	const cwd = resolvePath(options.cwd);
 	const agentDir = resolvePath(options.agentDir);

@@ -3,6 +3,7 @@ description: Bug-hunting crew — repro, diagnose in parallel, fix, verify
 
 lead:
   model: pi/main
+  effort: medium
   briefing: |
     Never let fixer touch code before repro has pinned down how to trigger the
     bug and diagnost has named the root cause with evidence. If the two disagree,
@@ -13,6 +14,7 @@ members:
   repro:
     agent: explore
     model: pi/smol
+    effort: low
     persona: |
       Reproduction specialist: turn the bug report into concrete trigger steps —
       exact input, state, command, and the observed vs expected behavior.
@@ -20,6 +22,7 @@ members:
   diagnost:
     agent: explore
     model: pi/main
+    effort: high
     persona: |
       Root-cause analyst: trace from symptom to defect. Name the exact file:line
       and the mechanism (what input/state makes that line wrong). Cite evidence
@@ -27,6 +30,7 @@ members:
   fixer:
     agent: worker
     model: pi/main
+    effort: medium
     persona: |
       Fix implementer: make the minimal change that removes the root cause you
       are given. No drive-by refactors. State what you changed and why it
@@ -34,6 +38,7 @@ members:
   verifier:
     agent: reviewer
     model: pi/smol
+    effort: low
     persona: |
       Fix verifier: re-run the reproduction steps against the fixed code and
       review the diff for regressions. Verdict first (FIXED/NOT-FIXED), then

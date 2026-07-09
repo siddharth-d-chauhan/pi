@@ -29,7 +29,7 @@ export function rtrimAnsi(line: string): string {
 }
 
 /** Lines that carry inline-image escape payloads must not be reflowed/boxed. */
-function isImageLine(line: string): boolean {
+export function isImageLine(line: string): boolean {
 	return line.includes("\x1b_G") || line.includes("\x1b]1337");
 }
 
@@ -47,6 +47,58 @@ export function spinnerGlyph(): string {
 /** Slow two-phase pulse for border colors while running. */
 export function pulseOn(): boolean {
 	return Math.floor(Date.now() / 500) % 2 === 0;
+}
+
+// ---------------------------------------------------------------------------
+// Solid components (omp-style): full-width background-painted blocks instead
+// of line-drawn borders. Content must use targeted fg resets (theme.fg /
+// theme.bold do) — a raw \x1b[0m inside a line would kill the background.
+// ---------------------------------------------------------------------------
+
+/** Pad `line` to `width` and paint the whole run with `bg`. */
+export function paintLine(line: string, width: number, bg: (text: string) => string): string {
+	const pad = " ".repeat(Math.max(0, width - visibleWidth(line)));
+	return bg(line + pad);
+}
+
+export interface SolidCardOptions {
+	width: number;
+	/** Raw label text for the header chip (e.g. "ORCHESTRA", "pi · main"). */
+	label?: string;
+	/** Paints the chip: typically a bright bg + contrasting fg. */
+	labelStyle?: (text: string) => string;
+	/** Extra pre-colored content on the label row, after the chip. */
+	labelSuffix?: string;
+	/** Pre-colored body lines (fg only — the card paints the bg). */
+	body: string[];
+	/** Background painter for the block, e.g. (s) => theme.bg("customMessageBg", s). */
+	bg: (text: string) => string;
+	paddingX?: number;
+	/** Blank painted rows above/below the content (default 0). */
+	paddingY?: number;
+}
+
+/**
+ * A solid-color component block: every row is painted edge to edge, with a
+ * chip-style label row on top. No border glyphs — the color IS the shape.
+ */
+export function solidCard(opts: SolidCardOptions): string[] {
+	const { width, bg } = opts;
+	const paddingX = opts.paddingX ?? 1;
+	const pad = " ".repeat(paddingX);
+	const inner = Math.max(1, width - paddingX * 2);
+	const out: string[] = [];
+	const paint = (content: string) => paintLine(`${pad}${truncateToWidth(rtrimAnsi(content), inner, "…")}`, width, bg);
+
+	if (opts.paddingY) for (let i = 0; i < opts.paddingY; i++) out.push(paintLine("", width, bg));
+	if (opts.label !== undefined) {
+		const chip = (opts.labelStyle ?? ((text: string) => text))(` ${opts.label} `);
+		out.push(paint(`${chip}${opts.labelSuffix ? ` ${opts.labelSuffix}` : ""}`));
+		out.push(paintLine("", width, bg));
+	}
+	for (const line of opts.body) out.push(paint(line));
+	if (opts.paddingY) for (let i = 0; i < opts.paddingY; i++) out.push(paintLine("", width, bg));
+	return out;
 }
 
 export function cardLines(opts: CardOptions): string[] {

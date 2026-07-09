@@ -39,7 +39,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { cardLines, pulseOn, rtrimAnsi, spinnerGlyph } from "./lib/card.ts";
+import { cardLines, isImageLine, paintLine, pulseOn, rtrimAnsi, spinnerGlyph } from "./lib/card.ts";
+import { getCardStyle, setCardStyle } from "./lib/style.ts";
 
 /** Per-tool border/title colors — colorful, but from the theme palette. */
 const TOOL_COLORS: Record<string, ThemeColor> = {
@@ -55,7 +56,11 @@ const TOOL_COLORS: Record<string, ThemeColor> = {
 /** Diff lines shown in a collapsed edit card before the expand hint. */
 const MINI_DIFF_LINES = 10;
 
-type ThemeLike = { fg(name: string, text: string): string; bold(text: string): string };
+type ThemeLike = {
+	fg(name: string, text: string): string;
+	bg(name: string, text: string): string;
+	bold(text: string): string;
+};
 
 // Current turn index — cards created in earlier turns render collapsed.
 let currentTurn = 0;
@@ -144,6 +149,31 @@ export class ToolCardComponent implements Component {
 			if (!pulseOn()) colorName = "dim";
 		}
 
+		if (getCardStyle() === "solid") {
+			// omp-style solid block: chip-tinted title row + status-tinted body.
+			const bgName = this.isError ? "toolErrorBg" : this.isPartial ? "toolPendingBg" : "toolSuccessBg";
+			const bg = (text: string) => theme.bg(bgName, text);
+			const cardWidth = Math.max(10, width - 1);
+			const innerPad = "  ";
+			const rows: string[] = [];
+			const accentBar = theme.fg(colorName === "dim" ? this.color : colorName, "▍");
+			rows.push(
+				paintLine(
+					`${accentBar} ${truncateToWidth(rtrimAnsi(renderTitle ?? ""), cardWidth - 4, "…")}`,
+					cardWidth,
+					(text) => theme.bg("selectedBg", text),
+				),
+			);
+			for (const raw of body) {
+				if (isImageLine(raw)) {
+					rows.push(raw);
+					continue;
+				}
+				rows.push(paintLine(`${innerPad}${truncateToWidth(rtrimAnsi(raw), cardWidth - 4, "…")}`, cardWidth, bg));
+			}
+			return rows;
+		}
+
 		return cardLines({
 			width,
 			title: renderTitle,
@@ -187,6 +217,19 @@ interface TurnSummaryData {
 }
 
 export default function (pi: ExtensionAPI) {
+	pi.registerCommand("cards", {
+		description: "Tool card style: /cards [solid|border]",
+		handler: async (args, ctx) => {
+			const requested = (args ?? "").trim().toLowerCase();
+			if (requested === "solid" || requested === "border") {
+				setCardStyle(requested);
+				ctx.ui.notify(`Tool cards: ${requested}`, "info");
+				return;
+			}
+			ctx.ui.notify(`Tool cards: ${getCardStyle()} (use /cards solid|border)`, "info");
+		},
+	});
+
 	const cwd = process.cwd();
 	const definitions: ToolDefinition<any, any>[] = [
 		createReadToolDefinition(cwd),

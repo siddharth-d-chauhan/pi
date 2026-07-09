@@ -28,13 +28,14 @@ import {
 	onTeamChange,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { cardLines } from "./lib/card.ts";
+import { solidCard } from "./lib/card.ts";
 import { icon, onIconModeChange } from "./lib/icons.ts";
 
 const execFileAsync = promisify(execFile);
 
 type ThemeLike = {
 	fg(name: string, text: string): string;
+	bg(name: string, text: string): string;
 	bold(text: string): string;
 };
 
@@ -138,12 +139,13 @@ class DashboardHeader implements Component {
 		const theme = this.theme;
 		const { repo, chains, modelId, teamMemory, agentMemoryTypes } = this.data;
 
-		let title = theme.fg("accent", theme.bold(basename(this.data.cwd) || shortPath(this.data.cwd)));
+		const label = basename(this.data.cwd) || shortPath(this.data.cwd);
+		let labelSuffix = "";
 		if (repo?.branch) {
-			title += ` ${theme.fg("muted", icon("branch"))} ${theme.fg("text", repo.branch)}`;
-			if (repo.dirty > 0) title += theme.fg("warning", ` ±${repo.dirty}`);
-			if (repo.ahead > 0) title += theme.fg("success", ` ↑${repo.ahead}`);
-			if (repo.behind > 0) title += theme.fg("error", ` ↓${repo.behind}`);
+			labelSuffix = `${theme.fg("muted", icon("branch"))} ${theme.fg("text", theme.bold(repo.branch))}`;
+			if (repo.dirty > 0) labelSuffix += theme.fg("warning", ` ±${repo.dirty}`);
+			if (repo.ahead > 0) labelSuffix += theme.fg("success", ` ↑${repo.ahead}`);
+			if (repo.behind > 0) labelSuffix += theme.fg("error", ` ↓${repo.behind}`);
 		}
 
 		const body: string[] = [];
@@ -179,14 +181,17 @@ class DashboardHeader implements Component {
 			`${theme.fg("accent", icon("model"))} ${theme.fg("text", modelId ?? "no model")} ${theme.fg("dim", `· memory: ${memory}`)}`,
 		);
 
-		const lines = cardLines({
+		const lines = solidCard({
 			width: Math.min(width, 100),
-			title,
+			label,
+			labelStyle: (text) => theme.bg("selectedBg", theme.fg("accent", theme.bold(text))),
+			labelSuffix,
 			body,
-			edge: (text) => theme.fg("dim", text),
+			bg: (text) => theme.bg("customMessageBg", text),
+			paddingX: 2,
+			paddingY: 1,
 		});
-		// Hint line woven into the bottom border, like the built-in header's hints.
-		const hint = ` ${theme.fg("dim", "ctrl+o help · / commands · /presets manage · /agents")}`;
+		const hint = `  ${theme.fg("dim", "ctrl+o help · / commands · /presets manage · /agents")}`;
 		return ["", ...lines, hint, ""];
 	}
 }

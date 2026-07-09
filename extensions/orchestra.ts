@@ -24,7 +24,7 @@ import {
 	type TeamDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { solidCard } from "./lib/card.ts";
 import { icon, onIconModeChange } from "./lib/icons.ts";
 
 const WIDGET_KEY = "orchestra";
@@ -32,6 +32,7 @@ const MAX_TREE_LINES = 10;
 
 type ThemeLike = {
 	fg(name: string, text: string): string;
+	bg(name: string, text: string): string;
 	bold(text: string): string;
 };
 
@@ -189,7 +190,17 @@ class OrchestraWidget implements Component {
 			lines.push(...treeLines);
 		}
 
-		return lines.map((line) => truncateToWidth(line, width, "…"));
+		if (lines.length === 0) return [];
+		// Solid component block: label chip + painted rows (omp style).
+		return solidCard({
+			width: Math.min(width, 100),
+			label: "orchestra",
+			labelStyle: (text) => theme.bg("selectedBg", theme.fg("accent", theme.bold(text))),
+			body: lines,
+			bg: (text) => theme.bg("toolPendingBg", text),
+			paddingX: 2,
+			paddingY: 0,
+		});
 	}
 }
 

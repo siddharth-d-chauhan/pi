@@ -27,12 +27,24 @@ All chains carry a `budget_usd` ceiling and take a `check` input (default
 
 ## Teams (`/team apply <name>`)
 
+Two kinds. **Routing teams** re-map which model each agent type uses:
+
 | Team | Use for |
 |---|---|
 | `frugal` | Routine work — cheapest models, token discipline |
 | `quality` | Shipping real code — strong plan/review, fast mechanical work |
 | `speed` | Wide parallel fan-out with fast models |
 | `deep` | Genuinely hard problems — strongest models everywhere |
+
+**Roster teams** materialize specialists working together under a
+coordinating `lead` (spawn `lead` with the agent tool, or just ask the
+main agent to "have the team do X"). The lead hires members by name and
+converses with them over `agent_message`; members can't sub-spawn.
+
+| Team | Roster | Use for |
+|---|---|---|
+| `squad` | lead + scout, builder, qa | Feature work: map → build → sign-off |
+| `bughunt` | lead + repro, diagnost, fixer, verifier | Bugs: repro + root-cause in parallel, minimal fix, verified against the repro |
 
 ## Context-rot rules baked into every chain
 

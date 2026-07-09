@@ -15,6 +15,30 @@
  *   coordinatorNote: |         # optional prompt snippet the integrator may inject
  *     Prefer many small parallel workers over one large one.
  *
+ * A team may also declare a ROSTER — specialized members working together
+ * under a coordinating lead:
+ *
+ *   lead:                      # optional; synthesized whenever members exist
+ *     agent: plan              # base definition for the lead (optional)
+ *     model: pi/main
+ *     briefing: |              # appended to the lead's coordination protocol
+ *       Ship small; verify before reporting done.
+ *   members:                   # member name -> specialist built on a base type
+ *     frontend:
+ *       agent: worker
+ *       model: pi/smol
+ *       persona: "UI specialist: components, styling, accessibility."
+ *     qa:
+ *       agent: reviewer
+ *       persona: "Verify the team's work against acceptance criteria."
+ *
+ * While the team is active, `applyTeamToDefinitions` materializes members
+ * (and a "lead") as real spawnable agent definitions: the lead's spawn
+ * allowlist is exactly the member names, members get the persona layered
+ * onto the base system prompt and cannot sub-spawn. Coordination happens
+ * through the normal platform: the agent tool to hire, agent_message to
+ * converse (members stay addressable after finishing).
+ *
  * Discovery: project `.pi/teams/*.yaml|yml` then user `<agentDir>/teams/`
  * (first name wins). One team may be active at a time (module singleton);
  * `applyTeamToRouting` merges the active team over the settings-derived
@@ -24,6 +48,25 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import type { AgentDefinition, AgentDefinitionRegistry } from "./definitions.ts";
+
+export interface TeamMember {
+	/** Base agent definition type this member is built on (e.g. "worker"). */
+	agent: string;
+	/** Specialty layered onto the base system prompt as the member's role. */
+	persona?: string;
+	/** Model spec or `pi/<role>` alias override for this member. */
+	model?: string;
+}
+
+export interface TeamLead {
+	/** Base definition for the lead (default: a built-in coordinator). */
+	agent?: string;
+	/** Model spec or `pi/<role>` alias override for the lead. */
+	model?: string;
+	/** Extra briefing appended to the lead's coordination protocol. */
+	briefing?: string;
+}
 
 export interface TeamDefinition {
 	name: string;
@@ -36,6 +79,10 @@ export interface TeamDefinition {
 	disabled: string[];
 	/** Optional prompt snippet the integrator may inject for coordinators. */
 	coordinatorNote?: string;
+	/** Roster: member name -> specialist definition overlay. */
+	members: Record<string, TeamMember>;
+	/** Lead configuration (only meaningful when members exist). */
+	lead?: TeamLead;
 	source: "project" | "user";
 	filePath: string;
 }
@@ -88,6 +135,65 @@ function parseDisabled(value: unknown, filePath: string): string[] {
 	return value as string[];
 }
 
+function optionalString(
+	record: Record<string, unknown>,
+	key: string,
+	filePath: string,
+	where: string,
+): string | undefined {
+	const value = record[key];
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || !value.trim()) {
+		throw new TeamValidationError(`${filePath}: "${where}.${key}" must be a non-empty string`);
+	}
+	return value;
+}
+
+function parseMembers(value: unknown, filePath: string): Record<string, TeamMember> {
+	if (value === undefined) return {};
+	const record = asRecord(value);
+	if (!record) {
+		throw new TeamValidationError(`${filePath}: "members" must be a mapping of member name → member config`);
+	}
+	const result: Record<string, TeamMember> = {};
+	for (const [rawName, rawMember] of Object.entries(record)) {
+		const name = rawName.trim().toLowerCase();
+		if (!name) throw new TeamValidationError(`${filePath}: member names must be non-empty`);
+		if (name === "lead") {
+			throw new TeamValidationError(`${filePath}: member name "lead" is reserved for the team lead`);
+		}
+		const member = asRecord(rawMember);
+		if (!member) {
+			throw new TeamValidationError(`${filePath}: "members.${name}" must be a mapping (agent, persona, model)`);
+		}
+		const agent = optionalString(member, "agent", filePath, `members.${name}`);
+		if (!agent) {
+			throw new TeamValidationError(
+				`${filePath}: "members.${name}.agent" is required (base agent type, e.g. worker)`,
+			);
+		}
+		result[name] = {
+			agent: agent.trim().toLowerCase(),
+			persona: optionalString(member, "persona", filePath, `members.${name}`),
+			model: optionalString(member, "model", filePath, `members.${name}`),
+		};
+	}
+	return result;
+}
+
+function parseLead(value: unknown, filePath: string): TeamLead | undefined {
+	if (value === undefined) return undefined;
+	const record = asRecord(value);
+	if (!record) {
+		throw new TeamValidationError(`${filePath}: "lead" must be a mapping (agent, model, briefing)`);
+	}
+	return {
+		agent: optionalString(record, "agent", filePath, "lead")?.trim().toLowerCase(),
+		model: optionalString(record, "model", filePath, "lead"),
+		briefing: optionalString(record, "briefing", filePath, "lead"),
+	};
+}
+
 /** Parse + validate one team file. Throws TeamValidationError with a helpful message. */
 export function parseTeam(rawContent: string, filePath: string, source: TeamDefinition["source"]): TeamDefinition {
 	let parsed: unknown;
@@ -109,6 +215,8 @@ export function parseTeam(rawContent: string, filePath: string, source: TeamDefi
 		disabled: parseDisabled(root.disabled, filePath),
 		coordinatorNote:
 			typeof root.coordinatorNote === "string" && root.coordinatorNote.trim() ? root.coordinatorNote : undefined,
+		members: parseMembers(root.members, filePath),
+		lead: parseLead(root.lead, filePath),
 		source,
 		filePath,
 	};
@@ -204,5 +312,148 @@ export function applyTeamToRouting(base: EffectiveAgentRouting): EffectiveAgentR
 		modelOverrides: { ...base.modelOverrides, ...activeTeam.modelOverrides },
 		roles: { ...base.roles, ...activeTeam.roles },
 		disabled: [...new Set([...base.disabled, ...activeTeam.disabled])],
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Roster materialization — members + lead as real agent definitions
+// ---------------------------------------------------------------------------
+
+const LEAD_NAME = "lead";
+const LEAD_DEFAULT_TOOLS = ["read", "grep", "find", "ls", "agent", "agent_message", "agent_list", "agent_pull"];
+
+function firstLine(text: string): string {
+	return text.trim().split("\n")[0] ?? "";
+}
+
+function synthesizeMember(
+	name: string,
+	member: TeamMember,
+	base: AgentDefinition,
+	team: TeamDefinition,
+): AgentDefinition {
+	const persona = member.persona?.trim();
+	const rolePrompt = [
+		`## TEAM ROLE`,
+		`You are "${name}", a specialist on team "${team.name}".`,
+		persona ? `Specialty: ${persona}` : undefined,
+		`Stay inside your specialty; report back to your lead with a tight, self-contained summary (≤15 lines).`,
+		`You cannot spawn further agents — if work is out of scope, say so in your report instead of attempting it.`,
+	]
+		.filter(Boolean)
+		.join("\n");
+	return {
+		...base,
+		name,
+		description: persona ? firstLine(persona) : `${base.description} (team "${team.name}" member)`,
+		systemPrompt: `${base.systemPrompt.trim()}\n\n${rolePrompt}`,
+		model: member.model ?? base.model,
+		spawns: "none",
+		source: team.source,
+		filePath: team.filePath,
+	};
+}
+
+function synthesizeLead(
+	team: TeamDefinition,
+	memberDefs: Map<string, AgentDefinition>,
+	base?: AgentDefinition,
+): AgentDefinition {
+	const memberNames = [...memberDefs.keys()];
+	const rosterLines = [...memberDefs.entries()].map(([name, def]) => {
+		const model = team.members[name]?.model;
+		return `- ${name} (base: ${team.members[name]?.agent}${model ? `, model: ${model}` : ""}): ${def.description}`;
+	});
+	const protocol = [
+		`## YOUR TEAM ("${team.name}")`,
+		`You are the LEAD of a team of specialists. Your job is coordination and synthesis, not doing the specialists' work yourself.`,
+		``,
+		`Members (spawn by name with the agent tool):`,
+		...rosterLines,
+		``,
+		`Coordination protocol:`,
+		`- Decompose the task and delegate to the right specialist(s); run independent work in parallel (one agent call, multiple tasks).`,
+		`- Give each member a tight, self-contained brief with acceptance criteria; do not forward your whole context.`,
+		`- Members stay addressable after finishing — use agent_message to follow up or relay context between members instead of re-spawning.`,
+		`- Members cannot sub-spawn; you are the only coordinator.`,
+		`- Synthesize member reports into one final answer for your caller. Never paste raw member transcripts.`,
+		team.coordinatorNote ? `\n${team.coordinatorNote.trim()}` : undefined,
+		team.lead?.briefing ? `\n${team.lead.briefing.trim()}` : undefined,
+	]
+		.filter((line): line is string => line !== undefined)
+		.join("\n");
+
+	// The lead needs delegation tools even when its base is read-only.
+	let tools = base?.tools ?? LEAD_DEFAULT_TOOLS;
+	if (Array.isArray(tools)) {
+		tools = [...new Set([...tools, "agent", "agent_message"])];
+	}
+	return {
+		name: LEAD_NAME,
+		description: `Lead of team "${team.name}" — coordinates ${memberNames.join(", ")}. Delegate team-sized tasks here.`,
+		systemPrompt: base ? `${base.systemPrompt.trim()}\n\n${protocol}` : protocol,
+		tools,
+		disallowedTools: base?.disallowedTools,
+		permissionMode: base?.permissionMode === "read-only" ? "bubble" : (base?.permissionMode ?? "bubble"),
+		spawns: memberNames,
+		model: team.lead?.model ?? base?.model,
+		thinkingLevel: base?.thinkingLevel ?? "medium",
+		maxTurns: Math.max(base?.maxTurns ?? 0, 40),
+		background: base?.background,
+		isolation: "none",
+		omitProjectContext: base?.omitProjectContext,
+		color: base?.color,
+		source: team.source,
+		filePath: team.filePath,
+	};
+}
+
+/**
+ * Merge the active team's roster over an agent definition registry. Members
+ * (and a synthesized "lead" whose spawn allowlist is exactly the member
+ * names) become real spawnable definitions; names shadow same-named base
+ * definitions while the team is active. Without an active team (or one with
+ * no members), the registry is returned unchanged.
+ */
+export function applyTeamToDefinitions(registry: AgentDefinitionRegistry): AgentDefinitionRegistry {
+	const team = activeTeam;
+	if (!team || Object.keys(team.members).length === 0) return registry;
+
+	const synthesized = new Map<string, AgentDefinition>();
+	const diagnostics = [...registry.diagnostics];
+	for (const [name, member] of Object.entries(team.members)) {
+		const base = registry.get(member.agent);
+		if (!base) {
+			diagnostics.push({
+				type: "warning",
+				message: `team "${team.name}": member "${name}" references unknown agent type "${member.agent}" — member skipped`,
+				path: team.filePath,
+			});
+			continue;
+		}
+		synthesized.set(name, synthesizeMember(name, member, base, team));
+	}
+	if (synthesized.size > 0) {
+		let leadBase: AgentDefinition | undefined;
+		if (team.lead?.agent) {
+			leadBase = registry.get(team.lead.agent);
+			if (!leadBase) {
+				diagnostics.push({
+					type: "warning",
+					message: `team "${team.name}": lead references unknown agent type "${team.lead.agent}" — using the built-in coordinator`,
+					path: team.filePath,
+				});
+			}
+		}
+		synthesized.set(LEAD_NAME, synthesizeLead(team, synthesized, leadBase));
+	}
+
+	return {
+		get: (name) => synthesized.get(name.trim().toLowerCase()) ?? registry.get(name),
+		list: () => [
+			...synthesized.values(),
+			...registry.list().filter((definition) => !synthesized.has(definition.name)),
+		],
+		diagnostics,
 	};
 }

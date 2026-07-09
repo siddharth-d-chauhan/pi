@@ -25,7 +25,7 @@ import {
 	loadChains,
 	runChain,
 } from "../agents/chains.ts";
-import { loadAgentDefinitions } from "../agents/index.ts";
+import { applyTeamToDefinitions, loadAgentDefinitions } from "../agents/index.ts";
 import type { SpawnDeps } from "../agents/spawn.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { formatElapsed } from "./agent.ts";
@@ -249,11 +249,13 @@ export function createChainToolDefinition(
 				const errors = loaded.errors.length > 0 ? `\nLoad errors:\n${loaded.errors.join("\n")}` : "";
 				throw new Error(`Unknown chain "${args.chain}". Available: ${names}.${errors}`);
 			}
-			const definitions = loadAgentDefinitions({
-				cwd: opts.cwd,
-				agentDir,
-				packageAgentDirs: opts.packageAgentDirs,
-			});
+			const definitions = applyTeamToDefinitions(
+				loadAgentDefinitions({
+					cwd: opts.cwd,
+					agentDir,
+					packageAgentDirs: opts.packageAgentDirs,
+				}),
+			);
 
 			// Run-state persistence: completed stages of a failed run are
 			// seeded on --resume instead of re-running.

@@ -7,7 +7,12 @@ import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { coldAgentsForParent, removeAgentIndexEntry } from "../agents/agent-index.ts";
 import type { AgentDefinition, AgentSpawnPolicy } from "../agents/definitions.ts";
-import { formatAgentDefinitionsForPrompt, loadAgentDefinitions, spawnAgent } from "../agents/index.ts";
+import {
+	applyTeamToDefinitions,
+	formatAgentDefinitionsForPrompt,
+	loadAgentDefinitions,
+	spawnAgent,
+} from "../agents/index.ts";
 import { deliverToAgent, registerParkedAgent, releaseAgent } from "../agents/lifecycle.ts";
 import type { CreateChildSessionInput, CreateChildSessionResult, SpawnDeps } from "../agents/spawn.ts";
 import { getBackgroundProcessRegistry, sanitizeLogLine } from "../background-process-registry.ts";
@@ -388,7 +393,7 @@ export function createAgentToolDefinition(
 	const deps: SpawnDeps = createDefaultSpawnDeps(cwd, agentDir, packageAgentDirs, ctx);
 	const initialAgentSettings = ctx.settingsManager.getAgentSettings();
 	const initialDisabled = new Set(initialAgentSettings.disabled ?? []);
-	const initialRegistry = loadAgentDefinitions({ cwd, agentDir, packageAgentDirs });
+	const initialRegistry = applyTeamToDefinitions(loadAgentDefinitions({ cwd, agentDir, packageAgentDirs }));
 	const initialMaxInline = initialAgentSettings.maxInlineDefinitions ?? 12;
 	const initialRoster = describeRoster(
 		initialRegistry.list().filter((def) => !initialDisabled.has(def.name)),
@@ -411,7 +416,7 @@ export function createAgentToolDefinition(
 			}
 			const settings = ctx.settingsManager;
 			const agentSettings = settings.getAgentSettings();
-			const registry = loadAgentDefinitions({ cwd, agentDir, packageAgentDirs });
+			const registry = applyTeamToDefinitions(loadAgentDefinitions({ cwd, agentDir, packageAgentDirs }));
 			const disabled = new Set(agentSettings.disabled ?? []);
 			const maxInline = agentSettings.maxInlineDefinitions ?? 12;
 			const allowed = registry.list().filter((def) => !disabled.has(def.name));

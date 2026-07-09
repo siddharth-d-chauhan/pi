@@ -37,6 +37,7 @@ export {
 	type AgentReturn,
 	type AgentSpawnPolicy,
 	type AgentToolList,
+	applyTeamToDefinitions,
 	type ChainDefinition,
 	type ChainRunResult,
 	type ChainStageResult,
@@ -65,6 +66,8 @@ export {
 	runChain,
 	setActiveTeam,
 	type TeamDefinition,
+	type TeamLead,
+	type TeamMember,
 } from "./core/agents/index.ts";
 // Auth and model registry
 export {

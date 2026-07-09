@@ -457,4 +457,53 @@ describe("spawnAgent", () => {
 		const result = await second;
 		expect(result.registryId).toMatch(/^bg-/);
 	});
+
+	it("exempts delegation-only coordinators from the shared-workspace gate", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const childHarness = await createHarness();
+		harnesses.push(childHarness);
+		childHarness.setResponses([fauxAssistantMessage("delegated")]);
+		const deps: SpawnDeps = {
+			settingsManager: harness.settingsManager,
+			modelRegistry: harness.session.modelRegistry,
+			artifactDir: makeArtifactDir(),
+			createChildSession: async () => ({ session: childHarness.session, dispose: () => {} }),
+		};
+
+		// A background spawn is "concurrent" for the gate. A lead whose only
+		// non-read-only tools delegate (agent/agent_message) must pass...
+		const lead = await spawnAgent(
+			{
+				definition: makeDefinition({
+					name: "lead",
+					tools: ["read", "grep", "agent", "agent_message"],
+					permissionMode: "bubble",
+				}),
+				prompt: "coordinate",
+				parent: { session: harness.session, depth: 0 },
+				background: true,
+			},
+			deps,
+		);
+		expect(lead.registryId).toMatch(/^bg-/);
+		await waitForBackgroundStatus(lead.registryId, "idle");
+
+		// ...while an actual workspace writer still gates.
+		await expect(
+			spawnAgent(
+				{
+					definition: makeDefinition({
+						name: "writer",
+						tools: ["read", "edit", "agent_message"],
+						permissionMode: "bubble",
+					}),
+					prompt: "mutate",
+					parent: { session: harness.session, depth: 0 },
+					background: true,
+				},
+				deps,
+			),
+		).rejects.toThrow(/allowSharedWorkspaceWrites/);
+	});
 });

@@ -60,6 +60,7 @@ export {
 	spawnAgent,
 } from "./spawn.ts";
 export {
+	applyTeamToDefinitions,
 	applyTeamToRouting,
 	type EffectiveAgentRouting,
 	getActiveTeam,
@@ -69,5 +70,7 @@ export {
 	resetTeamsForTests,
 	setActiveTeam,
 	type TeamDefinition,
+	type TeamLead,
+	type TeamMember,
 	TeamValidationError,
 } from "./teams.ts";

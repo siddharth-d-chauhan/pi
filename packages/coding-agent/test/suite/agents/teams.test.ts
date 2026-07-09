@@ -2,7 +2,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { AgentDefinition, AgentDefinitionRegistry } from "../../../src/core/agents/definitions.ts";
 import {
+	applyTeamToDefinitions,
 	applyTeamToRouting,
 	type EffectiveAgentRouting,
 	getActiveTeam,
@@ -208,5 +210,157 @@ describe("applyTeamToRouting", () => {
 		setActiveTeam(parseTeam("name: t\ndisabled: [scout, plan]", "t.yaml", "user"));
 		const merged = applyTeamToRouting(base);
 		expect(merged.disabled.sort()).toEqual(["plan", "scout"]);
+	});
+});
+
+const ROSTER_TEAM = `
+name: Squad
+lead:
+  agent: plan
+  model: pi/main
+  briefing: Ship small; verify before reporting done.
+members:
+  Frontend:
+    agent: worker
+    model: pi/smol
+    persona: |
+      UI specialist: components, styling.
+      Keep bundles small.
+  qa:
+    agent: reviewer
+    persona: Verify the team's work.
+`;
+
+describe("parseTeam roster", () => {
+	it("parses members and lead, lowercasing names and base types", () => {
+		const team = parseTeam(ROSTER_TEAM, "squad.yaml", "project");
+		expect(Object.keys(team.members).sort()).toEqual(["frontend", "qa"]);
+		expect(team.members.frontend).toMatchObject({ agent: "worker", model: "pi/smol" });
+		expect(team.members.frontend.persona).toContain("UI specialist");
+		expect(team.members.qa).toEqual({ agent: "reviewer", persona: "Verify the team's work.", model: undefined });
+		expect(team.lead).toEqual({
+			agent: "plan",
+			model: "pi/main",
+			briefing: "Ship small; verify before reporting done.",
+		});
+	});
+
+	it("defaults to no roster when members/lead are omitted", () => {
+		const team = parseTeam("name: bare", "bare.yaml", "user");
+		expect(team.members).toEqual({});
+		expect(team.lead).toBeUndefined();
+	});
+
+	it("rejects bad roster shapes with the offending path in the message", () => {
+		expect(() => parseTeam("name: t\nmembers: [a]", "t.yaml", "project")).toThrow(/"members" must be a mapping/);
+		expect(() => parseTeam("name: t\nmembers:\n  fe: worker", "t.yaml", "project")).toThrow(
+			/"members\.fe" must be a mapping/,
+		);
+		expect(() => parseTeam("name: t\nmembers:\n  fe: {persona: x}", "t.yaml", "project")).toThrow(
+			/"members\.fe\.agent" is required/,
+		);
+		expect(() => parseTeam("name: t\nmembers:\n  fe: {agent: worker, model: 3}", "t.yaml", "project")).toThrow(
+			/"members\.fe\.model" must be a non-empty string/,
+		);
+		expect(() => parseTeam("name: t\nlead: nope", "t.yaml", "project")).toThrow(/"lead" must be a mapping/);
+		expect(() => parseTeam("name: t\nmembers:\n  lead: {agent: worker}", "t.yaml", "project")).toThrow(
+			/member name "lead" is reserved/,
+		);
+	});
+});
+
+describe("applyTeamToDefinitions", () => {
+	afterEach(() => {
+		resetTeamsForTests();
+	});
+
+	function makeDefinition(name: string, overrides: Partial<AgentDefinition> = {}): AgentDefinition {
+		return {
+			name,
+			description: `${name} agent`,
+			systemPrompt: `You are ${name}.`,
+			tools: ["read", "grep"],
+			spawns: "none",
+			model: "pi/base",
+			source: "bundled",
+			...overrides,
+		} as AgentDefinition;
+	}
+
+	function makeRegistry(definitions: AgentDefinition[]): AgentDefinitionRegistry {
+		const map = new Map(definitions.map((definition) => [definition.name, definition]));
+		return {
+			get: (name) => map.get(name.toLowerCase()),
+			list: () => [...map.values()],
+			diagnostics: [],
+		};
+	}
+
+	const baseRegistry = () =>
+		makeRegistry([makeDefinition("worker"), makeDefinition("reviewer"), makeDefinition("plan")]);
+
+	it("returns the registry unchanged without an active team or roster", () => {
+		const registry = baseRegistry();
+		expect(applyTeamToDefinitions(registry)).toBe(registry);
+		setActiveTeam(parseTeam(VALID_TEAM, "fast.yaml", "project"));
+		expect(applyTeamToDefinitions(registry)).toBe(registry);
+	});
+
+	it("materializes members with persona, model override, and no sub-spawns", () => {
+		setActiveTeam(parseTeam(ROSTER_TEAM, "squad.yaml", "project"));
+		const merged = applyTeamToDefinitions(baseRegistry());
+
+		const frontend = merged.get("frontend");
+		expect(frontend).toBeDefined();
+		expect(frontend?.model).toBe("pi/smol");
+		expect(frontend?.spawns).toBe("none");
+		expect(frontend?.systemPrompt).toContain("You are worker.");
+		expect(frontend?.systemPrompt).toContain("UI specialist");
+		expect(frontend?.description).toBe("UI specialist: components, styling.");
+		expect(frontend?.source).toBe("project");
+
+		const qa = merged.get("qa");
+		expect(qa?.model).toBe("pi/base"); // no override -> base model
+		expect(qa?.systemPrompt).toContain("You are reviewer.");
+	});
+
+	it("synthesizes a lead whose spawns are exactly the member names", () => {
+		setActiveTeam(parseTeam(ROSTER_TEAM, "squad.yaml", "project"));
+		const merged = applyTeamToDefinitions(baseRegistry());
+
+		const lead = merged.get("lead");
+		expect(lead).toBeDefined();
+		expect([...(lead?.spawns as string[])].sort()).toEqual(["frontend", "qa"]);
+		expect(lead?.model).toBe("pi/main");
+		// Delegation tools are forced in even when the base is read-only.
+		expect(lead?.tools).toContain("agent");
+		expect(lead?.tools).toContain("agent_message");
+		// Roster + protocol + briefing all present.
+		expect(lead?.systemPrompt).toContain("You are plan.");
+		expect(lead?.systemPrompt).toContain("- frontend (base: worker, model: pi/smol)");
+		expect(lead?.systemPrompt).toContain("Ship small; verify before reporting done.");
+		// Members shadow, everything else survives, list() has no duplicates.
+		const names = merged.list().map((definition) => definition.name);
+		expect(names.sort()).toEqual(["frontend", "lead", "plan", "qa", "reviewer", "worker"]);
+	});
+
+	it("skips members with unknown base types and surfaces a diagnostic", () => {
+		setActiveTeam(
+			parseTeam("name: t\nmembers:\n  ghost: {agent: nosuch}\n  qa: {agent: reviewer}", "t.yaml", "user"),
+		);
+		const merged = applyTeamToDefinitions(baseRegistry());
+		expect(merged.get("ghost")).toBeUndefined();
+		expect(merged.get("qa")).toBeDefined();
+		expect(merged.get("lead")?.spawns as string[]).toEqual(["qa"]);
+		expect(merged.diagnostics.some((diag) => diag.message.includes('member "ghost"'))).toBe(true);
+	});
+
+	it("falls back to the built-in coordinator when the lead base is unknown", () => {
+		setActiveTeam(parseTeam("name: t\nlead: {agent: nosuch}\nmembers:\n  qa: {agent: reviewer}", "t.yaml", "user"));
+		const merged = applyTeamToDefinitions(baseRegistry());
+		const lead = merged.get("lead");
+		expect(lead).toBeDefined();
+		expect(lead?.systemPrompt).toContain("You are the LEAD");
+		expect(merged.diagnostics.some((diag) => diag.message.includes("built-in coordinator"))).toBe(true);
 	});
 });

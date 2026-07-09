@@ -213,6 +213,9 @@ function getSemaphore(settings: SettingsManager): Semaphore {
  *  lifetime of the spawn and is what makes the isolation gate race-free. */
 const inFlightByType = new Map<string, number>();
 
+/** Tools that only delegate to other agents and never write the workspace. */
+const DELEGATION_ONLY_TOOLS = new Set(["agent", "agent_message", "chain"]);
+
 interface Reservation {
 	agentType: string;
 	released: boolean;
@@ -319,7 +322,15 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 	// Isolation gate (race-free: reservation is already held). Worktree
 	// isolation exempts the spawn — the worktree IS the isolation.
 	const concurrent = background || hasConcurrentActiveSpawn(settings, definition.name);
-	const mutatesWorkspace = !effective.readOnly;
+	// Delegation tools don't touch the workspace themselves — the agents they
+	// spawn re-enter this gate with their own tool sets. A coordinator whose
+	// only non-read-only tools are delegation tools is safe to run concurrently.
+	const mutatesWorkspace = !isReadOnlyToolSet(
+		Array.isArray(definition.tools)
+			? definition.tools.filter((tool) => !DELEGATION_ONLY_TOOLS.has(tool.toLowerCase()))
+			: definition.tools,
+		definition.disallowedTools,
+	);
 	if (
 		effectiveIsolation !== "worktree" &&
 		mutatesWorkspace &&

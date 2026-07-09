@@ -7,6 +7,10 @@
  *
  * A team preset binds agent types to models/roles and can hide agent
  * types — "different model for different type of subagents" as one file.
+ *
+ * Teams with a `members:` roster materialize specialists + a coordinating
+ * "lead" agent while active: delegate a team-sized task to "lead" and it
+ * hires members (agent tool) and converses with them (agent_message).
  */
 
 import {
@@ -36,9 +40,14 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				setActiveTeam(team);
+				const memberNames = Object.keys(team.members);
+				const rosterNote =
+					memberNames.length > 0
+						? `\nRoster: lead + ${memberNames.join(", ")} — ask the agent to delegate to "lead" (or spawn members directly).`
+						: "";
 				ctx.ui.notify(
 					`Team "${team.name}" active: ${Object.keys(team.modelOverrides).length} model override(s), ` +
-						`${team.disabled.length} disabled agent type(s).`,
+						`${team.disabled.length} disabled agent type(s).${rosterNote}`,
 					"info",
 				);
 				return;
@@ -49,9 +58,11 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const active = getActiveTeam()?.name;
-			const lines = [...teams.values()].map(
-				(team) => `${team.name === active ? "* " : "  "}${team.name} — ${team.description ?? team.filePath}`,
-			);
+			const lines = [...teams.values()].map((team) => {
+				const members = Object.keys(team.members);
+				const roster = members.length > 0 ? ` [lead + ${members.join(", ")}]` : "";
+				return `${team.name === active ? "* " : "  "}${team.name} — ${team.description ?? team.filePath}${roster}`;
+			});
 			const body = [...lines, ...errors.map((error) => `! ${error}`)].join("\n");
 			ctx.ui.notify(body || "No teams defined (.pi/teams/*.yaml)", "info");
 		},

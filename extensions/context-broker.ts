@@ -260,6 +260,36 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	pi.registerCommand("memory", {
+		description: "Knowledge platform status: /memory status",
+		handler: async (_args, ctx) => {
+			const shared = (globalThis as Record<string, unknown>).__pi_kp__ as KpShared | undefined;
+			const lines: string[] = [];
+			if (!shared) {
+				lines.push("kp: knowledge.ts not loaded");
+			} else {
+				const started = Date.now();
+				try {
+					const client = (await shared.connect()) as unknown as {
+						listTools: () => Promise<{ tools: Array<{ name: string }> }>;
+					};
+					const listed = await client.listTools();
+					const piTools = listed.tools.filter((tool) => tool.name.startsWith("pi.")).length;
+					lines.push(`kp: UP · ${listed.tools.length} tools (${piTools} broker) · ping ${Date.now() - started}ms`);
+				} catch (err) {
+					lines.push(`kp: DOWN (${(err as Error).message}) — pi runs fail-open on builtins`);
+				}
+			}
+			lines.push(`boot memory: ${state.bootPacket?.candidates?.length ?? 0} item(s)`);
+			if (state.workFrameId) lines.push(`workframe: ${state.workFrameId} · epoch ${state.epoch ?? 1}`);
+			if (state.lastDebug) lines.push(`last debug lookup: ${state.lastDebug.items} item(s)`);
+			if (state.lastSpawn)
+				lines.push(`last spawn packet: ${state.lastSpawn.items} item(s) (${state.lastSpawn.child})`);
+			if (state.kpDown) lines.push(`boot status: failed open (${state.kpDown})`);
+			ctx.ui.notify(lines.join("\n"), "info");
+		},
+	});
+
 	pi.registerCommand("context", {
 		description: "Show the knowledge-broker state: WorkFrame, epoch, boot packet",
 		handler: async (_args, ctx) => {

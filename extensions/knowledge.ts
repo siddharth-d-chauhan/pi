@@ -24,20 +24,29 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const KP_DIR = process.env.PI_KP_DIR ?? "/home/siddharth/vault/tools/knowledge-platform";
 const KP_CALL_TIMEOUT_MS = Number(process.env.PI_KP_TIMEOUT_MS ?? 30_000);
 
-/** Full-schema workhorses; everything else read-only goes behind knowledge_call. */
+/** Full-schema workhorses; everything else read-only goes behind knowledge_call.
+ *  The pi.context_* phase tools are the plan's stable tool list (§18.2) — all
+ *  mounted directly so the model never needs the proxy for a phase call.
+ *  pi_memory_writeback is the one mutating mount: its governance is server-side
+ *  (machine evidence → supported; otherwise proposed, never served by default). */
 const CORE = new Set([
 	"knowledge_search",
 	"knowledge_code_search",
 	"knowledge_packet",
 	"pi_context_task",
 	"pi_context_code",
+	"pi_context_before_action",
+	"pi_context_debug",
+	"pi_context_pre_finish",
+	"pi_context_shift",
+	"pi_memory_writeback",
 ]);
 
-/** pi-normalized names of the read-only KP surface (server uses dots). */
+/** pi-normalized names of the mountable KP surface (server uses dots). */
 const READ_ONLY = new Set([
 	...CORE,
 	"pi_context_boot",
-	"pi_context_shift",
+	"pi_context_spawn",
 	"knowledge_find_code",
 	"knowledge_trace",
 	"knowledge_neighbors",
@@ -113,7 +122,7 @@ export default function (pi: ExtensionAPI) {
 		const proxied: Array<{ piName: string; server: string; desc: string }> = [];
 		for (const tool of tools) {
 			const piName = tool.name.replace(/\./g, "_");
-			if (!READ_ONLY.has(piName)) continue; // fork mounts the read-only surface only
+			if (!READ_ONLY.has(piName)) continue; // only the vetted surface mounts (writeback is the one governed write)
 			if (!CORE.has(piName)) {
 				proxied.push({
 					piName,

@@ -181,6 +181,11 @@ function hasAnyApiKey(): boolean {
 	return PROVIDER_MODEL_PAIRS.some((pair) => hasApiKey(pair));
 }
 
+/** Handoff tests are only meaningful with >=2 distinct auth-backed providers. */
+function authedProviderCount(): number {
+	return new Set(PROVIDER_MODEL_PAIRS.filter((pair) => hasApiKey(pair)).map((pair) => pair.provider)).size;
+}
+
 function dumpFailurePayload(params: { label: string; error: string; payload?: unknown; messages: Message[] }): void {
 	const filename = `/tmp/pi-handoff-${params.label}-${Date.now()}.json`;
 	const body = {
@@ -367,7 +372,7 @@ describe.skipIf(!hasAnyApiKey())("Cross-Provider Handoff", () => {
 		console.log(`\n=== ${availablePairs.length}/${PROVIDER_MODEL_PAIRS.length} contexts available ===\n`);
 	}, 300000);
 
-	it.skipIf(!hasAnyApiKey())("should have at least 2 fixtures to test handoffs", () => {
+	it.skipIf(authedProviderCount() < 2)("should have at least 2 fixtures to test handoffs", () => {
 		expect(Object.keys(contexts).length).toBeGreaterThanOrEqual(2);
 	});
 

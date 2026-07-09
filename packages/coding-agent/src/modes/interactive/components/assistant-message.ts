@@ -147,6 +147,11 @@ export class AssistantMessageComponent extends Container {
 				let view = this.textViews.get(i);
 				if (!view) {
 					view = new StreamingMarkdownView(this.outputPad, 0, this.markdownTheme);
+					// Seed with everything present at first sight — text that
+					// arrived before this block's first render (or a fully
+					// formed static message) would otherwise be dropped: the
+					// `textSeen` bookkeeping below marks it delivered.
+					view.seed(trimmed);
 					this.textViews.set(i, view);
 				} else if (this.textViewsDirty) {
 					// Theme or padding changed: propagate the new layout

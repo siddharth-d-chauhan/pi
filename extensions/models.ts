@@ -14,7 +14,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 
-const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
+const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 type ModelLike = {
 	id: string;

@@ -39,8 +39,10 @@ const agentTaskSchema = Type.Object({
 				Type.Literal("low"),
 				Type.Literal("medium"),
 				Type.Literal("high"),
+				Type.Literal("xhigh"),
+				Type.Literal("max"),
 			],
-			{ description: "Reasoning effort for this subagent: off | minimal | low | medium | high." },
+			{ description: "Reasoning effort for this subagent: off | minimal | low | medium | high | xhigh | max." },
 		),
 	),
 	/** Optional context block injected under `## CONTEXT` in the child system prompt. */
@@ -418,7 +420,7 @@ export function createAgentToolDefinition(
 		label: "agent",
 		description:
 			"Spawn one or more subagents (sync fan-out or background). Each task may set its own " +
-			"`model` (any provider/model or role alias) and `effort` (off|minimal|low|medium|high) — " +
+			"`model` (any provider/model or role alias) and `effort` (off|minimal|low|medium|high|xhigh|max) — " +
 			"e.g. a cheap fast model at low effort for scouting, a strong model at high effort for hard work. " +
 			"Returns inline results for sync tasks and a registry id for background tasks. " +
 			"Use `agent_pull` to recover full output via agent://<id> when inline was truncated.\n\n" +

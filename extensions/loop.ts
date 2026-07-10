@@ -209,6 +209,9 @@ async function driveLoop(opts: {
 interface OrchestratedLoop {
 	id: string;
 	goal: string;
+	/** Optional devbrain capability that must pass before "done" is accepted. */
+	gate?: string;
+	repo: string;
 	dir: string;
 	budget: number;
 	round: number;
@@ -216,6 +219,9 @@ interface OrchestratedLoop {
 	killed: boolean;
 	parked: boolean;
 	awaitingRound: boolean;
+	roundStartedAt: number;
+	watchdog?: NodeJS.Timeout;
+	unwatchWorkers?: () => void;
 	notify: (text: string, level: "info" | "warning" | "error") => void;
 }
 
@@ -228,19 +234,25 @@ function progressPath(loop: OrchestratedLoop): string {
 function roundPrompt(loop: OrchestratedLoop): string {
 	const steering = loop.notes.length ? `\nOperator steering notes (honor these): ${loop.notes.join(" | ")}\n` : "";
 	loop.notes = [];
+	const gateLine = loop.gate
+		? `A "done" verdict will be VERIFIED by running devbrain goal '${loop.gate}' — do not claim done unless that gate will pass.`
+		: "";
 	return [
 		`<loop-round loop="${loop.goal}" round="${loop.round}" budget="${loop.budget}">`,
 		`You are the ORCHESTRATOR of an autonomous loop. Goal: ${loop.goal}`,
 		`State file: ${progressPath(loop)} (read it first; it survives across rounds — context does not).`,
+		gateLine,
 		steering,
 		"This round, do exactly this:",
 		"1. Read PROGRESS.md. Decide: is the goal genuinely DONE (verified, not claimed)?",
-		"2. If NOT done: dispatch ONE worker via the agent tool (fresh context) with a precise,",
-		"   self-contained brief for the single most valuable next unit of work — include relevant",
-		"   PROGRESS excerpts in its context. Prefer worktree isolation for write work.",
+		"2. If NOT done: dispatch 1-3 workers via the agent tool (fresh context each) with precise,",
+		"   self-contained briefs — parallel only when tasks are independent; worktree isolation for",
+		"   write work. Include relevant PROGRESS excerpts in each brief.",
 		"   Use the devbrain tool to VERIFY product-facing results (triage-typed).",
 		"3. Append to PROGRESS.md: what was attempted, what was verified, what remains.",
-		`4. End your reply with EXACTLY one line: LOOP_VERDICT: done|continue — <one-line summary>`,
+		"4. End your reply with EXACTLY one line:",
+		"   LOOP_VERDICT: done|continue|blocked — <one-line summary>",
+		"   (use `blocked` when a human decision is required; say what you need)",
 		"Do not do the work yourself in this session — dispatch it. Keep your own output short.",
 		"</loop-round>",
 	].join("\n");
@@ -248,7 +260,14 @@ function roundPrompt(loop: OrchestratedLoop): string {
 
 async function startOrchestration(
 	pi: ExtensionAPI,
-	opts: { goal: string; rounds: number; cwd: string; notify: OrchestratedLoop["notify"] },
+	opts: {
+		goal: string;
+		rounds: number;
+		cwd: string;
+		gate?: string;
+		repo?: string;
+		notify: OrchestratedLoop["notify"];
+	},
 ): Promise<string> {
 	if (activeOrchestration && !activeOrchestration.killed) {
 		return `an orchestrated loop is already running (${activeOrchestration.goal}) — kill it first`;
@@ -265,6 +284,8 @@ async function startOrchestration(
 	const loop: OrchestratedLoop = {
 		id: "",
 		goal: opts.goal,
+		gate: opts.gate,
+		repo: opts.repo ?? DEFAULT_REPO,
 		dir,
 		budget: opts.rounds,
 		round: 0,
@@ -272,6 +293,7 @@ async function startOrchestration(
 		killed: false,
 		parked: false,
 		awaitingRound: false,
+		roundStartedAt: 0,
 		notify: opts.notify,
 	};
 	loop.id = registry.register({
@@ -280,6 +302,8 @@ async function startOrchestration(
 		summary: `orchestrated loop · ${dir}/PROGRESS.md · steer: "stop" | "more N" | notes`,
 		onKill: () => {
 			loop.killed = true;
+			if (loop.watchdog) clearTimeout(loop.watchdog);
+			loop.unwatchWorkers?.();
 			registry.appendLog(loop.id, "[killed]");
 			registry.setStatus(loop.id, "cancelled");
 			activeOrchestration = undefined;
@@ -290,6 +314,8 @@ async function startOrchestration(
 			const more = /^more\s+(\d+)/i.exec(t);
 			if (/^stop\b/i.test(t)) {
 				loop.killed = true;
+				if (loop.watchdog) clearTimeout(loop.watchdog);
+				loop.unwatchWorkers?.();
 				registry.setStatus(loop.id, "cancelled");
 				activeOrchestration = undefined;
 				return;
@@ -297,19 +323,54 @@ async function startOrchestration(
 			if (more) {
 				loop.budget += Number(more[1]);
 				registry.appendLog(loop.id, `budget → ${loop.budget}`);
-				if (loop.parked) {
-					loop.parked = false;
-					registry.setStatus(loop.id, "running");
-					nextRound(pi, loop);
-				}
-				return;
+			} else if (t) {
+				loop.notes.push(t.slice(0, 200));
 			}
-			if (t) loop.notes.push(t.slice(0, 200));
+			// Any steer wakes a parked loop (a note is often the ANSWER a
+			// blocked round was waiting for), budget permitting.
+			if (loop.parked && loop.round < loop.budget) {
+				loop.parked = false;
+				registry.setStatus(loop.id, "running");
+				nextRound(pi, loop);
+			}
 		},
 	});
 	activeOrchestration = loop;
 	nextRound(pi, loop);
 	return `orchestrated loop '${opts.goal}' launched — Ctrl+Alt+A to watch/steer; state in ${dir}/PROGRESS.md`;
+}
+
+function setPhase(loop: OrchestratedLoop, phase: string): void {
+	const registry = getBackgroundProcessRegistry();
+	const elapsed = loop.roundStartedAt ? ` · ${Math.round((Date.now() - loop.roundStartedAt) / 1000)}s` : "";
+	registry.update(loop.id, {
+		summary: `round ${loop.round}/${loop.budget} · ${phase}${elapsed}${loop.gate ? ` · gate: ${loop.gate}` : ""}`,
+	});
+}
+
+/** Mirror worker subagent lifecycle into the loop's own log while a round runs,
+ *  so the loop entry alone tells the story (workers also appear in the hub). */
+function watchWorkers(loop: OrchestratedLoop): void {
+	const registry = getBackgroundProcessRegistry();
+	const mine = new Set<string>();
+	loop.unwatchWorkers = registry.subscribe((event) => {
+		if (!loop.awaitingRound) return;
+		if (event.type === "register" && event.entry.id !== loop.id && event.entry.kind === "subagent") {
+			mine.add(event.entry.id);
+			registry.appendLog(
+				loop.id,
+				`  → worker: ${event.entry.agentType ?? "agent"} — ${event.entry.label.slice(0, 60)}`,
+			);
+			setPhase(loop, `worker running (${event.entry.agentType ?? "agent"})`);
+		}
+		if (event.type === "statusChange" && mine.has(event.id)) {
+			const worker = registry.get(event.id);
+			if (event.status === "completed" || event.status === "failed" || event.status === "cancelled") {
+				registry.appendLog(loop.id, `  ← worker ${worker?.agentType ?? event.id}: ${event.status}`);
+				setPhase(loop, "orchestrating");
+			}
+		}
+	});
 }
 
 function nextRound(pi: ExtensionAPI, loop: OrchestratedLoop): void {
@@ -318,13 +379,31 @@ function nextRound(pi: ExtensionAPI, loop: OrchestratedLoop): void {
 	if (loop.round >= loop.budget) {
 		loop.parked = true;
 		registry.setStatus(loop.id, "parked");
+		registry.update(loop.id, { summary: `parked at ${loop.round}/${loop.budget} — steer "more N" | "stop"` });
 		registry.appendLog(loop.id, `parked: ${loop.round}/${loop.budget} rounds — steer "more N" or "stop"`);
 		loop.notify(`orchestrated loop ${loop.goal}: parked after ${loop.round} rounds`, "warning");
 		return;
 	}
 	loop.round += 1;
 	loop.awaitingRound = true;
-	registry.appendLog(loop.id, `— round ${loop.round}/${loop.budget} dispatched to the session`);
+	loop.roundStartedAt = Date.now();
+	registry.appendLog(loop.id, `— round ${loop.round}/${loop.budget} dispatched`);
+	setPhase(loop, "orchestrating");
+	watchWorkers(loop);
+	// Watchdog: a round that never settles parks the loop instead of hanging it.
+	loop.watchdog = setTimeout(() => {
+		if (!loop.awaitingRound || loop.killed) return;
+		loop.awaitingRound = false;
+		loop.unwatchWorkers?.();
+		loop.parked = true;
+		registry.setStatus(loop.id, "parked");
+		registry.appendLog(
+			loop.id,
+			`[round ${loop.round} timed out after ${Math.round(ROUND_TIMEOUT_MS / 60000)}m — parked]`,
+		);
+		loop.notify(`orchestrated loop ${loop.goal}: round ${loop.round} timed out — parked`, "warning");
+	}, ROUND_TIMEOUT_MS);
+	loop.watchdog.unref?.();
 	pi.sendMessage(
 		{
 			customType: "loop-round",
@@ -336,15 +415,17 @@ function nextRound(pi: ExtensionAPI, loop: OrchestratedLoop): void {
 	);
 }
 
-function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): void {
+async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<void> {
 	const registry = getBackgroundProcessRegistry();
 	if (loop.killed || !loop.awaitingRound) return;
 	loop.awaitingRound = false;
+	if (loop.watchdog) clearTimeout(loop.watchdog);
+	loop.unwatchWorkers?.();
 	let verdict = "continue";
 	let summary = "(no verdict line found in PROGRESS.md — continuing)";
 	try {
 		const text = readFileSync(progressPath(loop), "utf-8");
-		const matches = [...text.matchAll(/LOOP_VERDICT:\s*(done|continue)\s*[—-]\s*(.*)/gi)];
+		const matches = [...text.matchAll(/LOOP_VERDICT:\s*(done|continue|blocked)\s*[—-]\s*(.*)/gi)];
 		const last = matches[matches.length - 1];
 		if (last) {
 			verdict = last[1].toLowerCase();
@@ -353,9 +434,53 @@ function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): void {
 	} catch {
 		// keep defaults
 	}
-	registry.appendLog(loop.id, `round ${loop.round}: ${verdict} — ${summary}`);
+	const took = Math.round((Date.now() - loop.roundStartedAt) / 1000);
+	registry.appendLog(loop.id, `round ${loop.round} (${took}s): ${verdict} — ${summary}`);
+
+	if (verdict === "blocked") {
+		// Human decision required: park immediately, regardless of budget.
+		loop.parked = true;
+		registry.setStatus(loop.id, "parked");
+		registry.update(loop.id, { summary: `BLOCKED: ${summary.slice(0, 60)} — steer to answer` });
+		loop.notify(`orchestrated loop ${loop.goal}: BLOCKED — ${summary}`, "warning");
+		return;
+	}
+
 	if (verdict === "done") {
+		// Verified-done: a claim only counts when the gate passes.
+		if (loop.gate) {
+			setPhase(loop, `gating: devbrain goal '${loop.gate}'`);
+			const handle: LoopHandle = { steers: [], killed: false };
+			const { out } = await runDevbrain(["--repo", loop.repo, "flow", "goal", loop.gate, "--no-journal"], handle);
+			let gateOk = false;
+			let evidence = "gate produced no report";
+			try {
+				const report = JSON.parse(out) as {
+					ok?: boolean;
+					steps?: Array<{ block?: string; triage?: string; detail?: string }>;
+				};
+				gateOk = Boolean(report.ok);
+				if (!gateOk) {
+					const failed = (report.steps ?? []).find((s) => s.triage);
+					evidence = `${failed?.block ?? "?"} [${failed?.triage ?? "?"}]: ${String(failed?.detail ?? "").slice(0, 120)}`;
+				}
+			} catch {
+				// keep defaults
+			}
+			if (!gateOk) {
+				registry.appendLog(loop.id, `✗ done claim REJECTED by gate '${loop.gate}' — ${evidence.slice(0, 80)}`);
+				loop.notes.push(
+					`Your previous "done" claim FAILED the verification gate '${loop.gate}': ${evidence}. Fix that first.`,
+				);
+				nextRound(pi, loop);
+				return;
+			}
+			registry.appendLog(loop.id, `✓ gate '${loop.gate}' PASSED`);
+		}
 		registry.setStatus(loop.id, "completed");
+		registry.update(loop.id, {
+			summary: `done after ${loop.round}/${loop.budget} rounds${loop.gate ? " · gate ✓" : ""}`,
+		});
 		loop.notify(`orchestrated loop ${loop.goal}: DONE after ${loop.round} round(s) — ${summary}`, "info");
 		activeOrchestration = undefined;
 		return;
@@ -373,6 +498,12 @@ const loopSchema = Type.Object({
 			enum: ["verify", "orchestrate"],
 			description:
 				"verify = devbrain-gated retry loop; orchestrate = LLM decides each round, dispatches fresh-context workers",
+		}),
+	),
+	gate: Type.Optional(
+		Type.String({
+			description:
+				"orchestrate: devbrain capability that must PASS before a 'done' claim is accepted (verified-done)",
 		}),
 	),
 });
@@ -396,6 +527,8 @@ export default function (pi: ExtensionAPI) {
 					goal: input.goal,
 					rounds: Math.max(1, input.rounds ?? 5),
 					cwd: (ctx as { cwd?: string })?.cwd ?? process.cwd(),
+					gate: input.gate,
+					repo: input.repo,
 					notify,
 				});
 				return { content: [{ type: "text", text: msg }], details: undefined };
@@ -423,7 +556,7 @@ export default function (pi: ExtensionAPI) {
 	// Round completion: when the session settles after a dispatched round,
 	// read the verdict from PROGRESS.md and continue/park/finish.
 	pi.on("agent_settled", async () => {
-		if (activeOrchestration) settleRound(pi, activeOrchestration);
+		if (activeOrchestration) await settleRound(pi, activeOrchestration);
 	});
 
 	pi.registerCommand("loop", {
@@ -442,10 +575,12 @@ export default function (pi: ExtensionAPI) {
 			const roundsArg = /rounds=(\d+)/.exec(raw);
 			const rounds = roundsArg ? Number(roundsArg[1]) : 5;
 			if (/\borchestrate\b/i.test(raw)) {
+				const gateArg = /gate=(\S+)/.exec(raw);
 				const msg = await startOrchestration(pi, {
 					goal,
 					rounds,
 					cwd: ctx.cwd,
+					gate: gateArg?.[1],
 					notify: (text, level) => ctx.ui.notify(text, level),
 				});
 				ctx.ui.notify(msg, "info");

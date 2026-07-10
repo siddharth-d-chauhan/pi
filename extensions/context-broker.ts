@@ -12,7 +12,10 @@
  * Everything dynamic is suffix-only (KV-cache invariant 4.4/4.8 of the plan).
  */
 
+import { createHash } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
+import { copper, heatLine } from "./lib/card.ts";
 import { rolloutFlags } from "./lib/flags.ts";
 
 const BOOT_TIMEOUT_MS = Number(process.env.PI_KP_BOOT_TIMEOUT_MS ?? 6_000);
@@ -102,7 +105,16 @@ function parsePacket(content: Array<{ type: string; text?: string }>): ContextPa
 /** Role-grouped item rendering: must_follow leads as hard rules; advisory is
  *  labeled context; candidates carry an explicit low-confidence marker.
  *  No unlabeled bullets — every item shows role, kind, and state. */
-function renderItems(items: Array<NonNullable<PacketCandidate["memory"]>>, cap: number): string[] {
+function renderItems(rawItems: Array<NonNullable<PacketCandidate["memory"]>>, cap: number): string[] {
+	// Dedup by normalized text — near-identical rules (e.g. a re-seeded copy of
+	// the same convention) must never render twice in one packet.
+	const seen = new Set<string>();
+	const items = rawItems.filter((memory) => {
+		const key = (memory.text ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+		if (!key || seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
 	const byRole = (role: string) => items.filter((memory) => (memory.inject_role ?? "advisory") === role);
 	const lines: string[] = [];
 	let used = 0;
@@ -264,6 +276,38 @@ export default function (pi: ExtensionAPI) {
 				epoch: packet.epoch,
 				task: (packet as { scope?: { task?: string } }).scope?.task,
 			};
+			// KV-cache discipline: persist the boot block ONCE as a real session
+			// message near the top of the transcript. It then lives inside the
+			// stable cached prefix for the whole conversation, instead of being
+			// re-appended (and re-tokenized) as a moving trailing block every
+			// turn. Dedup by content hash so a resumed/forked session that
+			// already carries the same block gets nothing new.
+			if (state.bootBlock) {
+				const hash = createHash("sha256").update(state.bootBlock).digest("hex").slice(0, 16);
+				// One boot block per session, EVER: a resume/fork must not append
+				// another copy even when the corpus drifted (coverage counts etc.)
+				// — the old block still rides the cached prefix, and fresh scoped
+				// knowledge arrives via task packets. Entries are flat custom
+				// messages ({type:"custom_message", customType, ...}).
+				const already = ctx.sessionManager
+					.getEntries()
+					.some(
+						(entry) =>
+							(entry as { type?: string; customType?: string }).type === "custom_message" &&
+							(entry as { customType?: string }).customType === "knowledge-boot",
+					);
+				if (!already) {
+					pi.sendMessage(
+						{
+							customType: "knowledge-boot",
+							content: state.bootBlock,
+							display: true,
+							details: { hash, packetId: packet.packet_id, items: (packet.candidates ?? []).length },
+						},
+						{ triggerTurn: false },
+					);
+				}
+			}
 			if (state.bootBlock && ctx.hasUI) {
 				ctx.ui.setStatus("broker", `ctx ${(packet.candidates ?? []).length}`);
 			}
@@ -273,25 +317,33 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// Inject the boot block as a trailing context message — suffix-only,
-	// byte-stable while the packet is unchanged, never persisted.
+	// Only TRANSIENT context is suffix-injected (never persisted): the one-shot
+	// debug block. Boot memory is a persistent early message instead (above),
+	// so the conversation prefix — and the KV cache — stays intact turn over turn.
 	pi.on("context", async (event) => {
-		const blocks = [state.bootBlock, state.debugBlock].filter((block): block is string => Boolean(block));
-		if (blocks.length === 0) return;
+		if (!state.debugBlock) return;
 		const messages = event?.messages;
 		if (!Array.isArray(messages)) return;
 		// PI-13: the debug block is one-shot — mark it shown so the next turn_end clears it.
-		if (state.debugBlock) state.debugShown = true;
+		state.debugShown = true;
 		return {
 			messages: [
 				...messages,
-				...blocks.map((text) => ({
+				{
 					role: "user" as const,
-					content: [{ type: "text" as const, text }],
+					content: [{ type: "text" as const, text: state.debugBlock }],
 					timestamp: Date.now(),
-				})),
+				},
 			],
 		};
+	});
+
+	// Forge-styled renderer for the persisted boot message: heat line + block.
+	pi.registerMessageRenderer<{ items?: number }>("knowledge-boot", (message, _options, theme) => {
+		const text = typeof message.content === "string" ? message.content : "";
+		const items = message.details?.items;
+		const head = `${copper("▎")} ${theme.fg("muted", `knowledge boot${items ? ` · ${items} items` : ""}`)}`;
+		return new Text(`${head}\n${heatLine(46)}\n${theme.fg("dim", text)}`, 0, 0);
 	});
 
 	// The model calls pi_context_task/shift directly (mounted by knowledge.ts);
@@ -524,7 +576,9 @@ export default function (pi: ExtensionAPI) {
 			if (state.workFrameId) lines.push(`workframe: ${state.workFrameId} · epoch ${state.epoch ?? 1}`);
 			if (state.lastPacketId) lines.push(`last packet: ${state.lastPacketId}`);
 			const bootCount = state.bootPacket?.candidates?.length ?? 0;
-			lines.push(`boot memory: ${bootCount} item(s)${state.bootBlock ? " (injected as trailing block)" : ""}`);
+			lines.push(
+				`boot memory: ${bootCount} item(s)${state.bootBlock ? " (persistent message — rides the KV-cache prefix)" : ""}`,
+			);
 			const flags = rolloutFlags();
 			lines.push(
 				`rollout: broker_v2 ${flags.PI_KP_BROKER_V2 ? "on" : "off"} · auto_learn ${flags.PI_KP_AUTO_LEARN ? "on" : "off"}`,

@@ -25,6 +25,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { heatLine } from "./lib/card.ts";
 
 type Theme = Parameters<Parameters<ExtensionCommandContext["ui"]["custom"]>[0]>[1];
 
@@ -139,7 +140,7 @@ class AgentHubComponent implements Component {
 		const lines: string[] = [];
 		const pad = (s: string) => truncateToWidth(s, width);
 		lines.push(pad(theme.fg("accent", theme.bold(" Agent Hub "))));
-		lines.push("");
+		lines.push(heatLine(Math.min(width, 60)));
 
 		if (this.snapshots.length === 0) {
 			lines.push(pad(theme.fg("muted", "  No subagents this session. Spawn one with the agent tool.")));

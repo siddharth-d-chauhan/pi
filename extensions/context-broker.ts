@@ -13,6 +13,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { rolloutFlags } from "./lib/flags.ts";
 
 const BOOT_TIMEOUT_MS = Number(process.env.PI_KP_BOOT_TIMEOUT_MS ?? 6_000);
 const PHASE_TIMEOUT_MS = Number(process.env.PI_KP_PHASE_TIMEOUT_MS ?? 4_000);
@@ -522,6 +523,10 @@ export default function (pi: ExtensionAPI) {
 			if (state.lastPacketId) lines.push(`last packet: ${state.lastPacketId}`);
 			const bootCount = state.bootPacket?.candidates?.length ?? 0;
 			lines.push(`boot memory: ${bootCount} item(s)${state.bootBlock ? " (injected as trailing block)" : ""}`);
+			const flags = rolloutFlags();
+			lines.push(
+				`rollout: broker_v2 ${flags.PI_KP_BROKER_V2 ? "on" : "off"} · auto_learn ${flags.PI_KP_AUTO_LEARN ? "on" : "off"}`,
+			);
 			if (state.lastDebug) {
 				const age = Math.round((Date.now() - state.lastDebug.at) / 1000);
 				lines.push(

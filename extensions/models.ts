@@ -58,13 +58,9 @@ function describe(model: ModelLike, available: boolean): Record<string, unknown>
 }
 
 const modelsSchema = Type.Object({
-	q: Type.Optional(
-		Type.String({ description: "case-insensitive filter over model ref/name (e.g. 'minimax', 'gpt')" }),
-	),
-	include_unavailable: Type.Optional(
-		Type.Boolean({ description: "also list models with no credentials (so you know what you CAN'T use)" }),
-	),
-	reasoning_only: Type.Optional(Type.Boolean({ description: "only models that support effort/thinking levels" })),
+	q: Type.Optional(Type.String({ description: "filter over ref/name" })),
+	include_unavailable: Type.Optional(Type.Boolean({ description: "also list models lacking credentials" })),
+	reasoning_only: Type.Optional(Type.Boolean({ description: "only models with effort levels" })),
 });
 
 type ModelsInput = Static<typeof modelsSchema>;

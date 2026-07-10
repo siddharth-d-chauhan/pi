@@ -46,22 +46,23 @@ const KINDS = [
 ] as const;
 
 const rememberSchema = Type.Object({
-	kind: Type.Union(
-		KINDS.map((k) => Type.Literal(k)),
-		{
-			description:
-				"rule/preference/convention/style = operating norm (boots always); " +
-				"knowledge = a durable fact; lesson/pitfall = what worked/failed; decision/procedure = how",
-		},
-	),
-	summary: Type.String({ description: "the durable fact, one sentence — imperative for rules" }),
-	detail: Type.Optional(Type.String({ description: "optional supporting detail" })),
+	// Compact enum form (not Type.Union of literals) — this schema ships in
+	// every request, and anyOf-of-const is ~4x the bytes of a plain enum.
+	kind: Type.Unsafe<(typeof KINDS)[number]>({
+		type: "string",
+		enum: [...KINDS],
+		description: "rule/preference/convention/style boot always; others are recallable facts",
+	}),
+	summary: Type.String({ description: "one sentence, imperative for rules" }),
+	detail: Type.Optional(Type.String()),
 	scope: Type.Optional(
-		Type.Union([Type.Literal("global"), Type.Literal("repo"), Type.Literal("file")], {
-			description: "global by default; repo or file keeps the proposal narrowly scoped",
+		Type.Unsafe<"global" | "repo" | "file">({
+			type: "string",
+			enum: ["global", "repo", "file"],
+			description: "default global",
 		}),
 	),
-	file: Type.Optional(Type.String({ description: "file path when scope is file" })),
+	file: Type.Optional(Type.String({ description: "path when scope=file" })),
 });
 
 type RememberInput = Static<typeof rememberSchema>;

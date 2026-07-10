@@ -28,15 +28,14 @@ import { type Static, Type } from "typebox";
 const planSchema = Type.Object({
 	tasks: Type.Array(
 		Type.Object({
-			id: Type.String({
-				description: "Stable task identifier (e.g. '1' or a short slug). Reuse ids across updates.",
-			}),
-			subject: Type.String({ description: "Short imperative description of the task" }),
-			status: Type.Union([Type.Literal("pending"), Type.Literal("in_progress"), Type.Literal("completed")], {
-				description: "Current task status",
+			id: Type.String({ description: "Stable id; reuse across updates" }),
+			subject: Type.String({ description: "Short imperative task" }),
+			status: Type.Unsafe<"pending" | "in_progress" | "completed">({
+				type: "string",
+				enum: ["pending", "in_progress", "completed"],
 			}),
 		}),
-		{ description: "The full task list. Replaces the previous plan entirely." },
+		{ description: "Full task list; replaces the previous plan" },
 	),
 });
 
@@ -182,13 +181,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "update_plan",
 		label: "plan",
-		description: [
-			"Create or update your task plan for the current work. The plan is shown to the user as a live checklist.",
-			"Use this for any multi-step work (3+ distinct steps, multiple files, or non-trivial refactors): create the plan up front, then keep statuses current as you work.",
-			"Each call replaces the entire plan, so always send the full task list. Reuse task ids across calls; ids must be unique and subjects non-empty.",
-			"Mark exactly one task in_progress while you work on it, and mark tasks completed promptly when done — do not batch completions until the end.",
-			"Skip this tool for trivial single-step tasks.",
-		].join(" "),
+		description:
+			"Create/update your task plan (shown to the user as a live checklist). Use for multi-step work; " +
+			"each call replaces the whole plan (reuse ids). Keep exactly one task in_progress and complete " +
+			"tasks promptly. Skip for trivial single-step tasks.",
 		parameters: planSchema,
 		async execute(_toolCallId, { tasks }: PlanToolInput, signal?: AbortSignal) {
 			if (signal?.aborted) throw new Error("Operation aborted");

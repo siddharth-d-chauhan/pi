@@ -202,12 +202,16 @@ export default function (pi: ExtensionAPI) {
 				continue;
 			}
 			mounted++;
+			// Token discipline: mount the first sentence only (≤220 chars) — the
+			// server docstrings run long and ship in every request.
+			const fullDesc = (tool.description ?? piName).trim();
+			const firstSentence = fullDesc.split(/(?<=\.)\s/, 1)[0] ?? fullDesc;
 			pi.registerTool({
 				name: piName,
 				label: piName.startsWith("pi_context")
 					? piName.replace(/^pi_/, "ctx ")
 					: piName.replace(/^knowledge_/, "kp "),
-				description: tool.description ?? piName,
+				description: firstSentence.length > 220 ? `${firstSentence.slice(0, 219)}…` : firstSentence,
 				parameters: tool.inputSchema as never,
 				async execute(_id: string, params: Record<string, unknown>, signal: AbortSignal) {
 					const c = await connect();

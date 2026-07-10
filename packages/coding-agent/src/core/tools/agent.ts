@@ -30,20 +30,14 @@ const agentTaskSchema = Type.Object({
 	prompt: Type.String({ description: "Goal or question to delegate to the agent." }),
 	/** Optional model override (role alias, provider/model, or plain model id). */
 	model: Type.Optional(Type.String({ description: "Optional model override." })),
-	/** Optional reasoning-effort (thinking level) override for this task. */
+	/** Optional reasoning-effort (thinking level) override for this task.
+	 *  Compact enum form — this schema ships in every request. */
 	effort: Type.Optional(
-		Type.Union(
-			[
-				Type.Literal("off"),
-				Type.Literal("minimal"),
-				Type.Literal("low"),
-				Type.Literal("medium"),
-				Type.Literal("high"),
-				Type.Literal("xhigh"),
-				Type.Literal("max"),
-			],
-			{ description: "Reasoning effort for this subagent: off | minimal | low | medium | high | xhigh | max." },
-		),
+		Type.Unsafe<ThinkingLevel>({
+			type: "string",
+			enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+			description: "Reasoning effort override.",
+		}),
 	),
 	/** Optional context block injected under `## CONTEXT` in the child system prompt. */
 	context: Type.Optional(Type.String({ description: "Structured context block." })),

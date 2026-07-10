@@ -27,8 +27,8 @@ const KP_CALL_TIMEOUT_MS = Number(process.env.PI_KP_TIMEOUT_MS ?? 30_000);
 /** Full-schema workhorses; everything else read-only goes behind knowledge_call.
  *  The pi.context_* phase tools are the plan's stable tool list (§18.2) — all
  *  mounted directly so the model never needs the proxy for a phase call.
- *  pi_memory_writeback is the one mutating mount: its governance is server-side
- *  (machine evidence → supported; otherwise proposed, never served by default). */
+ *  Mutations and broker-maintenance operations are intentionally absent: model
+ *  tool calls must not be able to alter memory state or trigger reconciliation. */
 const CORE = new Set([
 	"knowledge_search",
 	"knowledge_code_search",
@@ -39,7 +39,6 @@ const CORE = new Set([
 	"pi_context_debug",
 	"pi_context_pre_finish",
 	"pi_context_shift",
-	"pi_memory_writeback",
 	"pi_semantic_search",
 	"pi_semantic_expand",
 	"pi_knowledge_coverage",
@@ -50,10 +49,6 @@ const READ_ONLY = new Set([
 	...CORE,
 	"pi_context_boot",
 	"pi_context_spawn",
-	"pi_semantic_backfill",
-	"pi_warm_mirror_sync",
-	"pi_knowledge_refresh",
-	"pi_inject_backfill",
 	"pi_pre_action_gate",
 	"knowledge_find_code",
 	"knowledge_trace",
@@ -130,7 +125,7 @@ export default function (pi: ExtensionAPI) {
 		const proxied: Array<{ piName: string; server: string; desc: string }> = [];
 		for (const tool of tools) {
 			const piName = tool.name.replace(/\./g, "_");
-			if (!READ_ONLY.has(piName)) continue; // only the vetted surface mounts (writeback is the one governed write)
+			if (!READ_ONLY.has(piName)) continue; // only the vetted read surface mounts
 			if (!CORE.has(piName)) {
 				proxied.push({
 					piName,

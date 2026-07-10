@@ -386,6 +386,12 @@ export interface ChainStageResult {
 	registryId?: string;
 	inline?: string;
 	handle?: string;
+	/** Whether this stage configured a verify and/or judge gate. */
+	gateConfigured: boolean;
+	/** The gates configured for this stage, omitted when it is ungated. */
+	gateKind?: "verify" | "judge" | "verify+judge";
+	/** Final gate result, set only after configured gates have settled. */
+	gatePassed?: boolean;
 	verifyAttempts: number;
 	itemsDone?: number;
 	itemsTotal?: number;
@@ -514,6 +520,15 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 				id: stage.id,
 				agent: stage.agent,
 				status: "pending" as const,
+				gateConfigured: Boolean(stage.verify || stage.judge),
+				gateKind:
+					stage.verify && stage.judge
+						? "verify+judge"
+						: stage.verify
+							? "verify"
+							: stage.judge
+								? "judge"
+								: undefined,
 				verifyAttempts: 0,
 				tokens: 0,
 				costUsd: 0,
@@ -636,6 +651,8 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 	};
 
 	const runGates = async (stage: ChainStage, state: ChainStageResult, result: SpawnResult): Promise<SpawnResult> => {
+		if (!state.gateConfigured) return result;
+
 		let current = result;
 		for (let attempt = 0; ; attempt++) {
 			state.verifyAttempts = attempt + 1;
@@ -681,16 +698,21 @@ export async function runChain(opts: RunChainOptions): Promise<ChainRunResult> {
 				);
 				trackUsage(state, judgeResult);
 				const match = judgeResult.inline.match(VERDICT_PATTERN);
-				// Unparseable verdicts fail open (logged) — a confused judge must
-				// not livelock the chain.
+				// A judge gate is evidence only when it produces an explicit verdict.
+				// Treat unparseable output as a failure so it cannot be learned as a
+				// verified result; retries still give the stage a chance to recover.
 				if (match && match[1].toUpperCase() === "FAIL") {
 					failure = `An independent judge rejected the work.\nJudge question: ${stage.judge}\nJudge verdict:\n${judgeResult.inline.slice(0, GATE_FEEDBACK_CAP)}`;
-				} else if (!match && state.registryId) {
-					registry.appendLog(state.registryId, "[judge verdict unparseable — treated as PASS]");
+				} else if (!match) {
+					failure = `An independent judge returned an unparseable verdict.\nJudge question: ${stage.judge}\nJudge output:\n${judgeResult.inline.slice(0, GATE_FEEDBACK_CAP)}`;
 				}
 			}
 
-			if (!failure) return current;
+			if (!failure) {
+				state.gatePassed = true;
+				return current;
+			}
+			state.gatePassed = false;
 			if (attempt >= stage.maxIters) {
 				throw new Error(`gates failed after ${attempt + 1} attempt(s): ${failure.split("\n")[0]}`);
 			}

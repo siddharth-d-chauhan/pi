@@ -9,8 +9,8 @@
  * finishes, its passing gated stages are written back as verified_fix
  * memories (machine evidence -> supported -> eligible for future recall).
  *
- * Strictly opt-in-by-signal and fail-open: only stages that actually ran a
- * gate (verifyAttempts > 0) and completed are recorded; no KP = no-op.
+ * Strictly opt-in-by-signal and fail-open: only stages with an explicitly
+ * configured and successfully completed gate are recorded; no KP = no-op.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -29,6 +29,8 @@ interface StageResult {
 	id: string;
 	agent: string;
 	status?: string;
+	gateConfigured?: boolean;
+	gatePassed?: boolean;
 	verifyAttempts?: number;
 	inline?: string;
 }
@@ -49,9 +51,10 @@ export default function (pi: ExtensionAPI) {
 		const details = (event.result as { details?: ChainDetails })?.details;
 		if (!details || details.status !== "completed" || !Array.isArray(details.stages)) return;
 
-		// Only gated + completed stages carry machine evidence.
+		// Only explicitly configured, passing gates carry machine evidence.
 		const gated = details.stages.filter(
-			(stage) => stage.status === "completed" && (stage.verifyAttempts ?? 0) > 0 && stage.inline,
+			(stage) =>
+				stage.status === "completed" && stage.gateConfigured === true && stage.gatePassed === true && stage.inline,
 		);
 		if (gated.length === 0) return;
 

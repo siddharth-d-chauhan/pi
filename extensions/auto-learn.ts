@@ -2,16 +2,13 @@
  * Auto-Learn Extension — makes pi accumulate durable knowledge across
  * sessions, so boot packets get more useful every day.
  *
- * Three capture paths, all landing in the knowledge platform through
- * pi.memory_writeback (which gates: rules/preferences pin to BOOT_ALWAYS
- * and appear in the very next session's boot):
+ * Two capture paths are intentionally non-authoritative:
  *
  *  1. `remember` tool — the model records a durable rule/preference/lesson/
  *     pitfall when it learns one (driven by a standing instruction injected
- *     below). Model-observed items are `proposed`; user-attributed items are
- *     authoritative.
- *  2. `/remember <text>` command — you state a rule directly; always
- *     authoritative, boot-eligible immediately.
+ *     below). Every tool call is queued as a proposal for later human review.
+ *  2. `/remember <text>` command queues the same proposal-only candidate; it
+ *     must not infer authority from command text.
  *  3. Directive detection — when your message contains a durable directive
  *     ("always…", "never…", "from now on…", "remember…"), a nudge is
  *     appended so the model definitely captures it via `remember`.
@@ -59,11 +56,12 @@ const rememberSchema = Type.Object({
 	),
 	summary: Type.String({ description: "the durable fact, one sentence — imperative for rules" }),
 	detail: Type.Optional(Type.String({ description: "optional supporting detail" })),
-	from_user: Type.Optional(
-		Type.Boolean({
-			description: "true if the user explicitly stated this (authoritative); false if you inferred it",
+	scope: Type.Optional(
+		Type.Union([Type.Literal("global"), Type.Literal("repo"), Type.Literal("file")], {
+			description: "global by default; repo or file keeps the proposal narrowly scoped",
 		}),
 	),
+	file: Type.Optional(Type.String({ description: "file path when scope is file" })),
 });
 
 type RememberInput = Static<typeof rememberSchema>;
@@ -75,10 +73,10 @@ function directiveBriefing(): string {
 	return [
 		"<auto-learn>",
 		"You accumulate durable knowledge with the `remember` tool. Call it when:",
-		"- the user states a standing preference or corrects your approach (kind: rule/preference, from_user: true),",
-		"- you discover a reusable lesson or a pitfall while working (kind: lesson/pitfall, from_user: false),",
+		"- the user states a standing preference or corrects your approach (kind: rule/preference),",
+		"- you discover a reusable lesson or a pitfall while working (kind: lesson/pitfall),",
 		"- a non-obvious decision is made worth keeping (kind: decision).",
-		"Rules and preferences appear in every future session's boot context, so capture them once.",
+		"Every remembered item is a proposal and requires human review before it can affect future context.",
 		"Do NOT remember: transient task state, secrets, or anything the repo already records.",
 		"</auto-learn>",
 	].join("\n");
@@ -96,11 +94,24 @@ export default function (pi: ExtensionAPI) {
 		});
 		const text = result.content.find((block) => block.type === "text")?.text ?? "";
 		try {
-			const parsed = JSON.parse(text) as { decision?: string; memory_status?: { usable_for_boot?: boolean } };
+			const parsed = JSON.parse(text) as {
+				candidate?: unknown;
+				decision?: string;
+				error?: string;
+				reason?: string;
+				memory_status?: { usable_for_boot?: boolean };
+			};
+			if (result.isError || parsed.error || parsed.decision === "error" || parsed.decision === "rejected") {
+				return `not recorded: ${parsed.error ?? parsed.reason ?? "knowledge platform rejected the proposal"}`;
+			}
+			if (parsed.candidate) return "proposal queued for human review";
+			if (!parsed.decision) return "not recorded: invalid knowledge platform response";
 			const boot = parsed.memory_status?.usable_for_boot ? " (in future boots)" : "";
 			return `remembered as ${parsed.decision}${boot}`;
 		} catch {
-			return "recorded";
+			return result.isError
+				? "not recorded: knowledge platform error"
+				: "not recorded: invalid knowledge platform response";
 		}
 	}
 
@@ -113,15 +124,14 @@ export default function (pi: ExtensionAPI) {
 		name: "remember",
 		label: "remember",
 		description:
-			"Record a durable rule, preference, lesson, or pitfall to the knowledge platform. " +
-			"Rules/preferences appear in every future session's boot context. " +
-			"Use from_user: true only when the user explicitly stated it.",
+			"Queue an untrusted proposal for a durable rule, preference, lesson, or pitfall. " +
+			"A human must review it before it can affect future session context.",
 		parameters: rememberSchema,
 		async execute(_id: string, rawInput: RememberInput, _signal, _onUpdate, ctx) {
-			const input = rawInput as RememberInput & { scope?: "global" | "repo" | "file"; file?: string };
-			const evidence = input.from_user
-				? { user_stated: ["explicit user directive"] }
-				: { observed: ["inferred while working"] };
+			const input = rawInput as RememberInput & Record<string, unknown>;
+			if ("from_user" in input || "evidence" in input || "inject_class" in input || "priority" in input) {
+				throw new Error("remember only queues untrusted proposals; authority fields are not accepted");
+			}
 			const scopeArgs: Record<string, unknown> = {};
 			if (input.scope === "repo") scopeArgs.repository = repoName(ctx?.cwd ?? process.cwd());
 			else if (input.scope === "file" && input.file) scopeArgs.file = input.file;
@@ -129,7 +139,8 @@ export default function (pi: ExtensionAPI) {
 				kind: input.kind,
 				summary: input.summary,
 				text: input.detail,
-				evidence,
+				// Omitting evidence is deliberate: KP stores this as proposed and does
+				// not serve it until the trusted approval workflow promotes it.
 				...scopeArgs,
 			});
 			return { content: [{ type: "text", text }], details: undefined };
@@ -137,7 +148,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("remember", {
-		description: "Record a durable rule for pi: /remember <the rule>",
+		description: "Queue a durable memory proposal for human review: /remember <rule>",
 		handler: async (args, ctx) => {
 			const rule = (args ?? "").trim();
 			if (!rule) {
@@ -146,11 +157,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			const kind =
 				/\bprefer|like|use\b/i.test(rule) && !/\bnever|always|don'?t\b/i.test(rule) ? "preference" : "rule";
-			const text = await writeback({
-				kind,
-				summary: rule,
-				evidence: { user_stated: ["/remember command"] },
-			});
+			const text = await writeback({ kind, summary: rule });
 			ctx.ui.notify(`${text} — "${rule}"`, "info");
 		},
 	});
@@ -168,7 +175,7 @@ export default function (pi: ExtensionAPI) {
 		if (pendingDirective) {
 			blocks.push(
 				`<auto-learn-nudge>The user's message looks like a standing directive. If it is one, ` +
-					`call remember(kind: rule|preference, from_user: true) to capture it.</auto-learn-nudge>`,
+					`call remember(kind: rule|preference) to queue an untrusted proposal for later review.</auto-learn-nudge>`,
 			);
 		}
 		return {

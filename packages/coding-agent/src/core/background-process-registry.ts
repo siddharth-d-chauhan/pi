@@ -20,7 +20,7 @@
  * `register()`.
  */
 
-export type BackgroundProcessKind = "subagent" | "delegation" | "mcp" | "shell-suspend" | "other";
+export type BackgroundProcessKind = "subagent" | "delegation" | "mcp" | "shell" | "shell-suspend" | "other";
 export type BackgroundProcessStatus = "running" | "idle" | "parked" | "completed" | "failed" | "cancelled";
 
 export interface BackgroundProcessMetrics {

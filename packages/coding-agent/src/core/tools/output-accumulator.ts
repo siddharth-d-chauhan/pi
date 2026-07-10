@@ -118,6 +118,16 @@ export class OutputAccumulator {
 		};
 	}
 
+	/**
+	 * Force a temp file to be created immediately (even when output is small
+	 * enough to fit in memory) and return its path. Used by background commands
+	 * so their full output is always retrievable via Read while they run.
+	 */
+	persist(): string {
+		this.ensureTempFile();
+		return this.tempFilePath as string;
+	}
+
 	async closeTempFile(): Promise<void> {
 		if (!this.tempFileStream) {
 			return;

@@ -161,12 +161,23 @@ export interface ToolsOptions {
 	ls?: LsToolOptions;
 }
 
+/**
+ * Merge the parent session (from agentToolContext) into bash options as the
+ * background-completion host, so `run_in_background` commands can notify the
+ * model when they finish. No-op when no session context is available.
+ */
+function bashOpts(options?: ToolsOptions): BashToolOptions | undefined {
+	const host = options?.agentToolContext?.parentSession;
+	if (!options?.bash && !host) return undefined;
+	return { ...options?.bash, backgroundHost: options?.bash?.backgroundHost ?? host };
+}
+
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
 	switch (toolName) {
 		case "read":
 			return createReadToolDefinition(cwd, options?.read);
 		case "bash":
-			return createBashToolDefinition(cwd, options?.bash);
+			return createBashToolDefinition(cwd, bashOpts(options));
 		case "edit":
 			return createEditToolDefinition(cwd, options?.edit);
 		case "write":
@@ -229,7 +240,7 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 		case "read":
 			return createReadTool(cwd, options?.read);
 		case "bash":
-			return createBashTool(cwd, options?.bash);
+			return createBashTool(cwd, bashOpts(options));
 		case "edit":
 			return createEditTool(cwd, options?.edit);
 		case "write":
@@ -280,7 +291,7 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
 	return [
 		createReadToolDefinition(cwd, options?.read),
-		createBashToolDefinition(cwd, options?.bash),
+		createBashToolDefinition(cwd, bashOpts(options)),
 		createEditToolDefinition(cwd, options?.edit),
 		createWriteToolDefinition(cwd, options?.write),
 	];
@@ -316,7 +327,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		),
 		agent_pull: createAgentPullToolDefinition(cwd, options?.agentList?.agentDir ?? cwd),
 		read: createReadToolDefinition(cwd, options?.read),
-		bash: createBashToolDefinition(cwd, options?.bash),
+		bash: createBashToolDefinition(cwd, bashOpts(options)),
 		edit: createEditToolDefinition(cwd, options?.edit),
 		write: createWriteToolDefinition(cwd, options?.write),
 		grep: createGrepToolDefinition(cwd, options?.grep),
@@ -328,7 +339,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
 	return [
 		createReadTool(cwd, options?.read),
-		createBashTool(cwd, options?.bash),
+		createBashTool(cwd, bashOpts(options)),
 		createEditTool(cwd, options?.edit),
 		createWriteTool(cwd, options?.write),
 	];
@@ -358,7 +369,7 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		),
 		agent_pull: createAgentPullTool(cwd, options?.agentList?.agentDir ?? cwd),
 		read: createReadTool(cwd, options?.read),
-		bash: createBashTool(cwd, options?.bash),
+		bash: createBashTool(cwd, bashOpts(options)),
 		edit: createEditTool(cwd, options?.edit),
 		write: createWriteTool(cwd, options?.write),
 		grep: createGrepTool(cwd, options?.grep),

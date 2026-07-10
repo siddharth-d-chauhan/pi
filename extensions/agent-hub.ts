@@ -18,12 +18,13 @@ import {
 	deliverToAgent,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
+	type ExtensionContext,
 	formatTaskAge,
 	getBackgroundProcessRegistry,
 	reviveAgent,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 
 type Theme = Parameters<Parameters<ExtensionCommandContext["ui"]["custom"]>[0]>[1];
 
@@ -168,6 +169,11 @@ class AgentHubComponent implements Component {
 			const metrics = theme.fg("dim", metricsParts.join(" · "));
 			const label = theme.fg("muted", snap.label);
 			lines.push(pad(`${cursor}${theme.fg(glyphColor, glyph)} ${name} ${metrics} ${label}`));
+			// Live activity preview (latest log line) under the selected agent.
+			if (i === this.selected && snap.status === "running" && snap.logTail.length > 0) {
+				const activity = snap.logTail[snap.logTail.length - 1];
+				lines.push(pad(theme.fg("dim", `${indent}    ${activity}`)));
+			}
 		}
 
 		lines.push("");
@@ -188,14 +194,25 @@ class AgentHubComponent implements Component {
 	}
 }
 
+function openHub(ctx: ExtensionContext): Promise<undefined> {
+	return ctx.ui.custom<undefined>((tui, theme, _keybindings, done) => new AgentHubComponent(tui, theme, done), {
+		overlay: true,
+		overlayOptions: { anchor: "center", width: "80%", minWidth: 56, maxHeight: "70%", margin: 1 },
+	});
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("agents", {
 		description: "Open the agent hub (roster, kill, steer)",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
-			await ctx.ui.custom<undefined>((tui, theme, _keybindings, done) => new AgentHubComponent(tui, theme, done), {
-				overlay: true,
-				overlayOptions: { anchor: "center", width: "80%", minWidth: 56, maxHeight: "70%", margin: 1 },
-			});
+			await openHub(ctx);
+		},
+	});
+	// Ctrl+Alt+A opens the agent roster (quick-key parity with Claude Code).
+	pi.registerShortcut(Key.ctrlAlt("a"), {
+		description: "Open the agent hub (roster, kill, steer)",
+		handler: async (ctx: ExtensionContext) => {
+			await openHub(ctx);
 		},
 	});
 }

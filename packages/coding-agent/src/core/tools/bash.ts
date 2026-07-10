@@ -15,6 +15,7 @@ import {
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
+import { getBackgroundProcessRegistry, sanitizeLogLine } from "../background-process-registry.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
@@ -40,6 +41,12 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
 	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	run_in_background: Type.Optional(
+		Type.Boolean({
+			description:
+				"Run the command detached in the background instead of blocking. Returns immediately with a background id and an output file path; the command keeps running, its output streams to that file (Read it to inspect progress) and to the background tasks panel, and you receive a task-notification when it finishes. Use for long-running or watch commands (dev servers, builds, tails). Do not poll.",
+		}),
+	),
 });
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -47,6 +54,19 @@ export type BashToolInput = Static<typeof bashSchema>;
 export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
+}
+
+/**
+ * Minimal structural view of the parent session used to deliver a
+ * background-command completion notification to the model. `AgentSession`
+ * satisfies this. Kept structural so the bash tool takes no hard dependency
+ * on the session module.
+ */
+export interface BashBackgroundHost {
+	sendCustomMessage(
+		message: { customType: string; content: string; display: boolean; details?: unknown },
+		options?: { deliverAs?: "steer" | "followUp" | "nextTurn"; triggerTurn?: boolean },
+	): Promise<unknown>;
 }
 
 /**
@@ -169,6 +189,13 @@ export interface BashToolOptions {
 	shellPath?: string;
 	/** Hook to adjust command, cwd, or env before execution */
 	spawnHook?: BashSpawnHook;
+	/**
+	 * Parent session used to notify the model when a `run_in_background`
+	 * command completes. Optional: without it, background commands still run
+	 * and appear in the background tasks panel, but no completion message is
+	 * injected into the conversation.
+	 */
+	backgroundHost?: BashBackgroundHost;
 }
 
 const BASH_PREVIEW_LINES = 5;
@@ -288,6 +315,308 @@ function rebuildBashResultRenderComponent(
 	}
 }
 
+const BG_LABEL_MAX = 80;
+
+function bgLabel(command: string): string {
+	const oneLine = command.replace(/\s+/g, " ").trim();
+	return oneLine.length > BG_LABEL_MAX ? `${oneLine.slice(0, BG_LABEL_MAX - 1)}…` : oneLine;
+}
+
+// ── Background completion notifications ──────────────────────────────────────
+// Mirrors the subagent background path (`queueBackgroundNotification`): a
+// `<task-notification>` delivered on the next turn. Consecutive *completed*
+// commands are collapsed into a single "N commands completed" message so a
+// fan-out of background work doesn't flood the conversation; failed/cancelled
+// commands are always surfaced individually.
+
+interface PendingCompletion {
+	registryId: string;
+	label: string;
+	status: "completed" | "failed" | "cancelled";
+	exitCode: number | null;
+	outputPath: string;
+}
+
+interface HostBatch {
+	pending: PendingCompletion[];
+	timer: NodeJS.Timeout | undefined;
+}
+
+const BG_NOTIFY_BATCH_MS = 200;
+const activeBatches = new Map<BashBackgroundHost, HostBatch>();
+
+/** Test helper: cancel any pending batch timers and clear batch state. */
+export function resetBackgroundNotifierForTests(): void {
+	for (const b of activeBatches.values()) if (b.timer) clearTimeout(b.timer);
+	activeBatches.clear();
+}
+
+function sendSingleCompletion(host: BashBackgroundHost, it: PendingCompletion): void {
+	const registry = getBackgroundProcessRegistry();
+	const entry = registry.get(it.registryId);
+	const tail = entry ? entry.log.slice(-10).join("\n") : "";
+	const exitAttr = it.exitCode !== null ? ` exit="${it.exitCode}"` : "";
+	const text =
+		`<task-notification id="${it.registryId}" kind="shell" status="${it.status}"${exitAttr}>\n` +
+		`$ ${it.label}\n` +
+		(tail ? `--- last output ---\n${tail}\n` : "") +
+		`full output: ${it.outputPath}\n` +
+		"</task-notification>\n\n" +
+		`Background command finished. Read ${it.outputPath} for full output if needed. Do not re-run or poll.`;
+	host
+		.sendCustomMessage(
+			{
+				customType: "task-notification",
+				content: text,
+				display: true,
+				details: {
+					registryId: it.registryId,
+					kind: "shell",
+					status: it.status,
+					exitCode: it.exitCode,
+					outputPath: it.outputPath,
+				},
+			},
+			{ deliverAs: "nextTurn" },
+		)
+		.catch((err) => registry.appendLog(it.registryId, `[notification error: ${(err as Error).message}]`));
+}
+
+function flushBatch(host: BashBackgroundHost, batch: HostBatch): void {
+	batch.timer = undefined;
+	const items = batch.pending;
+	batch.pending = [];
+	if (items.length === 0) return;
+	if (items.length === 1) {
+		sendSingleCompletion(host, items[0]);
+		return;
+	}
+	const lines = items.map((it) => {
+		const code = it.exitCode !== null ? ` (exit ${it.exitCode})` : "";
+		return `• $ ${it.label}${code} — ${it.outputPath}`;
+	});
+	const text =
+		`<task-notification kind="shell" status="completed" count="${items.length}">\n` +
+		`${items.length} background commands completed:\n${lines.join("\n")}\n` +
+		"</task-notification>\n\n" +
+		"Read any of the listed output files if needed. Do not re-run or poll.";
+	host
+		.sendCustomMessage(
+			{
+				customType: "task-notification",
+				content: text,
+				display: true,
+				details: { kind: "shell", status: "completed", count: items.length, items },
+			},
+			{ deliverAs: "nextTurn" },
+		)
+		.catch(() => {});
+}
+
+function notifyBackgroundCompletion(params: {
+	host: BashBackgroundHost | undefined;
+	registryId: string;
+	label: string;
+	status: "completed" | "failed" | "cancelled";
+	exitCode: number | null;
+	outputPath: string;
+}): void {
+	const { host, ...rest } = params;
+	if (!host) return;
+	const item: PendingCompletion = rest;
+	let batch = activeBatches.get(host);
+	if (!batch) {
+		batch = { pending: [], timer: undefined };
+		activeBatches.set(host, batch);
+	}
+	// Non-success completions are always shown individually and immediately.
+	// Flush any queued successes first so ordering is preserved.
+	if (item.status !== "completed") {
+		if (batch.timer) {
+			clearTimeout(batch.timer);
+			flushBatch(host, batch);
+		}
+		sendSingleCompletion(host, item);
+		return;
+	}
+	batch.pending.push(item);
+	if (!batch.timer) {
+		batch.timer = setTimeout(() => flushBatch(host, batch as HostBatch), BG_NOTIFY_BATCH_MS);
+		batch.timer.unref?.();
+	}
+}
+
+// ── Stall detection ──────────────────────────────────────────────────────────
+// A background command that stops producing output and whose last line looks
+// like an interactive prompt is probably blocked waiting for input. We surface
+// that once so the model can kill it and re-run with input piped in.
+
+const STALL_IDLE_MS = 45_000;
+const STALL_POLL_MS = 5_000;
+const STALL_PROMPT_PATTERNS: RegExp[] = [
+	/[?:]\s*$/,
+	/\(y\/n\)\s*$/i,
+	/\[y\/n\]\s*$/i,
+	/password[^\n]*:\s*$/i,
+	/press\s+(any\s+key|enter|return)/i,
+	/continue\?\s*$/i,
+	/›\s*$/,
+	/\?\s*$/,
+];
+
+/** True if `tail` looks like a shell/program waiting for interactive input. */
+export function looksLikePrompt(tail: string): boolean {
+	const t = tail.trimEnd();
+	if (!t) return false;
+	return STALL_PROMPT_PATTERNS.some((re) => re.test(t));
+}
+
+function sendStallNotice(host: BashBackgroundHost, registryId: string, label: string): void {
+	// Deliberately status-less: this is not a terminal event, so SDK consumers
+	// must not treat it as completion.
+	host
+		.sendCustomMessage(
+			{
+				customType: "task-notification",
+				content:
+					`<task-notification id="${registryId}" kind="shell">\n` +
+					`$ ${label}\n` +
+					"appears to be waiting for interactive input (no output for 45s and the last line looks like a prompt). " +
+					"Consider killing it and re-running with input piped in.\n" +
+					"</task-notification>",
+				display: true,
+				details: { registryId, kind: "shell", stall: true },
+			},
+			{ deliverAs: "nextTurn" },
+		)
+		.catch(() => {});
+}
+
+export interface BackgroundLaunchResult {
+	registryId: string;
+	outputPath: string;
+}
+
+/**
+ * Launch a command detached from the current turn. Registers it in the
+ * BackgroundProcessRegistry (kind "shell") so it shows in the tasks panel with
+ * a live output tail and a kill affordance, streams full output to a temp file
+ * for later Read, and notifies the host session on completion. Returns
+ * immediately.
+ */
+function launchBackgroundCommand(params: {
+	ops: BashOperations;
+	spawnContext: BashSpawnContext;
+	displayCommand: string;
+	timeout: number | undefined;
+	host: BashBackgroundHost | undefined;
+}): BackgroundLaunchResult {
+	const { ops, spawnContext, displayCommand, timeout, host } = params;
+	const registry = getBackgroundProcessRegistry();
+	const output = new OutputAccumulator({ tempFilePrefix: "pi-bash-bg" });
+	const outputPath = output.persist();
+	const controller = new AbortController();
+	const label = bgLabel(displayCommand);
+
+	const registryId = registry.register({
+		kind: "shell",
+		label: `$ ${label}`,
+		summary: outputPath,
+		onKill: () => controller.abort(),
+	});
+
+	// Line-buffer raw output into the registry log (the human-facing live tail).
+	let lineBuf = "";
+	let lastLine = "";
+	let lastGrowthAt = Date.now();
+	let stallWarned = false;
+	const decoder = new TextDecoder();
+	const pumpLines = (flush: boolean): void => {
+		let idx = lineBuf.indexOf("\n");
+		while (idx !== -1) {
+			const line = sanitizeLogLine(lineBuf.slice(0, idx));
+			if (line) {
+				registry.appendLog(registryId, line);
+				lastLine = line;
+			}
+			lineBuf = lineBuf.slice(idx + 1);
+			idx = lineBuf.indexOf("\n");
+		}
+		if (flush) {
+			lineBuf += decoder.decode();
+			const line = sanitizeLogLine(lineBuf);
+			if (line) {
+				registry.appendLog(registryId, line);
+				lastLine = line;
+			}
+			lineBuf = "";
+		}
+	};
+
+	const onData = (data: Buffer): void => {
+		output.append(data);
+		lastGrowthAt = Date.now();
+		lineBuf += decoder.decode(data, { stream: true });
+		pumpLines(false);
+	};
+
+	// Stall-watchdog: if output goes quiet and the visible tail looks like a
+	// prompt, the command is likely blocked on interactive input.
+	const watchdog = setInterval(() => {
+		if (stallWarned || Date.now() - lastGrowthAt < STALL_IDLE_MS) return;
+		const candidate = lineBuf.trim() ? sanitizeLogLine(lineBuf) : lastLine;
+		if (!looksLikePrompt(candidate)) return;
+		stallWarned = true;
+		registry.appendLog(registryId, "[appears to be waiting for interactive input]");
+		if (host) sendStallNotice(host, registryId, label);
+	}, STALL_POLL_MS);
+	watchdog.unref?.();
+
+	void (async () => {
+		let exitCode: number | null = null;
+		let status: "completed" | "failed" | "cancelled" = "completed";
+		let statusText = "completed";
+		try {
+			const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
+				onData,
+				signal: controller.signal,
+				timeout,
+				env: spawnContext.env,
+			});
+			exitCode = result.exitCode;
+			if (controller.signal.aborted) {
+				status = "cancelled";
+				statusText = "killed";
+			} else if (exitCode !== 0 && exitCode !== null) {
+				status = "failed";
+				statusText = `exited with code ${exitCode}`;
+			}
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			if (message === "aborted" || controller.signal.aborted) {
+				status = "cancelled";
+				statusText = "killed";
+			} else if (message.startsWith("timeout:")) {
+				status = "failed";
+				statusText = `timed out after ${message.split(":")[1]}s`;
+			} else {
+				status = "failed";
+				statusText = message;
+			}
+		} finally {
+			clearInterval(watchdog);
+			output.finish();
+			pumpLines(true);
+			await output.closeTempFile().catch(() => {});
+		}
+		registry.appendLog(registryId, `[${statusText}]`);
+		registry.setStatus(registryId, status);
+		notifyBackgroundCompletion({ host, registryId, label, status, exitCode, outputPath });
+	})();
+
+	return { registryId, outputPath };
+}
+
 export function createBashToolDefinition(
 	cwd: string,
 	options?: BashToolOptions,
@@ -298,18 +627,36 @@ export function createBashToolDefinition(
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. Set run_in_background to launch long-running commands (dev servers, builds, watchers) detached: the call returns immediately with an output file path, the command keeps running, and you get a task-notification when it finishes.`,
 		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
 		parameters: bashSchema,
 		async execute(
 			_toolCallId,
-			{ command, timeout }: { command: string; timeout?: number },
+			{ command, timeout, run_in_background }: { command: string; timeout?: number; run_in_background?: boolean },
 			signal?: AbortSignal,
 			onUpdate?,
 			_ctx?,
 		) {
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
+
+			if (run_in_background) {
+				const { registryId, outputPath } = launchBackgroundCommand({
+					ops,
+					spawnContext,
+					displayCommand: command,
+					timeout,
+					host: options?.backgroundHost,
+				});
+				const text =
+					`Background command started (id: ${registryId}).\n` +
+					"It runs detached; this turn continues without waiting for it.\n" +
+					`Output streams to: ${outputPath}\n` +
+					"Read that file to inspect progress (it grows as the command runs). " +
+					"You'll receive a task-notification when it finishes — do not poll.";
+				return { content: [{ type: "text", text }], details: { fullOutputPath: outputPath } };
+			}
+
 			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
 			let acceptingOutput = true;
 			let updateTimer: NodeJS.Timeout | undefined;

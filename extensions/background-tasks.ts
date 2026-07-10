@@ -197,7 +197,7 @@ class BackgroundTasksComponent implements Component {
 	}
 }
 
-function openOverlay(ctx: ExtensionContext): Promise<undefined> {
+export function openOverlay(ctx: ExtensionContext): Promise<undefined> {
 	return ctx.ui.custom<undefined>((tui, theme, _keybindings, done) => new BackgroundTasksComponent(tui, theme, done), {
 		overlay: true,
 		overlayOptions: { anchor: "center", width: "80%", minWidth: 56, maxHeight: "70%", margin: 1 },

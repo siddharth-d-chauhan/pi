@@ -194,7 +194,7 @@ class AgentHubComponent implements Component {
 	}
 }
 
-function openHub(ctx: ExtensionContext): Promise<undefined> {
+export function openHub(ctx: ExtensionContext): Promise<undefined> {
 	return ctx.ui.custom<undefined>((tui, theme, _keybindings, done) => new AgentHubComponent(tui, theme, done), {
 		overlay: true,
 		overlayOptions: { anchor: "center", width: "80%", minWidth: 56, maxHeight: "70%", margin: 1 },

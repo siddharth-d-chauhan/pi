@@ -1,7 +1,7 @@
 /**
  * Card style state shared across extension module graphs (globalThis
- * channel, same pattern as lib/icons.ts): "solid" paints omp-style
- * full-width background blocks; "border" draws rounded line boxes.
+ * channel, same pattern as lib/icons.ts): "border" draws omp-style rounded
+ * line boxes (the default); "solid" paints full-width background blocks.
  * Persisted in <agentDir>/cards.json; /cards toggles it live.
  */
 
@@ -31,9 +31,9 @@ export function getCardStyle(): CardStyle {
 	if (state.style) return state.style;
 	try {
 		const saved = JSON.parse(readFileSync(stateFile(), "utf8")) as { style?: string };
-		state.style = saved.style === "border" ? "border" : "solid";
+		state.style = saved.style === "solid" ? "solid" : "border";
 	} catch {
-		state.style = "solid";
+		state.style = "border";
 	}
 	return state.style;
 }

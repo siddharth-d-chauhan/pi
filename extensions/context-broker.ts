@@ -415,8 +415,10 @@ export default function (pi: ExtensionAPI) {
 					}
 				}
 			}
-			// 2) Advisory phase — surface scoped rules/pitfalls once per action.
-			const fingerprint = `${state.epoch ?? 1}|${event.toolName}|${files.join(",")}|${command ?? ""}`;
+			// 2) Advisory phase — surface scoped rules/pitfalls once per action
+			// CLASS (tool + files), not per command variant: retrying a failed
+			// bash command with a tweak must not re-trigger the advisory block.
+			const fingerprint = `${state.epoch ?? 1}|${event.toolName}|${files.join(",")}`;
 			if (state.acknowledgedActions?.has(fingerprint)) return; // already surfaced — let the retry through
 			const advisory = await callBroker(
 				"pi.context_before_action",

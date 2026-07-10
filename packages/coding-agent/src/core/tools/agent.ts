@@ -30,6 +30,19 @@ const agentTaskSchema = Type.Object({
 	prompt: Type.String({ description: "Goal or question to delegate to the agent." }),
 	/** Optional model override (role alias, provider/model, or plain model id). */
 	model: Type.Optional(Type.String({ description: "Optional model override." })),
+	/** Optional reasoning-effort (thinking level) override for this task. */
+	effort: Type.Optional(
+		Type.Union(
+			[
+				Type.Literal("off"),
+				Type.Literal("minimal"),
+				Type.Literal("low"),
+				Type.Literal("medium"),
+				Type.Literal("high"),
+			],
+			{ description: "Reasoning effort for this subagent: off | minimal | low | medium | high." },
+		),
+	),
 	/** Optional context block injected under `## CONTEXT` in the child system prompt. */
 	context: Type.Optional(Type.String({ description: "Structured context block." })),
 	/** When true, run the agent in the background and return a registry id. */
@@ -404,7 +417,9 @@ export function createAgentToolDefinition(
 		name: "agent",
 		label: "agent",
 		description:
-			"Spawn one or more subagents (sync fan-out or background). " +
+			"Spawn one or more subagents (sync fan-out or background). Each task may set its own " +
+			"`model` (any provider/model or role alias) and `effort` (off|minimal|low|medium|high) — " +
+			"e.g. a cheap fast model at low effort for scouting, a strong model at high effort for hard work. " +
 			"Returns inline results for sync tasks and a registry id for background tasks. " +
 			"Use `agent_pull` to recover full output via agent://<id> when inline was truncated.\n\n" +
 			initialRoster,
@@ -423,15 +438,20 @@ export function createAgentToolDefinition(
 			const roster = describeRoster(allowed, maxInline);
 
 			const resolvedTasks: ResolvedAgentTask[] = args.tasks.map((task) => {
-				const definition = registry.get(task.agent);
-				if (!definition) {
+				const baseDefinition = registry.get(task.agent);
+				if (!baseDefinition) {
 					throw new Error(`Unknown agent type "${task.agent}". Available agents:\n${roster}`);
 				}
-				if (disabled.has(definition.name)) {
+				if (disabled.has(baseDefinition.name)) {
 					throw new Error(
-						`Agent "${definition.name}" is disabled (settings "agents.disabled" or the active team — check /team, or pick another agent from the roster).`,
+						`Agent "${baseDefinition.name}" is disabled (settings "agents.disabled" or the active team — check /team, or pick another agent from the roster).`,
 					);
 				}
+				// Per-task effort clones the definition's thinking level (model is
+				// applied separately via modelOverride). Same pattern as chain stages.
+				const definition = task.effort
+					? { ...baseDefinition, thinkingLevel: task.effort as ThinkingLevel }
+					: baseDefinition;
 				return {
 					task,
 					definition,

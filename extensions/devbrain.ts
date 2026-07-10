@@ -25,11 +25,19 @@ const FAST_TIMEOUT_MS = 30_000;
 const RUN_TIMEOUT_MS = Number(process.env.PI_DEVBRAIN_RUN_TIMEOUT_MS ?? 900_000);
 
 const devbrainSchema = Type.Object({
-	cmd: Type.Unsafe<"guide" | "blocks" | "goal" | "validate" | "run" | "doctor">({
+	cmd: Type.Unsafe<"guide" | "blocks" | "goal" | "validate" | "run" | "doctor" | "draft">({
 		type: "string",
-		enum: ["guide", "blocks", "goal", "validate", "run", "doctor"],
-		description: "goal = simplest path: state target capabilities, engine plans+runs",
+		enum: ["guide", "blocks", "goal", "validate", "run", "doctor", "draft"],
+		description: "goal = plan+run from capabilities; draft = author a block from flat fields",
 	}),
+	fields: Type.Optional(
+		Type.Unsafe<Record<string, unknown>>({
+			type: "object",
+			description:
+				"draft: FLAT fields (id, description, command|url|spec, requires, provides, verify_command…) — never hand-write block JSON",
+		}),
+	),
+	write: Type.Optional(Type.Boolean({ description: "draft: write the block into <repo>/devbrain/blocks when valid" })),
 	goal: Type.Optional(Type.String({ description: "goal: comma-separated target capabilities, e.g. 'mfa-enrolled'" })),
 	params: Type.Optional(
 		Type.Unsafe<Record<string, unknown>>({ type: "object", description: "shared param pool (goal/run)" }),
@@ -63,6 +71,18 @@ function cliArgs(input: DevbrainInput): { args: string[]; stdin?: string; timeou
 					...(input.params ? ["--params", JSON.stringify(input.params)] : []),
 				],
 				timeoutMs: RUN_TIMEOUT_MS,
+			};
+		case "draft":
+			return {
+				args: [
+					...repo,
+					"blocks",
+					"draft",
+					"--fields",
+					JSON.stringify(input.fields ?? {}),
+					...(input.write ? ["--write"] : []),
+				],
+				timeoutMs: FAST_TIMEOUT_MS,
 			};
 		case "validate":
 			return {

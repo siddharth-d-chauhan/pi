@@ -507,12 +507,6 @@ export class InteractiveMode {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
 		});
-		// Wire the empty-editor down-arrow → background log panel affordance.
-		// Wire Down/Up at the bottom/top of the prompt to scroll the chat
-		// scrollback by one line (Claude Code's behavior — cursor stays put
-		// in the editor; the visible scrollback moves).
-		this.defaultEditor.onDownArrowOnLastLine = () => this.scrollChatDown();
-		this.defaultEditor.onUpArrowOnFirstLine = () => this.scrollChatUp();
 		this.defaultEditor.onHistorySearch = () => this.openHistorySearch();
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
@@ -2285,37 +2279,6 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Scroll the chat scrollback DOWN by one line (cursor stays in editor).
-	 * Bound to `onDownArrowOnLastLine` — the editor fires it when Down is
-	 * pressed at the last line of a non-empty editor.
-	 */
-	private scrollChatDown(): boolean {
-		// CSI \x1b[T  with one parameter means "scroll down N lines". Used in
-		// xterm and most modern emulators (iTerm2, kitty, WezTerm, GNOME
-		// Terminal). On unsupported terminals this is a no-op; the user
-		// still gets the cursor-movement fallback because we return false
-		// when we want to fall through.
-		//
-		// While the agent is STREAMING the differential renderer repaints the
-		// live region continuously; a raw viewport scroll under it leaves
-		// stale copies of every repaint stacked in scrollback (torn borders,
-		// duplicated spinner rows). Scrolling is only safe on a static
-		// screen, so fall through to cursor movement while streaming.
-		if (this.session.isStreaming) return false;
-		this.ui.terminal.write("\x1b[1T");
-		return true;
-	}
-
-	/**
-	 * Scroll the chat scrollback UP by one line. Bound to
-	 * `onUpArrowOnFirstLine`.
-	 */
-	private scrollChatUp(): boolean {
-		if (this.session.isStreaming) return false;
-		this.ui.terminal.write("\x1b[1S");
-		return true;
-	}
-	/**
 	 * Open the reverse-i-search overlay. Triggered by Ctrl-R from the
 	 * editor (the editor's `onHistorySearch` callback routes here). The
 	 * search is over the session's user messages; on commit we replace
@@ -3915,11 +3878,11 @@ export class InteractiveMode {
 			return;
 		}
 		this.currentMessageIndex = 0;
-		// Scroll the terminal up by a large amount so the user can see the
-		// top of the scrollback. Real TUI-level scroll-to-message would
-		// require a scrollOffset concept in the TUI; this is a best-effort
-		// affordance until that's available.
-		if (!this.session.isStreaming) this.ui.terminal.write("\x1b[1000S"); // scroll up 1000 lines (xterm)
+		// No terminal-level scroll here: raw SU/SD escapes desync the
+		// differential renderer (its row bookkeeping doesn't know the screen
+		// moved), smearing stale frames into scrollback. Real scroll-to-message
+		// needs a scrollOffset concept in the TUI; until then this only tracks
+		// the index — use the terminal's native scrollback to look up.
 		this.setNavStatus("First message", 0, total);
 		this.ui.requestRender();
 	}
@@ -3947,7 +3910,6 @@ export class InteractiveMode {
 		const next = this.currentMessageIndex < 0 ? total - 1 : this.currentMessageIndex - 1;
 		const clamped = Math.max(0, next);
 		this.currentMessageIndex = clamped;
-		if (!this.session.isStreaming) this.ui.terminal.write("\x1b[10S"); // scroll up 10 lines
 		this.setNavStatus("Message", clamped, total);
 		this.ui.requestRender();
 	}
@@ -3966,7 +3928,6 @@ export class InteractiveMode {
 			this.showStatus("Latest message");
 		} else {
 			this.currentMessageIndex = clamped;
-			if (!this.session.isStreaming) this.ui.terminal.write("\x1b[10T"); // scroll down 10 lines
 			this.setNavStatus("Message", clamped, total);
 		}
 		this.ui.requestRender();

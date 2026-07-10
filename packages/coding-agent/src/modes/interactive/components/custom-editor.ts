@@ -81,12 +81,20 @@ export class CustomEditor extends Editor {
 		// scrolls the chat scrollback by one line (Claude Code's behavior).
 		// We match via the keybinding name so the same keychord the editor
 		// uses for cursor movement triggers the scroll hook.
-		if (this.getText().length > 0 && this.keybindings.matches(data, "tui.editor.cursorDown")) {
+		if (
+			!this.isShowingAutocomplete() &&
+			this.getText().length > 0 &&
+			this.keybindings.matches(data, "tui.editor.cursorDown")
+		) {
 			if (this.getCursorLine() >= this.getLineCount() - 1 && this.onDownArrowOnLastLine?.() === true) {
 				return;
 			}
 		}
-		if (this.getText().length > 0 && this.keybindings.matches(data, "tui.editor.cursorUp")) {
+		if (
+			!this.isShowingAutocomplete() &&
+			this.getText().length > 0 &&
+			this.keybindings.matches(data, "tui.editor.cursorUp")
+		) {
 			if (this.getCursorLine() <= 0 && this.onUpArrowOnFirstLine?.() === true) {
 				return;
 			}

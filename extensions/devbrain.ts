@@ -25,15 +25,19 @@ const FAST_TIMEOUT_MS = 30_000;
 const RUN_TIMEOUT_MS = Number(process.env.PI_DEVBRAIN_RUN_TIMEOUT_MS ?? 900_000);
 
 const devbrainSchema = Type.Object({
-	cmd: Type.Unsafe<"guide" | "blocks" | "validate" | "run" | "doctor">({
+	cmd: Type.Unsafe<"guide" | "blocks" | "goal" | "validate" | "run" | "doctor">({
 		type: "string",
-		enum: ["guide", "blocks", "validate", "run", "doctor"],
-		description: "guide=read the contract first; validate before run",
+		enum: ["guide", "blocks", "goal", "validate", "run", "doctor"],
+		description: "goal = simplest path: state target capabilities, engine plans+runs",
 	}),
+	goal: Type.Optional(Type.String({ description: "goal: comma-separated target capabilities, e.g. 'mfa-enrolled'" })),
+	params: Type.Optional(
+		Type.Unsafe<Record<string, unknown>>({ type: "object", description: "shared param pool (goal/run)" }),
+	),
 	flow: Type.Optional(
 		Type.Unsafe<Record<string, unknown>>({
 			type: "object",
-			description: "flow doc for validate/run: {steps:[{block, params?}], assume?}",
+			description: "manual flow doc for validate/run: {steps:[{block, params?}], assume?, params?}",
 		}),
 	),
 	repo: Type.Optional(Type.String({ description: "product repo path (adds its devbrain/blocks)" })),
@@ -49,6 +53,17 @@ function cliArgs(input: DevbrainInput): { args: string[]; stdin?: string; timeou
 			return { args: ["guide"], timeoutMs: FAST_TIMEOUT_MS };
 		case "blocks":
 			return { args: [...repo, "blocks", "list", "--json"], timeoutMs: FAST_TIMEOUT_MS };
+		case "goal":
+			return {
+				args: [
+					...repo,
+					"flow",
+					"goal",
+					input.goal ?? "",
+					...(input.params ? ["--params", JSON.stringify(input.params)] : []),
+				],
+				timeoutMs: RUN_TIMEOUT_MS,
+			};
 		case "validate":
 			return {
 				args: [...repo, "flow", "validate", "-"],
@@ -120,6 +135,9 @@ export default function (pi: ExtensionAPI) {
 			}
 			if ((input.cmd === "validate" || input.cmd === "run") && !input.flow) {
 				throw new Error(`cmd '${input.cmd}' needs a flow — call {cmd:"guide"} for the format`);
+			}
+			if (input.cmd === "goal" && !input.goal) {
+				throw new Error(`cmd 'goal' needs goal capabilities — see {cmd:"blocks"} provides tokens`);
 			}
 			const result = await runCli(cliArgs(input), signal);
 			const text = result.stdout.trim() || result.stderr.trim() || `(exit ${result.code})`;

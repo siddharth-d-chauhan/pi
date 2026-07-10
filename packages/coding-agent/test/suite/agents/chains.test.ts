@@ -161,6 +161,9 @@ describe("runChain", () => {
 
 		expect(result.status).toBe("completed");
 		expect(result.stages.map((stage) => stage.status)).toEqual(["completed", "completed"]);
+		expect(result.stages.map((stage) => stage.verifyAttempts)).toEqual([0, 0]);
+		expect(result.stages.map((stage) => stage.gateConfigured)).toEqual([false, false]);
+		expect(result.stages.map((stage) => stage.gatePassed)).toEqual([undefined, undefined]);
 		expect(result.stages[1].inline).toContain("built it");
 		// {{input}} and {{plan.result}} interpolation reached the children.
 		expect(captured).toHaveLength(2);
@@ -230,6 +233,7 @@ stages:
 
 		expect(result.status).toBe("completed");
 		expect(result.stages[0].verifyAttempts).toBe(2);
+		expect(result.stages[0]).toMatchObject({ gateConfigured: true, gateKind: "verify", gatePassed: true });
 		expect(result.stages[0].inline).toContain("fixed it");
 		expect(existsSync(marker)).toBe(true);
 	});
@@ -381,7 +385,92 @@ stages:
 
 		expect(result.status).toBe("completed");
 		expect(result.stages[0].verifyAttempts).toBe(2);
+		expect(result.stages[0]).toMatchObject({ gateConfigured: true, gateKind: "judge", gatePassed: true });
 		expect(result.stages[0].inline).toContain("now complete");
+	});
+
+	it("records a final verify failure as a failed gate", async () => {
+		const parent = await makeParent();
+		const worker = await createHarness();
+		harnesses.push(worker);
+		worker.setResponses([fauxAssistantMessage("done")]);
+
+		const chainYaml = `
+name: verify-fails
+stages:
+  - id: work
+    agent: worker
+    prompt: "Do it"
+    verify: "false"
+    max_iters: 0
+`;
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: stagedFactory([worker]),
+		};
+
+		const result = await runChain({
+			definition: parseChain(chainYaml, "verify-fails.yaml", "project"),
+			input: "",
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["worker"]),
+			deps,
+			cwd: makeTempDir("pi-chain-cwd-"),
+		});
+
+		expect(result.status).toBe("failed");
+		expect(result.stages[0]).toMatchObject({
+			status: "failed",
+			verifyAttempts: 1,
+			gateConfigured: true,
+			gateKind: "verify",
+			gatePassed: false,
+		});
+	});
+
+	it("fails an unparseable judge verdict instead of accepting it as evidence", async () => {
+		const parent = await makeParent();
+		const worker = await createHarness();
+		const judge = await createHarness();
+		harnesses.push(worker, judge);
+		worker.setResponses([fauxAssistantMessage("work complete")]);
+		judge.setResponses([fauxAssistantMessage("I cannot determine a verdict.")]);
+
+		const chainYaml = `
+name: judge-unparseable
+stages:
+  - id: work
+    agent: worker
+    prompt: "Do it"
+    judge: "Is the work real?"
+    max_iters: 0
+`;
+		const deps: SpawnDeps = {
+			settingsManager: parent.settingsManager,
+			modelRegistry: parent.session.modelRegistry,
+			artifactDir: makeTempDir("pi-chain-artifacts-"),
+			createChildSession: stagedFactory([worker, judge]),
+		};
+
+		const result = await runChain({
+			definition: parseChain(chainYaml, "judge-unparseable.yaml", "project"),
+			input: "",
+			parent: { session: parent.session, depth: 0 },
+			definitions: fakeRegistry(["worker"]),
+			deps,
+			cwd: makeTempDir("pi-chain-cwd-"),
+		});
+
+		expect(result.status).toBe("failed");
+		expect(result.stages[0]).toMatchObject({
+			status: "failed",
+			verifyAttempts: 1,
+			gateConfigured: true,
+			gateKind: "judge",
+			gatePassed: false,
+		});
 	});
 
 	it("budget: a zero runtime budget fails stages before spawning", async () => {

@@ -74,16 +74,25 @@ function agentRow(snap: BackgroundProcessSnapshot, theme: ThemeLike): string {
 }
 
 function teamLine(team: TeamDefinition, theme: ThemeLike): string {
-	const memberBits = Object.entries(team.members).map(([name, member]) => {
-		const traits = [member.model, member.effort].filter(Boolean).join("·");
-		return traits ? `${name}(${traits})` : name;
-	});
-	const leadTraits = [team.lead?.model, team.lead?.effort].filter(Boolean).join("·");
+	// Group roles that share the same model·effort so repeated specs collapse:
+	//   team squad — lead·builder·qa (main·medium) + scout (smol·low)
+	const traitsOf = (member?: { model?: string; effort?: string }) =>
+		[member?.model?.replace(/^pi\//, ""), member?.effort].filter(Boolean).join("·");
+	const groups = new Map<string, string[]>();
+	const put = (name: string, traits: string) => {
+		const list = groups.get(traits) ?? [];
+		list.push(name);
+		groups.set(traits, list);
+	};
+	put("lead", traitsOf(team.lead));
+	for (const [name, member] of Object.entries(team.members)) put(name, traitsOf(member));
 	const roster =
-		memberBits.length > 0
-			? ` — ${leadTraits ? `lead(${leadTraits})` : "lead"} + ${memberBits.join(", ")}`
-			: ` — routing only`;
-	return `${theme.fg("accent", icon("team"))} ${theme.fg("muted", `team ${theme.bold(team.name)}`)}${theme.fg("dim", roster)}`;
+		groups.size > 0
+			? [...groups.entries()]
+					.map(([traits, names]) => `${names.join("·")}${traits ? ` (${traits})` : ""}`)
+					.join(" + ")
+			: "routing only";
+	return `${theme.fg("muted", "team")} ${theme.fg("accent", theme.bold(team.name))} ${theme.fg("dim", `— ${roster}`)}`;
 }
 
 /** parent→children map: registry parentId is the parent SESSION id. */
@@ -152,11 +161,13 @@ class OrchestraWidget implements Component {
 			| undefined;
 		if (wf?.id) {
 			const shortTask = (wf.task ?? "").replace(/\s+/g, " ").trim().slice(0, 48);
-			lines.push(
-				`${theme.fg("accent", icon("chain"))} ${theme.fg("muted", `frame e${wf.epoch ?? 1}`)}${
-					shortTask ? theme.fg("dim", ` — ${shortTask}`) : ""
-				}`,
-			);
+			// The boot frame at epoch 1 says nothing — show the line only once
+			// there's a real task or the direction has shifted.
+			const meaningful = (wf.epoch ?? 1) > 1 || (shortTask && shortTask !== "session boot");
+			if (meaningful)
+				lines.push(
+					`${theme.fg("muted", `e${wf.epoch ?? 1}`)}${shortTask ? theme.fg("dim", ` · ${shortTask}`) : ""}`,
+				);
 		}
 
 		const agents = getBackgroundProcessRegistry().list().filter(isAgent);
@@ -208,7 +219,9 @@ class OrchestraWidget implements Component {
 		// omp-style: a copper left rule instead of a painted background band —
 		// consistent with the forge header and the tool/user message shells.
 		const w = Math.min(width, 100);
-		return lines.map((line) => `${copper("▎")} ${truncateToWidth(rtrimAnsi(line), w - 2, "…")}`);
+		return lines
+			.filter((line) => line.trim().length > 0)
+			.map((line) => `${copper("▎")} ${truncateToWidth(rtrimAnsi(line), w - 2, "…")}`);
 	}
 }
 

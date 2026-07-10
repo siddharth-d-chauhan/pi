@@ -11,6 +11,15 @@ import { theme } from "../theme/theme.ts";
 // generous — most one-line tool results stay uncollapsed.
 const COLLAPSE_LINE_THRESHOLD = 30;
 const COLLAPSE_HEAD_LINES = 28;
+
+/**
+ * omp-style shell painter: instead of a full-width background band, prefix
+ * each padded line with a colored left rule. The Box/Text shells pad lines
+ * by one column, so swapping that space for the rule glyph keeps width.
+ */
+function ruleShell(color: Parameters<typeof theme.fg>[0]): (text: string) => string {
+	return (text: string) => theme.fg(color, "▎") + text.slice(1);
+}
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
@@ -71,8 +80,8 @@ export class ToolExecutionComponent extends Container {
 		// Always create all shell variants. contentBox is used for default renderer-based composition.
 		// selfRenderContainer is used when the tool renders its own framing.
 		// contentText is reserved for generic fallback rendering when no tool definition exists.
-		this.contentBox = new Box(1, 1, (text: string) => theme.bg("toolPendingBg", text));
-		this.contentText = new Text("", 1, 1, (text: string) => theme.bg("toolPendingBg", text));
+		this.contentBox = new Box(1, 1, ruleShell("muted"));
+		this.contentText = new Text("", 1, 1, ruleShell("muted"));
 		this.selfRenderContainer = new Container();
 
 		if (this.hasRendererDefinition()) {
@@ -272,10 +281,10 @@ export class ToolExecutionComponent extends Container {
 
 	private updateDisplay(): void {
 		const bgFn = this.isPartial
-			? (text: string) => theme.bg("toolPendingBg", text)
+			? ruleShell("accent")
 			: this.result?.isError
-				? (text: string) => theme.bg("toolErrorBg", text)
-				: (text: string) => theme.bg("toolSuccessBg", text);
+				? ruleShell("error")
+				: ruleShell("muted");
 
 		let hasContent = false;
 		this.hideComponent = false;

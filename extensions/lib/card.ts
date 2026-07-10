@@ -101,6 +101,75 @@ export function solidCard(opts: SolidCardOptions): string[] {
 	return out;
 }
 
+// ---------------------------------------------------------------------------
+// Forge components (pi-forge style): no background bands — a wordmark row and
+// a gradient "heat line" hairline that cools left to right (white-hot →
+// copper → steel → graphite). The hairline IS the frame.
+// ---------------------------------------------------------------------------
+
+/** Gradient color stops, hot → cold. */
+const HEAT_STOPS: Array<[number, number, number]> = [
+	[245, 240, 232], // white-hot
+	[226, 114, 91], // ember
+	[184, 115, 51], // copper
+	[138, 146, 153], // brushed steel
+	[58, 63, 69], // graphite
+];
+
+function lerpStops(t: number): [number, number, number] {
+	const scaled = Math.min(0.9999, Math.max(0, t)) * (HEAT_STOPS.length - 1);
+	const i = Math.floor(scaled);
+	const f = scaled - i;
+	const [r1, g1, b1] = HEAT_STOPS[i];
+	const [r2, g2, b2] = HEAT_STOPS[i + 1];
+	return [Math.round(r1 + (r2 - r1) * f), Math.round(g1 + (g2 - g1) * f), Math.round(b1 + (b2 - b1) * f)];
+}
+
+/**
+ * The heat line: a stepped hairline cooling left to right. Glyph density
+ * drops with the temperature (━ → ─ → ┄ → ·).
+ */
+export function heatLine(width: number): string {
+	if (width <= 0) return "";
+	let out = "";
+	for (let i = 0; i < width; i++) {
+		const t = i / Math.max(1, width - 1);
+		const [r, g, b] = lerpStops(t);
+		const glyph = t < 0.2 ? "━" : t < 0.55 ? "─" : t < 0.85 ? "┄" : "·";
+		out += `\x1b[38;2;${r};${g};${b}m${glyph}`;
+	}
+	return `${out}\x1b[39m`;
+}
+
+/** The copper accent used for forge glyphs/wordmarks. */
+export function copper(text: string): string {
+	return `\x1b[38;2;184;115;51m${text}\x1b[39m`;
+}
+
+export interface ForgeHeaderOptions {
+	width: number;
+	/** Bold wordmark (pre-colored or plain; plain gets the ember treatment). */
+	wordmark: string;
+	/** Pre-colored trailing content on the wordmark row (branch, dirty count…). */
+	suffix?: string;
+	/** Pre-colored body rows below the heat line. */
+	rows: string[];
+}
+
+/**
+ * A forge-style header block: `π wordmark  suffix`, a cooling heat line, then
+ * plain rows. No backgrounds, no borders — alignment and the hairline carry
+ * the shape.
+ */
+export function forgeHeader(opts: ForgeHeaderOptions): string[] {
+	const { width } = opts;
+	const mark = `${copper("π")} \x1b[1m${opts.wordmark}\x1b[22m`;
+	const head = opts.suffix ? `${mark}  ${opts.suffix}` : mark;
+	const out: string[] = [truncateToWidth(rtrimAnsi(head), width, "…"), heatLine(width)];
+	for (const row of opts.rows) out.push(truncateToWidth(rtrimAnsi(row), width, "…"));
+	return out;
+}
+
 export function cardLines(opts: CardOptions): string[] {
 	const { width, title, body, edge } = opts;
 	if (width < 24) {

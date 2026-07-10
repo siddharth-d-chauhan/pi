@@ -28,7 +28,7 @@ import {
 	onTeamChange,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { solidCard } from "./lib/card.ts";
+import { forgeHeader } from "./lib/card.ts";
 import { icon, onIconModeChange } from "./lib/icons.ts";
 
 const execFileAsync = promisify(execFile);
@@ -158,31 +158,29 @@ class DashboardHeader implements Component {
 		// One compact status row. The live team roster is the orchestra widget's
 		// job and the model already sits in the footer — repeating either here
 		// just duplicates chrome, so the card only carries what nothing else
-		// shows: a no-team hint, the chain count, and memory presence.
+		// shows: a no-team hint, the chain count, and memory presence. No emoji
+		// icons in dim rows: wide glyphs collide with text in some fonts.
 		const team = getActiveTeam();
 		const memoryBits = [
 			teamMemory ? "team ✓" : undefined,
 			agentMemoryTypes > 0 ? `${agentMemoryTypes} agent type${agentMemoryTypes === 1 ? "" : "s"}` : undefined,
 		].filter(Boolean);
 		const statusBits = [
-			team ? undefined : `${icon("team")} no team · /team apply <name>`,
-			chains.length > 0 ? `${icon("chain")} ${chains.length} chain${chains.length === 1 ? "" : "s"}` : undefined,
+			team ? undefined : "no team · /team apply <name>",
+			chains.length > 0 ? `${chains.length} chain${chains.length === 1 ? "" : "s"}` : undefined,
 			`memory: ${memoryBits.length > 0 ? memoryBits.join(" · ") : "none yet"}`,
 		].filter(Boolean);
 		body.push(theme.fg("dim", statusBits.join("  ·  ")));
+		body.push(theme.fg("dim", "ctrl+o help · / commands · /presets manage · /agents"));
 
-		const lines = solidCard({
+		// Forge-style header: wordmark + cooling heat line, no background bands.
+		const lines = forgeHeader({
 			width: Math.min(width, 100),
-			label,
-			labelStyle: (text) => theme.bg("selectedBg", theme.fg("accent", theme.bold(text))),
-			labelSuffix,
-			body,
-			bg: (text) => theme.bg("customMessageBg", text),
-			paddingX: 2,
-			paddingY: 1,
+			wordmark: label,
+			suffix: labelSuffix,
+			rows: body,
 		});
-		const hint = `  ${theme.fg("dim", "ctrl+o help · / commands · /presets manage · /agents")}`;
-		return ["", ...lines, hint, ""];
+		return ["", ...lines, ""];
 	}
 }
 

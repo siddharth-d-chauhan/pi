@@ -28,7 +28,11 @@ export class UserMessageComponent extends Container {
 
 	private rebuild(): void {
 		this.clear();
-		const contentBox = new Box(this.outputPad, 1, (content: string) => theme.bg("userMessageBg", content));
+		// omp-style shell: a colored left rule instead of a full-width background
+		// band. Padding is clamped to >=1 so the rule always replaces a padding
+		// column, never message content.
+		const rule = (content: string) => theme.fg("accent", "▎") + content.slice(1);
+		const contentBox = new Box(Math.max(1, this.outputPad), 1, rule);
 		contentBox.addChild(
 			new Markdown(
 				this.text,

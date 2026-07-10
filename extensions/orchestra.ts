@@ -24,7 +24,8 @@ import {
 	type TeamDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { solidCard } from "./lib/card.ts";
+import { truncateToWidth } from "@earendil-works/pi-tui";
+import { copper, rtrimAnsi } from "./lib/card.ts";
 import { icon, onIconModeChange } from "./lib/icons.ts";
 
 const WIDGET_KEY = "orchestra";
@@ -204,16 +205,10 @@ class OrchestraWidget implements Component {
 		}
 
 		if (lines.length === 0) return [];
-		// Solid component block: label chip + painted rows (omp style).
-		return solidCard({
-			width: Math.min(width, 100),
-			label: "orchestra",
-			labelStyle: (text) => theme.bg("selectedBg", theme.fg("accent", theme.bold(text))),
-			body: lines,
-			bg: (text) => theme.bg("toolPendingBg", text),
-			paddingX: 2,
-			paddingY: 0,
-		});
+		// omp-style: a copper left rule instead of a painted background band —
+		// consistent with the forge header and the tool/user message shells.
+		const w = Math.min(width, 100);
+		return lines.map((line) => `${copper("▎")} ${truncateToWidth(rtrimAnsi(line), w - 2, "…")}`);
 	}
 }
 

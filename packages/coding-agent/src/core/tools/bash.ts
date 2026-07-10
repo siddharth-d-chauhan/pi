@@ -44,7 +44,7 @@ const bashSchema = Type.Object({
 	run_in_background: Type.Optional(
 		Type.Boolean({
 			description:
-				"Run the command detached in the background instead of blocking. Returns immediately with a background id and an output file path; the command keeps running, its output streams to that file (Read it to inspect progress) and to the background tasks panel, and you receive a task-notification when it finishes. Use for long-running or watch commands (dev servers, builds, tails). Do not poll.",
+				"Run detached: returns immediately with an output file path (Read it for progress); a task-notification arrives on completion. For long-running commands (dev servers, builds, watchers). Do not poll.",
 		}),
 	),
 });
@@ -361,8 +361,7 @@ function sendSingleCompletion(host: BashBackgroundHost, it: PendingCompletion): 
 		`$ ${it.label}\n` +
 		(tail ? `--- last output ---\n${tail}\n` : "") +
 		`full output: ${it.outputPath}\n` +
-		"</task-notification>\n\n" +
-		`Background command finished. Read ${it.outputPath} for full output if needed. Do not re-run or poll.`;
+		"</task-notification>";
 	host
 		.sendCustomMessage(
 			{
@@ -398,8 +397,7 @@ function flushBatch(host: BashBackgroundHost, batch: HostBatch): void {
 	const text =
 		`<task-notification kind="shell" status="completed" count="${items.length}">\n` +
 		`${items.length} background commands completed:\n${lines.join("\n")}\n` +
-		"</task-notification>\n\n" +
-		"Read any of the listed output files if needed. Do not re-run or poll.";
+		"</task-notification>";
 	host
 		.sendCustomMessage(
 			{
@@ -627,7 +625,7 @@ export function createBashToolDefinition(
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. Set run_in_background to launch long-running commands (dev servers, builds, watchers) detached: the call returns immediately with an output file path, the command keeps running, and you get a task-notification when it finishes.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds, or run_in_background for long-running commands.`,
 		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
 		parameters: bashSchema,
 		async execute(
@@ -649,11 +647,8 @@ export function createBashToolDefinition(
 					host: options?.backgroundHost,
 				});
 				const text =
-					`Background command started (id: ${registryId}).\n` +
-					"It runs detached; this turn continues without waiting for it.\n" +
-					`Output streams to: ${outputPath}\n` +
-					"Read that file to inspect progress (it grows as the command runs). " +
-					"You'll receive a task-notification when it finishes — do not poll.";
+					`Background command started (id: ${registryId}). Output streams to: ${outputPath}\n` +
+					"Read that file for progress; a task-notification arrives on completion — do not poll.";
 				return { content: [{ type: "text", text }], details: { fullOutputPath: outputPath } };
 			}
 

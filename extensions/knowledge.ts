@@ -43,28 +43,29 @@ function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 /** Full-schema workhorses; everything else read-only goes behind knowledge_call.
- *  The pi.context_* phase tools are the plan's stable tool list (§18.2) — all
- *  mounted directly so the model never needs the proxy for a phase call.
+ *  Token discipline: every mounted tool ships its description+schema in EVERY
+ *  request, so only the genuinely hot, model-initiated tools mount directly —
+ *  pi_semantic_expand (the default recall), knowledge_search (deep fallback),
+ *  and the task/shift phase calls. Harness-driven phases (boot, before_action,
+ *  debug, coverage, gate) are invoked by extensions through the shared client
+ *  and need no model-facing mount; colder reads stay callable via the
+ *  knowledge_call proxy, paying their schema cost only when actually used.
  *  Mutations and broker-maintenance operations are intentionally absent: model
  *  tool calls must not be able to alter memory state or trigger reconciliation. */
-const CORE = new Set([
-	"knowledge_search",
-	"knowledge_code_search",
-	"knowledge_packet",
-	"pi_context_task",
-	"pi_context_code",
-	"pi_context_before_action",
-	"pi_context_debug",
-	"pi_context_pre_finish",
-	"pi_context_shift",
-	"pi_semantic_search",
-	"pi_semantic_expand",
-	"pi_knowledge_coverage",
-]);
+const CORE = new Set(["knowledge_search", "pi_context_task", "pi_context_shift", "pi_semantic_expand"]);
 
 /** pi-normalized names of the mountable KP surface (server uses dots). */
 const READ_ONLY = new Set([
 	...CORE,
+	// Demoted from direct mounts to the proxy (token discipline, see CORE):
+	"knowledge_code_search",
+	"knowledge_packet",
+	"pi_context_code",
+	"pi_context_before_action",
+	"pi_context_debug",
+	"pi_context_pre_finish",
+	"pi_semantic_search",
+	"pi_knowledge_coverage",
 	"pi_context_boot",
 	"pi_context_spawn",
 	"pi_pre_action_gate",

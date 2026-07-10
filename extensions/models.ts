@@ -92,10 +92,8 @@ export default function (pi: ExtensionAPI) {
 		name: "models",
 		label: "models",
 		description:
-			"List the models you can actually spawn subagents with, and what each supports: effort/thinking " +
-			"levels, context window, image input, cost. Use before choosing `model`/`effort` in the agent tool. " +
-			"Set include_unavailable to also see models you can't use (missing credentials) and reasoning_only " +
-			"to filter to models that support effort levels.",
+			"List available models and their capabilities (effort levels, context window, image input, cost). " +
+			"Use before choosing `model`/`effort` for a subagent.",
 		promptSnippet: "Discover available models + capabilities before choosing model/effort for a subagent",
 		parameters: modelsSchema,
 		async execute(_id: string, input: ModelsInput, _signal, _onUpdate, ctx) {

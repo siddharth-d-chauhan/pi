@@ -204,11 +204,8 @@ function renderBootBlock(packet: ContextPacket, coverage?: CoverageCard): string
 		"prompt). Apply silently: follow MUST FOLLOW, weigh advisories.",
 		...(coverageLine ? [coverageLine] : []),
 		...renderItems(items, BOOT_MAX_CHARS),
-		"Use pi_context_task for a scoped packet when starting non-trivial work;",
-		"use pi_context_shift when the user changes direction. For knowledge",
-		"questions, pi_semantic_expand is the default recall (exact + semantic +",
-		"ranked graph context, ~300ms); deep knowledge_search only for",
-		"multi-hop/temporal questions.",
+		"Recall: pi_semantic_expand (default), knowledge_search (deep/multi-hop).",
+		"Phases: pi_context_task at task start, pi_context_shift on direction change.",
 		"</knowledge-context>",
 	];
 	return lines.join("\n");

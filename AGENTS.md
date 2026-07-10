@@ -1,193 +1,62 @@
 # Development Rules
 
+Detail for rare workflows (releasing, PR review mechanics, tmux TUI testing, changelog format) lives in `docs/agents.md` — read the relevant section there before doing those tasks.
+
 ## Conversational Style
 
-- Keep answers short and concise
-- No emojis in commits, issues, PR comments, or code
-- No fluff or cheerful filler text (e.g., "Thanks @user" not "Thanks so much @user!")
-- Technical prose only, be direct
-- When the user asks a question, answer it first before making edits or running implementation commands.
-- When responding to user feedback or an analysis, explicitly say whether you agree or disagree before saying what you changed.
+- Short, direct, technical prose; no emojis in commits/issues/PRs/code; no fluff.
+- Answer the user's question first, before edits or commands.
+- When responding to feedback, say whether you agree or disagree before saying what you changed.
 
 ## Fork Maintenance
 
-This repo is a fork of `earendil-works/pi` (remote: `upstream`). Every change must stay mergeable with upstream pulls.
+Fork of `earendil-works/pi` (remote: `upstream`); every change must stay upstream-mergeable.
 
-- Prefer additive changes: new files, new providers, new components, and extension code (e.g. `packages/coding-agent/examples/extensions/pi-harness/`) over editing upstream files.
-- When an upstream file must be edited, keep the edit minimal and localized: add a small hook point that calls into a new file rather than restructuring existing code.
-- Never reformat, reorder, or rename anything in upstream files beyond what the change strictly requires.
-- Don't delete upstream files; disable via config instead where possible.
-- On merge conflicts in `*.generated.ts` files, take upstream's version and regenerate (per the generated-files rule below); never hand-merge them.
-- Keep local work committed in small, single-topic commits so upstream merges and conflict resolution stay tractable. Sync with `git fetch upstream && git merge upstream/main`.
-- Fixes that are not fork-specific should be candidates for upstream PRs to shrink the fork delta.
+- Prefer additive changes: new files, providers, components, extensions over editing upstream files. Upstream edits stay minimal and hook-sized; never reformat/reorder/rename beyond the change; never delete upstream files.
+- On `*.generated.ts` conflicts, take upstream and regenerate; never hand-merge.
+- Small single-topic commits; sync via `git fetch upstream && git merge upstream/main`. Non-fork-specific fixes are upstream-PR candidates.
 
-## Extensibility Principles
+## Extensibility
 
-Escalation ladder for new capability — use the lowest rung that works:
-1. A pi extension via the ExtensionAPI (`registerTool`/`registerCommand`/`registerShortcut`/`on`, `ctx.ui.setWidget`/`setFooter`/`custom`). Production extensions we actually run live in `/extensions` (repo root); teaching examples in `packages/coding-agent/examples/extensions/`. Import core read-APIs/singletons from `@earendil-works/pi-coding-agent` (shared module graph). Code already written into core should migrate here whenever the API can carry it.
-2. A new module/component in its own file, wired in with a one-line registration.
-3. A new generic seam in an upstream file (hook, optional field, action id) that the feature plugs into.
-4. Editing upstream logic in place — last resort; keep it hook-sized.
+Escalation ladder — lowest rung that works:
+1. Extension via ExtensionAPI (production extensions in `/extensions`; examples in `packages/coding-agent/examples/extensions/`). Import core read-APIs from `@earendil-works/pi-coding-agent` (shared module graph).
+2. New module/component in its own file, wired with a one-line registration.
+3. A generic seam in an upstream file (hook, optional field, action id) — one upstream would plausibly accept as a PR.
+4. Editing upstream logic in place — last resort, hook-sized.
 
-If a feature needs rung 4, first ask whether a rung-3 seam could carry it; a good seam is one upstream would plausibly accept as a PR.
-
-Seam design rules:
-- Seams are optional and undefined-safe: unset means exactly upstream behavior. Model: the editor edge-arrow hooks (`onDownArrowOnEmpty?: () => boolean` in custom-editor.ts) — caller falls through to default handling unless the hook returns true.
-- Feature logic never lives inside core loops (`TUI.render`, `Container`, event dispatch in interactive-mode). Core gains capabilities; features live at the edges. Core wiring is one line and lifecycle-safe (e.g. `this.loopWatchdog ??= new LoopWatchdog()` in `TUI.start()`).
-- New key behavior = a new action id registered in `KEYBINDINGS` / `TUI_KEYBINDINGS`, bound in the same onAction block as upstream's. Never rebind, repurpose, or remove an upstream action.
-- Theme/schema additions are optional keys with a fallback chain to an existing key (model: `pythonMode ?? bashMode`), so every existing theme file stays valid.
-- New settings are optional fields whose default reproduces upstream behavior, plus getter/setter on SettingsManager; never repurpose an existing field.
-- TUI components implement the `Component` interface and compose via `Container`; overlays/panels are self-contained components added to a container, never inlined into TUI internals.
-- New tui exports are appended to `packages/tui/src/index.ts` under their own comment block without reordering existing exports.
+Seam rules: optional and undefined-safe (unset = exact upstream behavior); feature logic never inside core loops (`TUI.render`, `Container`, interactive-mode dispatch); new keys = new action ids in `KEYBINDINGS`/`TUI_KEYBINDINGS`, never rebind upstream actions; theme/schema additions are optional keys with fallback to an existing key; new settings are optional fields defaulting to upstream behavior; TUI components implement `Component` and compose via `Container`; new tui exports append to `packages/tui/src/index.ts` without reordering.
 
 ## Code Quality
 
-- Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.
-- No `any` unless absolutely necessary.
-- Inline single-line helpers that have only one call site.
-- Check node_modules for external API types; don't guess.
-- **No inline imports** (`await import()`, `import("pkg").Type`, dynamic type imports). Top-level imports only.
-- Never remove or downgrade code to fix type errors from outdated deps; upgrade the dep instead.
-- Use only erasable TypeScript syntax (Node strip-only mode) in code checked by the root config (`packages/*/src`, `packages/*/test`, `packages/coding-agent/examples`): no parameter properties, `enum`, `namespace`/`module`, `import =`, `export =`, or other constructs needing JS emit. Use explicit fields with constructor assignments.
-- Always ask before removing functionality or code that appears intentional.
-- Do not preserve backward compatibility unless the user asks for it.
-- Never hardcode key checks (e.g. `matchesKey(keyData, "ctrl+x")`). Add defaults to `KEYBINDINGS` (packages/coding-agent/src/core/keybindings.ts) or `TUI_KEYBINDINGS` (packages/tui/src/keybindings.ts) so they stay configurable.
-- Never modify `packages/ai/src/models.generated.ts` directly; update `packages/ai/scripts/generate-models.ts` instead, then regenerate. Including the resulting `models.generated.ts` diff is always OK, even if regeneration includes unrelated upstream model metadata changes.
+- Read files in full before wide-ranging changes or audits; don't rely on search snippets.
+- No `any` unless necessary. No inline/dynamic imports — top-level only. Inline single-use one-line helpers. Check node_modules for external API types.
+- Only erasable TypeScript (Node strip-only) in root-config code: no parameter properties, `enum`, `namespace`, `import =`/`export =`.
+- Never remove/downgrade code to fix type errors from outdated deps; upgrade the dep. Ask before removing intentional-looking functionality. No backward compatibility unless asked.
+- Never hardcode key checks; add defaults to `KEYBINDINGS`/`TUI_KEYBINDINGS`.
+- Never edit `packages/ai/src/models.generated.ts` by hand; change `generate-models.ts` and regenerate (including the regenerated diff is always OK).
 
 ## Commands
 
-- After code changes (not docs): `npm run check` (full output, no tail). Fix all errors, warnings, and infos before committing. Does not run tests.
-- Never run `npm run build` or `npm test` unless requested by the user.
-- Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e tests, run `./test.sh` from the repo root. Otherwise run specific tests from the package root: `node ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`.
-- If you create or modify a test file, run it and iterate on test or implementation until it passes.
-- For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider. No real provider APIs, keys, or paid tokens.
-- Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` named `<issue-number>-<short-slug>.test.ts`.
-- For ad-hoc scripts, `write` them to a temp file (e.g. `/tmp`), run, edit if needed, remove when done. Don't embed multi-line scripts in `bash` commands.
-- Never commit unless the user asks.
+- After code changes (not docs): `npm run check` (full output); fix all errors/warnings/infos before committing. Never `npm run build` or `npm test` unless asked.
+- Never run the full vitest suite (it has env-gated e2e tests). Use `./test.sh` from repo root, or specific tests: `node ../../node_modules/vitest/dist/cli.js --run test/x.test.ts` from the package root.
+- New/modified test files: run and iterate until green. `test/suite/` uses `harness.ts` + the faux provider (no real APIs/keys). Issue regressions go in `test/suite/regressions/<issue>-<slug>.test.ts`.
+- Ad-hoc scripts: write to a temp file, run, remove. Never commit unless the user asks.
 
-## Dependency and Install Security
+## Dependencies
 
-- Treat npm dep and lockfile changes as reviewed code. Direct external deps stay pinned to exact versions.
-- Hydrate/update locally with `npm install --ignore-scripts`; clean/CI-style with `npm ci --ignore-scripts`. Don't run lifecycle scripts unless the user asks.
-- If dep metadata changes, refresh `package-lock.json` with `npm install --package-lock-only --ignore-scripts`.
-- If `packages/coding-agent/npm-shrinkwrap.json` needs regen, run `node scripts/generate-coding-agent-shrinkwrap.mjs` (verify with `--check` or `npm run check`). New deps with lifecycle scripts require review and an explicit allowlist entry in that script; never add one silently.
-- Pre-commit blocks lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1`. Don't bypass unless the user wants the lockfile change committed.
+- Deps/lockfiles are reviewed code; direct deps stay exact-pinned. Install with `--ignore-scripts` (`npm install` / `npm ci`); lockfile-only refresh via `npm install --package-lock-only --ignore-scripts`.
+- Shrinkwrap regen: `node scripts/generate-coding-agent-shrinkwrap.mjs`; new deps with lifecycle scripts need review + explicit allowlist there.
+- Pre-commit blocks lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1`; don't bypass unless the user wants the lockfile committed.
 
 ## Git
 
-Multiple pi sessions may be running in this cwd at the same time, each modifying different files. Git operations that touch unstaged, staged, or untracked files outside your own changes will stomp on other sessions' work. Follow these rules:
+Multiple pi sessions may share this cwd; touching files outside your own changes stomps their work.
 
-Committing:
-
-- Only commit files YOU changed in THIS session.
-- Stage explicit paths (`git add <path1> <path2>`); never `git add -A` / `git add .`.
-- Before committing, run `git status` and verify you are only staging your files.
-- `packages/ai/src/models.generated.ts` may always be included alongside your files.
-- Message format: `{feat,fix,docs}[(ai,tui,agent,coding-agent)]: <commit message> (optionally multiple lines)`. Message is informative and concise.
-
-Never run (destroys other agents' work or bypasses checks):
-
-- `git reset --hard`, `git checkout .`, `git clean -fd`, `git stash`, `git add -A`, `git add .`, `git commit --no-verify`.
-
-If rebase conflicts occur:
-
-- Resolve conflicts only in files you modified.
-- If a conflict is in a file you did not modify, abort and ask the user.
-- Never force push.
-
-## Issues and PRs
-
-See `CONTRIBUTING.md` for the contributor gate (auto-close workflows, `lgtm`/`lgtmi`, quality bar).
-
-When reviewing PRs:
-
-- Do not run `gh pr checkout`, `git switch`, or otherwise move the worktree to the PR branch unless the user explicitly asks.
-- Use `gh pr view`, `gh pr diff`, `gh api`, and local `git show`/`git diff` against fetched refs to inspect PR metadata, commits, and patches without changing branches.
-- If you need PR file contents, fetch/read them into temporary files or use `git show <ref>:<path>` without switching branches.
-
-When creating issues:
-
-- Add `pkg:*` labels for affected packages (`pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:tui`); use all that apply.
-
-When posting issue/PR comments:
-
-- Write the comment to a temp file and post with `gh issue/pr comment --body-file` (never multi-line markdown via `--body`).
-- Keep comments concise, technical, in the user's tone.
-- End every AI-posted comment with the AI-generated disclaimer line specified by the originating prompt (e.g. `This comment is AI-generated by `/wr``).
-
-When closing issues via commit:
-
-- Include `fixes #<number>` or `closes #<number>` in the message so merging auto-closes the issue. For multiple issues, repeat the keyword per issue (`closes #1, closes #2`); a shared keyword (`closes #1, #2`) only closes the first.
-
-## Testing pi Interactive Mode with tmux
-
-Run the TUI in a controlled terminal (from the repo root):
-
-```bash
-tmux new-session -d -s pi-test -x 80 -y 24
-tmux send-keys -t pi-test "./pi-test.sh" Enter
-sleep 3 && tmux capture-pane -t pi-test -p     # capture after startup
-tmux send-keys -t pi-test "your prompt here" Enter
-tmux send-keys -t pi-test Escape               # special keys (also C-o for ctrl+o, etc.)
-tmux kill-session -t pi-test
-```
-
-## Changelog
-
-Location: `packages/*/CHANGELOG.md` (one per package).
-
-Sections under `## [Unreleased]`: `### Breaking Changes` (API changes requiring migration), `### Added`, `### Changed`, `### Fixed`, `### Removed`.
-
-Rules:
-
-- All new entries go under `## [Unreleased]`. Read the full section first and append to existing subsections; never duplicate them.
-- Released version sections (e.g. `## [0.12.2]`) are immutable; never modify them.
-
-Attribution:
-
-- Internal (from issues): `Fixed foo bar ([#123](https://github.com/earendil-works/pi-mono/issues/123))`
-- External contributions: `Added feature X ([#456](https://github.com/earendil-works/pi-mono/pull/456) by [@username](https://github.com/username))`
-
-## Releasing
-
-**Lockstep versioning**: all packages share one version; every release updates all together. `patch` = fixes + additions, `minor` = breaking changes. No major releases.
-
-1. **Update CHANGELOGs**: ask the user whether they ran the `/cl` prompt on the latest commit on `main`. If not, they must run `/cl` first to audit and update each package's `[Unreleased]` section before releasing.
-
-2. **Local smoke test**: build an unpublished release and smoke test from outside the repo (so it can't resolve workspace files):
-   ```bash
-   npm run release:local -- --out /tmp/pi-local-release --force
-   cd /tmp
-
-   # Node package install smoke tests
-   /tmp/pi-local-release/node/pi --help
-   /tmp/pi-local-release/node/pi --version
-   /tmp/pi-local-release/node/pi --list-models
-   /tmp/pi-local-release/node/pi -p "Say exactly: ok"
-   /tmp/pi-local-release/node/pi
-
-   # Bun binary smoke tests
-   /tmp/pi-local-release/bun/pi --help
-   /tmp/pi-local-release/bun/pi --version
-   /tmp/pi-local-release/bun/pi --list-models
-   /tmp/pi-local-release/bun/pi -p "Say exactly: ok"
-   /tmp/pi-local-release/bun/pi
-   ```
-   Verify both Node and Bun startup, model/account listing, interactive startup, and at least one real prompt with the intended default provider. The bare commands `/tmp/pi-local-release/node/pi` and `/tmp/pi-local-release/bun/pi` start interactive mode; run each in tmux, submit a prompt, and wait for the model reply before considering the interactive smoke test passed. Failures are release blockers unless the user explicitly accepts the risk.
-
-3. **Run the release script**:
-   ```bash
-   PI_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:patch    # fixes + additions
-   PI_ALLOW_LOCKFILE_CHANGE=1 npm_config_min_release_age=0 npm run release:minor    # breaking changes
-   ```
-   Use `npm_config_min_release_age=0` only for the release command. The repo's normal npm age gate can otherwise block the release lockfile refresh when the current workspace package version was published recently. Review any lockfile or shrinkwrap diffs the release creates before push.
-
-   The release script bumps all package versions, updates changelogs, regenerates release artifacts, runs `npm run check`, commits `Release vX.Y.Z`, tags `vX.Y.Z`, adds fresh `## [Unreleased]` changelog sections, commits `Add [Unreleased] section for next cycle`, then pushes `main` and the tag. Do not rerun the release script after a tag was pushed.
-
-4. **CI publishes npm packages**: pushing the `vX.Y.Z` tag triggers `.github/workflows/build-binaries.yml`. The `publish-npm` job uses npm trusted publishing through GitHub Actions OIDC with environment `npm-publish`; no local `npm publish`, `npm whoami`, OTP, or WebAuthn flow is required.
-
-5. **If CI publish fails**: inspect the failed `publish-npm` job. The publish helper is idempotent and skips package versions already present on npm, so rerun the tag workflow after fixing CI or transient npm issues. Do not rerun `npm run release:patch` or `npm run release:minor` for the same version.
+- Commit only files YOU changed this session; stage explicit paths — never `git add -A` / `git add .`; verify with `git status` first. `models.generated.ts` may ride along.
+- Message format: `{feat,fix,docs}[(ai,tui,agent,coding-agent)]: <message>`, informative and concise.
+- Never: `git reset --hard`, `git checkout .`, `git clean -fd`, `git stash`, `git commit --no-verify`, force push.
+- Rebase conflicts: resolve only in files you modified; otherwise abort and ask.
 
 ## User Override
 
-If the user's instructions conflict with any rule in this document, ask for explicit confirmation before overriding. Only then execute their instructions.
+If the user's instructions conflict with any rule here, ask for explicit confirmation before overriding. Only then execute their instructions.

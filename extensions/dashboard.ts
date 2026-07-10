@@ -137,7 +137,7 @@ class DashboardHeader implements Component {
 
 	private renderCard(width: number): string[] {
 		const theme = this.theme;
-		const { repo, chains, modelId, teamMemory, agentMemoryTypes } = this.data;
+		const { repo, chains, teamMemory, agentMemoryTypes } = this.data;
 
 		const label = basename(this.data.cwd) || shortPath(this.data.cwd);
 		let labelSuffix = "";
@@ -155,31 +155,21 @@ class DashboardHeader implements Component {
 			);
 		}
 
+		// One compact status row. The live team roster is the orchestra widget's
+		// job and the model already sits in the footer — repeating either here
+		// just duplicates chrome, so the card only carries what nothing else
+		// shows: a no-team hint, the chain count, and memory presence.
 		const team = getActiveTeam();
-		if (team) {
-			const members = Object.keys(team.members);
-			const roster = members.length > 0 ? ` — lead + ${members.join(", ")}` : " (routing only)";
-			body.push(
-				`${theme.fg("accent", icon("team"))} ${theme.fg("text", `team ${theme.bold(team.name)}`)}${theme.fg("dim", roster)}`,
-			);
-		} else {
-			body.push(`${theme.fg("dim", `${icon("team")} no team active · /team apply <name>`)}`);
-		}
-
-		if (chains.length > 0) {
-			body.push(
-				`${theme.fg("accent", icon("chain"))} ${theme.fg("muted", "chains")} ${theme.fg("dim", chains.join(" "))}`,
-			);
-		}
-
 		const memoryBits = [
 			teamMemory ? "team ✓" : undefined,
 			agentMemoryTypes > 0 ? `${agentMemoryTypes} agent type${agentMemoryTypes === 1 ? "" : "s"}` : undefined,
 		].filter(Boolean);
-		const memory = memoryBits.length > 0 ? memoryBits.join(" · ") : "none yet";
-		body.push(
-			`${theme.fg("accent", icon("model"))} ${theme.fg("text", modelId ?? "no model")} ${theme.fg("dim", `· memory: ${memory}`)}`,
-		);
+		const statusBits = [
+			team ? undefined : `${icon("team")} no team · /team apply <name>`,
+			chains.length > 0 ? `${icon("chain")} ${chains.length} chain${chains.length === 1 ? "" : "s"}` : undefined,
+			`memory: ${memoryBits.length > 0 ? memoryBits.join(" · ") : "none yet"}`,
+		].filter(Boolean);
+		body.push(theme.fg("dim", statusBits.join("  ·  ")));
 
 		const lines = solidCard({
 			width: Math.min(width, 100),

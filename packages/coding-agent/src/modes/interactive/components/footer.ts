@@ -229,21 +229,31 @@ export class FooterComponent implements Component {
 		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
 		const dimRemainder = theme.fg("dim", remainder);
 
-		const pwdLine = truncateToWidth(
-			theme.getStatusLineColor("path")(pwd),
-			width,
-			theme.getStatusLineColor("sep")("..."),
-		);
-		const lines = [pwdLine, dimStatsLeft + dimRemainder];
-
-		// Add extension statuses on a single line, sorted by key alphabetically
+		// Extension statuses, sorted by key alphabetically. Folded into the pwd
+		// line's (mostly empty) right side to keep the footer at two rows; falls
+		// back to its own line only when the terminal is too narrow.
 		const extensionStatuses = this.footerData.getExtensionStatuses();
+		let statusLine = "";
 		if (extensionStatuses.size > 0) {
-			const sortedStatuses = Array.from(extensionStatuses.entries())
+			statusLine = Array.from(extensionStatuses.entries())
 				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([, text]) => sanitizeStatusText(text));
-			const statusLine = sortedStatuses.join(" ");
-			// Truncate to terminal width with dim ellipsis for consistency with footer style
+				.map(([, text]) => sanitizeStatusText(text))
+				.join(" ");
+		}
+
+		const pwdColored = theme.getStatusLineColor("path")(pwd);
+		const pwdWidth = visibleWidth(pwd);
+		let pwdLine: string;
+		let statusFits = false;
+		if (statusLine && pwdWidth + minPadding + visibleWidth(statusLine) <= width) {
+			const padding = " ".repeat(width - pwdWidth - visibleWidth(statusLine));
+			pwdLine = pwdColored + padding + theme.fg("dim", statusLine);
+			statusFits = true;
+		} else {
+			pwdLine = truncateToWidth(pwdColored, width, theme.getStatusLineColor("sep")("..."));
+		}
+		const lines = [pwdLine, dimStatsLeft + dimRemainder];
+		if (statusLine && !statusFits) {
 			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
 		}
 

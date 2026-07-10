@@ -23,6 +23,24 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const KP_DIR = process.env.PI_KP_DIR ?? "/home/siddharth/vault/tools/knowledge-platform";
 const KP_CALL_TIMEOUT_MS = Number(process.env.PI_KP_TIMEOUT_MS ?? 30_000);
+const KP_CONNECT_TIMEOUT_MS = Number(process.env.PI_KP_CONNECT_TIMEOUT_MS ?? 8_000);
+
+/** Reject if `p` does not settle within `ms` — so a hung connect can't wedge a phase. */
+function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+		p.then(
+			(v) => {
+				clearTimeout(timer);
+				resolve(v);
+			},
+			(e) => {
+				clearTimeout(timer);
+				reject(e);
+			},
+		);
+	});
+}
 
 /** Full-schema workhorses; everything else read-only goes behind knowledge_call.
  *  The pi.context_* phase tools are the plan's stable tool list (§18.2) — all
@@ -86,20 +104,53 @@ function loadServerSpec(): { command: string; args: string[]; env?: Record<strin
 
 export default function (pi: ExtensionAPI) {
 	let client: Client | undefined;
+	let connecting: Promise<Client> | undefined;
+	// Bumped whenever we intentionally drop the client (transport death or
+	// shutdown) so a stale close can't evict a newer connection.
+	let generation = 0;
 
 	async function connect(): Promise<Client> {
 		if (client) return client;
-		const spec = loadServerSpec();
-		const transport = new StdioClientTransport({
-			command: join(KP_DIR, spec.command),
-			args: spec.args,
-			cwd: KP_DIR,
-			env: { ...process.env, ...spec.env } as Record<string, string>,
-		});
-		const c = new Client({ name: "pi-fork", version: "0.1.0" });
-		await c.connect(transport);
-		client = c;
-		return c;
+		// Coalesce concurrent first-connects onto a single transport.
+		if (connecting) return connecting;
+		const myGen = ++generation;
+		connecting = (async () => {
+			const spec = loadServerSpec();
+			const transport = new StdioClientTransport({
+				command: join(KP_DIR, spec.command),
+				args: spec.args,
+				cwd: KP_DIR,
+				env: { ...process.env, ...spec.env } as Record<string, string>,
+			});
+			const c = new Client({ name: "pi-fork", version: "0.1.0" });
+			// PI-07: a dead transport must not be cached forever — drop the client
+			// on close/error so the next call reconnects. Generation-guarded so a
+			// stale close can't evict a newer replacement.
+			const drop = () => {
+				if (generation === myGen) client = undefined;
+			};
+			c.onclose = drop;
+			c.onerror = drop;
+			// PI-06: bound the connect itself, not just per-request calls; close a
+			// half-open transport if it wedges.
+			try {
+				await withDeadline(c.connect(transport), KP_CONNECT_TIMEOUT_MS, "kp connect");
+			} catch (err) {
+				try {
+					await transport.close();
+				} catch {
+					// best-effort cleanup of the half-open transport
+				}
+				throw err;
+			}
+			client = c;
+			return c;
+		})();
+		try {
+			return await connecting;
+		} finally {
+			connecting = undefined;
+		}
 	}
 
 	// Shared channel for context-broker.ts (and future consumers): one KP
@@ -108,6 +159,21 @@ export default function (pi: ExtensionAPI) {
 		connect,
 		timeoutMs: KP_CALL_TIMEOUT_MS,
 	} satisfies KpShared;
+
+	// PI-08: close the owned MCP process on shutdown/reload so it doesn't leak,
+	// bumping the generation so a late transport close can't evict a replacement
+	// created by a subsequent session.
+	pi.on("session_shutdown", async () => {
+		const c = client;
+		client = undefined;
+		connecting = undefined;
+		generation++;
+		try {
+			await c?.close();
+		} catch {
+			// best-effort teardown
+		}
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		let tools: Array<{ name: string; description?: string; inputSchema: unknown }>;

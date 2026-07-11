@@ -1,0 +1,50 @@
+{
+  "_comment": "Wave-0 seed edit suite. Each task is a self-contained edit against `file` content. `oldString`/`newString` are what a builtin str-replace edit must emit; hashline emits two 3-char anchors + newString instead. `expect` is the file content after a correct apply. Deterministic lane needs no model.",
+  "tasks": [
+    {
+      "name": "replace-function-body",
+      "file": "src/util.ts",
+      "content": "export function slugify(s: string): string {\n  return s.toLowerCase().replace(/\\s+/g, \"-\");\n}\n\nexport function pad(n: number): string {\n  return String(n).padStart(2, \"0\");\n}\n",
+      "oldString": "export function slugify(s: string): string {\n  return s.toLowerCase().replace(/\\s+/g, \"-\");\n}",
+      "newString": "export function slugify(s: string): string {\n  return s.trim().toLowerCase().replace(/[^a-z0-9]+/g, \"-\").replace(/^-|-$/g, \"\");\n}",
+      "startLine": 1,
+      "endLine": 3
+    },
+    {
+      "name": "change-config-value",
+      "file": "config.ts",
+      "content": "export const config = {\n  host: \"localhost\",\n  port: 3000,\n  timeoutMs: 5000,\n  retries: 3,\n};\n",
+      "oldString": "  timeoutMs: 5000,",
+      "newString": "  timeoutMs: 30000,",
+      "startLine": 4,
+      "endLine": 4
+    },
+    {
+      "name": "insert-import",
+      "file": "app.ts",
+      "content": "import { readFile } from \"node:fs/promises\";\nimport { join } from \"node:path\";\n\nexport async function load(p: string) {\n  return readFile(join(process.cwd(), p), \"utf-8\");\n}\n",
+      "oldString": "import { join } from \"node:path\";",
+      "newString": "import { join } from \"node:path\";\nimport { existsSync } from \"node:fs\";",
+      "startLine": 2,
+      "endLine": 2
+    },
+    {
+      "name": "delete-dead-branch",
+      "file": "handler.ts",
+      "content": "export function handle(x: number): string {\n  if (x < 0) {\n    // legacy negative path — no longer reachable\n    return \"neg\";\n  }\n  return x === 0 ? \"zero\" : \"pos\";\n}\n",
+      "oldString": "  if (x < 0) {\n    // legacy negative path — no longer reachable\n    return \"neg\";\n  }\n",
+      "newString": "",
+      "startLine": 2,
+      "endLine": 5
+    },
+    {
+      "name": "rewrite-large-block",
+      "file": "parse.ts",
+      "content": "export function parseRange(s: string): [number, number] {\n  const parts = s.split(\"-\");\n  const a = Number(parts[0]);\n  const b = Number(parts[1]);\n  if (Number.isNaN(a) || Number.isNaN(b)) {\n    throw new Error(\"bad range\");\n  }\n  return [a, b];\n}\n",
+      "oldString": "  const parts = s.split(\"-\");\n  const a = Number(parts[0]);\n  const b = Number(parts[1]);\n  if (Number.isNaN(a) || Number.isNaN(b)) {\n    throw new Error(\"bad range\");\n  }\n  return [a, b];",
+      "newString": "  const m = /^(\\d+)-(\\d+)$/.exec(s.trim());\n  if (!m) throw new Error(`bad range: ${s}`);\n  const a = Number(m[1]);\n  const b = Number(m[2]);\n  if (a > b) throw new Error(`inverted range: ${s}`);\n  return [a, b];",
+      "startLine": 2,
+      "endLine": 8
+    }
+  ]
+}

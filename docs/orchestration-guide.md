@@ -52,6 +52,34 @@ layer (model routing presets, saved personas) but are NOT part of the
 orchestration architecture — don't combine them with loops, and prefer
 prompt-based collaboration for new work.
 
+## Designing for loops (the primary tool)
+
+A loop is only as good as its verification — design effort goes there first.
+
+1. **Criteria over goal.** The goal is one line; the criteria are the contract.
+   A criterion is good iff its `verify` is a command whose output settles it.
+   Can't name the verify command → the loop can't verify it → trust-me loop.
+   Glance at criteria.json after round 0; one steer there saves five rounds.
+2. **Gate-first.** devbrain gate > criteria commands > review > judgment.
+   For product work: seed blocks → get the gate running (red-for-the-right-
+   reason counts) → then `/loop <goal> orchestrate gate=X`. A gated loop
+   cannot lie about being done.
+3. **One round = one honest increment.** Budget `rounds ≈ criteria + 2`.
+   Needing rounds=15 means it's two loops or a chain-then-loop.
+4. **Route by path-knowledge.** Known steps → chain. Unknown steps +
+   verifiable outcome → loop. Unverifiable outcome → work interactively until
+   done-ness is definable; a loop on an unverifiable goal burns budget
+   looking busy.
+5. **Steer like an operator.** Notes are constraints and answers to `blocked`,
+   not conversation. Steering every round = underspecified goal: kill, fix,
+   relaunch (criteria.json survives; round 0 is skipped).
+6. **Cheap models inside, strong verification outside.** More rounds on cheap
+   workers with a hard gate beats fewer rounds on expensive models without
+   one — the gate converts rounds into quality.
+
+Canonical launch:
+`/loop ship-csv-export rounds=6 orchestrate gate=export-smoke rmodel=pi/smol`
+
 ## Known non-overlaps that look like overlaps
 
 - Chain `verify`/`judge`/`max_iters` is a *stage-local* retry — not a loop.

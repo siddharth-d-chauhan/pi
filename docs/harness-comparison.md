@@ -32,10 +32,10 @@ file paths in the per-harness sections below.
 | Runtime | Bun/TS + Effect | Bun/TS + **Rust core** | Node/TS + ink | Bun/TS (pi base) |
 | Architecture | **client-server + SDKs** | monolith TUI | monolith TUI | monolith TUI + MCP memory svc |
 | Core loop | gather→act (no verify) | gather→act + advisor | gather→act (coordinator) | **gather→act→verify (loop)** |
-| Edit strategy | search-replace + patch | **AST (tree-sitter) + hash-anchored** | line-based | line/anchor (pi) |
+| Edit strategy | **9-strategy fuzzy replacer + patch** | **AST (tree-sitter) + hash-anchored** | line-based | line/anchor (pi) |
 | Orchestration | 1-level task delegation | **YAML swarm DAG** | **coordinator + workers** | **verified loop + chains** |
 | Subagent isolation | child session | **CoW fs clone (8 backends)** | worktree/remote/**fork** | worktree (via agent tool) |
-| Memory | ✗ (instruction files) | **mnemopi (research-grade) + 3 more** | auto-dream + memdir | **KP governed graph + full taxonomy** |
+| Memory | ✗ (instruction files) | **mnemopi (research-grade) + 3 more** | 5 subsystems (memdir/dream/extract/session/team-sync) | **KP governed graph + full taxonomy** |
 | Memory retrieval | lexical only | **4-voice RRF + hybrid + graph** | file recall | hot-FTS + semantic + graph, `/recall` |
 | Compaction | structured summary | **snapcompact (bitmap images)** | microcompact | pi built-in + topic/scope gating |
 | Extensibility | ~20 hooks + code-mode | unified ext + marketplace | hooks + skills + MCP | 34 exts + MCP + slash-seam |
@@ -111,9 +111,12 @@ Area-drift context injection with cross-channel dedup and KV-cache discipline.
    severity-tagged advice complements our loop review (which only fires on done-claims). A
    continuous critic catches drift mid-work. We have the steer/context seams already; this is
    an extension, ~a day. Reuse our diverse-model + governed patterns.
-4. **doom-loop guard (from opencode).** Same tool + identical input repeated → intervene.
-   Trivial to add to our tool_call hook; prevents the exact thrash our loop budget currently
-   only catches at round granularity. **Cheapest win on the list.**
+4. **doom-loop guard + bash arity-permissioning (from opencode).** Two cheap safety guards:
+   (a) same tool + identical input repeated → intervene (trivial in our tool_call hook;
+   catches thrash our loop budget only sees at round granularity — **cheapest win**);
+   (b) arity-permissioning extracts the human-meaningful command prefix (`git status` vs
+   `git push` — an LLM-generated arity dictionary, longest-prefix-wins) so allow/deny is
+   per-subcommand not per-opaque-string — a real upgrade to our KP pre-action gate.
 
 ### Tier 2 — valuable, more effort or narrower
 

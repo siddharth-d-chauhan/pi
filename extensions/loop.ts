@@ -2,11 +2,15 @@
  * Loop Extension — Ralph-style verify-loops that are VISIBLE and STEERABLE
  * inside pi, like subagents:
  *
- *   /loop <goal-capability> [rounds=5]     e.g. /loop smoke-tested rounds=3
- *   /loop <goal> orchestrate [gate=cap] [rmodel=<model>] [review=off] [criteria=off]
- *   /loop resume [<goal>]                  re-attach after a pi restart
- *   /loop status [<goal>]                  rich in-chat panel (criteria ✓/✗, verdicts)
- *   loop_run tool — the model can launch the same loops.
+ *   /loop <goal>                 ONE command: orchestrated loop, defaults from
+ *                                <repo>/.pi/loop.json (gate/reviewModel/rounds),
+ *                                budget auto-sized to criteria+2 when rounds
+ *                                is not given. Overrides: rounds= gate= rmodel=
+ *                                review=off criteria=off
+ *   /loop verify <capability>    devbrain-gated retry loop (typed triage)
+ *   /loop resume [<goal>]        re-attach after a pi restart
+ *   /loop status [<goal>]        rich in-chat panel (criteria ✓/✗, verdicts)
+ *   loop_run tool — the model can launch the same loops (orchestrate default).
  *
  * The loop registers in the BackgroundProcessRegistry (the same roster the
  * agent hub shows): every round streams into the live log, `x` kills it,
@@ -67,6 +71,37 @@ const DEVBRAIN_ROOT = process.env.PI_DEVBRAIN_ROOT ?? `${process.env.HOME}/vault
 const DEFAULT_REPO = process.env.PI_DEVBRAIN_REPO ?? `${process.env.HOME}/projects/dev/automations/testing-automations`;
 const ROUND_TIMEOUT_MS = Number(process.env.PI_LOOP_ROUND_TIMEOUT_MS ?? 900_000);
 const MAX_ENV_DETOURS = 3;
+const DEFAULT_ROUNDS = 5;
+/** Auto-budget bounds: rounds = criteria + 2, clamped. */
+const AUTO_BUDGET_MIN = 3;
+const AUTO_BUDGET_MAX = 10;
+
+/** Per-repo launch defaults (<repo>/.pi/loop.json) so `/loop <goal>` alone is a
+ *  complete launch: {"gate": "smoke-tested", "reviewModel": "pi/smol",
+ *  "rounds": 6, "review": true, "criteria": true} — all keys optional. */
+function loadLoopDefaults(cwd: string): {
+	gate?: string;
+	reviewModel?: string;
+	rounds?: number;
+	review?: boolean;
+	criteria?: boolean;
+} {
+	try {
+		const parsed = JSON.parse(readFileSync(`${cwd}/.pi/loop.json`, "utf-8"));
+		if (parsed && typeof parsed === "object") {
+			return {
+				gate: typeof parsed.gate === "string" ? parsed.gate : undefined,
+				reviewModel: typeof parsed.reviewModel === "string" ? parsed.reviewModel : undefined,
+				rounds: typeof parsed.rounds === "number" ? parsed.rounds : undefined,
+				review: typeof parsed.review === "boolean" ? parsed.review : undefined,
+				criteria: typeof parsed.criteria === "boolean" ? parsed.criteria : undefined,
+			};
+		}
+	} catch {
+		// no defaults file — built-ins apply
+	}
+	return {};
+}
 
 interface LoopHandle {
 	steers: string[];
@@ -284,6 +319,8 @@ interface OrchestratedLoop {
 	/** Exactly-once guard: a loop journals on its FIRST terminal event only
 	 *  (complete, or kill) — a later kill of an already-finished loop is a no-op. */
 	recorded: boolean;
+	/** No explicit rounds given: size the budget to criteria + 2 after round 0. */
+	autoBudget: boolean;
 	/** Verdict history for the status panel (bounded). */
 	verdicts: Array<{ round: number; verdict: string; summary: string; took: number }>;
 	/** git HEAD at loop start — the reviewer diffs against this. */
@@ -671,6 +708,8 @@ async function startOrchestration(
 		review?: boolean;
 		criteria?: boolean;
 		reviewModel?: string;
+		/** No explicit rounds: auto-size the budget to criteria + 2 after round 0. */
+		autoBudget?: boolean;
 		/** Resume: restore round/notes/baseline from a prior run's state.json. */
 		restore?: {
 			round: number;
@@ -732,6 +771,7 @@ async function startOrchestration(
 		baselineSteps: loadBaselineSteps(opts.cwd),
 		promptVersion: currentPromptVersion(loadBaselineSteps(opts.cwd)),
 		recorded: false,
+		autoBudget: opts.autoBudget === true && opts.restore === undefined,
 		verdicts: [],
 		baseline,
 		roundStartedAt: 0,
@@ -1201,6 +1241,13 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 		const items = readCriteria(loop.dir);
 		if (items) {
 			registry.appendLog(loop.id, `criteria defined (${took}s): ${items.map((c) => c.id).join(", ")}`);
+			// Auto-budget (the design doctrine, encoded): one round per criterion
+			// plus integration plus the review cycle — only when the user gave
+			// no explicit rounds.
+			if (loop.autoBudget) {
+				loop.budget = Math.min(AUTO_BUDGET_MAX, Math.max(AUTO_BUDGET_MIN, items.length + 2));
+				registry.appendLog(loop.id, `budget auto-sized: ${loop.budget} rounds (${items.length} criteria + 2)`);
+			}
 			nextRound(pi, loop);
 			return;
 		}
@@ -1335,7 +1382,7 @@ const loopSchema = Type.Object({
 			type: "string",
 			enum: ["verify", "orchestrate"],
 			description:
-				"verify = devbrain-gated retry loop; orchestrate = LLM decides each round, dispatches fresh-context workers",
+				"orchestrate (DEFAULT) = LLM decides each round, dispatches fresh-context workers; verify = devbrain-gated retry loop",
 		}),
 	),
 	gate: Type.Optional(
@@ -1553,16 +1600,20 @@ export default function (pi: ExtensionAPI) {
 			const notify = (text: string, level: "info" | "warning" | "error") => {
 				(ctx as { ui?: { notify?: (t: string, l: string) => void } })?.ui?.notify?.(text, level);
 			};
-			if (input.mode === "orchestrate") {
+			// Orchestrate is the DEFAULT (matches /loop); verify is explicit.
+			if (input.mode !== "verify") {
+				const cwd = (ctx as { cwd?: string })?.cwd ?? process.cwd();
+				const defaults = loadLoopDefaults(cwd);
 				const msg = await startOrchestration(pi, {
 					goal: input.goal,
-					rounds: Math.max(1, input.rounds ?? 5),
-					cwd: (ctx as { cwd?: string })?.cwd ?? process.cwd(),
-					gate: input.gate,
+					rounds: Math.max(1, input.rounds ?? defaults.rounds ?? DEFAULT_ROUNDS),
+					autoBudget: input.rounds === undefined && defaults.rounds === undefined,
+					cwd,
+					gate: input.gate ?? defaults.gate,
 					repo: input.repo,
-					review: input.review,
-					criteria: input.criteria,
-					reviewModel: input.reviewModel,
+					review: input.review ?? defaults.review,
+					criteria: input.criteria ?? defaults.criteria,
+					reviewModel: input.reviewModel ?? defaults.reviewModel,
 					notify,
 				});
 				return { content: [{ type: "text", text: msg }], details: undefined };
@@ -1595,14 +1646,16 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("loop", {
 		description:
-			"Steerable loops: /loop <goal> [rounds=5] [orchestrate] [gate=cap] [rmodel=<model>] [review=off] [criteria=off] | /loop resume [<goal>] | /loop status [<goal>] | /loop optimize [apply]",
+			"/loop <goal> — orchestrated loop with smart defaults (.pi/loop.json, auto rounds). Also: verify <cap> | resume [<goal>] | status [<goal>] | optimize [apply]; flags rounds= gate= rmodel= review=off criteria=off",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const raw = (args ?? "").trim();
 			const parts = raw.split(/\s+/).filter(Boolean);
 			const goal = parts[0];
 			if (!goal) {
 				ctx.ui.notify(
-					"Usage: /loop <goal> [rounds=5] [orchestrate] [gate=cap] [rmodel=<model>] [review=off] [criteria=off] | /loop resume [<goal>] | /loop status [<goal>] | /loop optimize [apply]",
+					"Usage: /loop <goal>   (that's it — defaults from .pi/loop.json, budget auto-sized from criteria)\n" +
+						"       /loop verify <devbrain-cap> | /loop resume [<goal>] | /loop status [<goal>] | /loop optimize [apply]\n" +
+						"       overrides: rounds=N gate=<cap> rmodel=<model> review=off criteria=off",
 					"error",
 				);
 				return;
@@ -1624,31 +1677,41 @@ export default function (pi: ExtensionAPI) {
 				runOptimizer(pi, ctx.cwd, /\bapply\b/i.test(raw), (t, l) => ctx.ui.notify(t, l));
 				return;
 			}
-			const roundsArg = /rounds=(\d+)/.exec(raw);
-			const rounds = roundsArg ? Number(roundsArg[1]) : 5;
-			if (/\borchestrate\b/i.test(raw)) {
-				const gateArg = /gate=(\S+)/.exec(raw);
-				const rmodelArg = /rmodel=(\S+)/.exec(raw);
-				const msg = await startOrchestration(pi, {
-					goal,
-					rounds,
-					cwd: ctx.cwd,
-					gate: gateArg?.[1],
-					review: !/\breview=(off|false|0)\b/i.test(raw),
-					criteria: !/\bcriteria=(off|false|0)\b/i.test(raw),
-					reviewModel: rmodelArg?.[1],
+			// Explicit verify mode: the devbrain-gated retry loop.
+			if (goal === "verify") {
+				const cap = parts[1];
+				if (!cap) {
+					ctx.ui.notify("Usage: /loop verify <devbrain-capability> [rounds=N]", "error");
+					return;
+				}
+				const vRounds = /rounds=(\d+)/.exec(raw);
+				void driveLoop({
+					goal: cap,
+					repo: DEFAULT_REPO,
+					rounds: vRounds ? Number(vRounds[1]) : 5,
 					notify: (text, level) => ctx.ui.notify(text, level),
 				});
-				ctx.ui.notify(msg, "info");
+				ctx.ui.notify(`verify-loop '${cap}' launched — Ctrl+Alt+A to watch/steer`, "info");
 				return;
 			}
-			void driveLoop({
+			// DEFAULT: orchestrate. Explicit flags > .pi/loop.json repo defaults >
+			// built-ins; no rounds= means the budget auto-sizes to criteria + 2.
+			const defaults = loadLoopDefaults(ctx.cwd);
+			const roundsArg = /rounds=(\d+)/.exec(raw);
+			const gateArg = /gate=(\S+)/.exec(raw);
+			const rmodelArg = /rmodel=(\S+)/.exec(raw);
+			const msg = await startOrchestration(pi, {
 				goal,
-				repo: DEFAULT_REPO,
-				rounds,
+				rounds: roundsArg ? Number(roundsArg[1]) : (defaults.rounds ?? DEFAULT_ROUNDS),
+				autoBudget: !roundsArg && defaults.rounds === undefined,
+				cwd: ctx.cwd,
+				gate: gateArg?.[1] ?? defaults.gate,
+				review: /\breview=(off|false|0)\b/i.test(raw) ? false : (defaults.review ?? true),
+				criteria: /\bcriteria=(off|false|0)\b/i.test(raw) ? false : (defaults.criteria ?? true),
+				reviewModel: rmodelArg?.[1] ?? defaults.reviewModel,
 				notify: (text, level) => ctx.ui.notify(text, level),
 			});
-			ctx.ui.notify(`loop '${goal}' launched — Ctrl+Alt+A to watch/steer`, "info");
+			ctx.ui.notify(msg, "info");
 		},
 	});
 }

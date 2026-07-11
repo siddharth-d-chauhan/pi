@@ -77,8 +77,18 @@ A loop is only as good as its verification — design effort goes there first.
    workers with a hard gate beats fewer rounds on expensive models without
    one — the gate converts rounds into quality.
 
-Canonical launch:
-`/loop ship-csv-export rounds=6 orchestrate gate=export-smoke rmodel=pi/smol`
+Canonical launch — configure once per repo, then the goal is the whole command:
+
+```
+// <repo>/.pi/loop.json   (all keys optional)
+{ "gate": "export-smoke", "reviewModel": "pi/smol" }
+
+/loop ship-csv-export
+```
+
+Orchestrate is the default mode; the budget auto-sizes to criteria + 2 after
+round 0. Flags (`rounds= gate= rmodel= review=off criteria=off`) override the
+file; `/loop verify <cap>` is the explicit devbrain retry loop.
 
 ## Known non-overlaps that look like overlaps
 

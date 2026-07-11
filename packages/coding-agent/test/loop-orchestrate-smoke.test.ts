@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 // Import the registry through the SAME specifier the extension uses, so both
 // see one module instance (and one registry singleton).
@@ -147,4 +147,55 @@ test("orchestrated loop v4: criteria data, review diversity, best-of-n, resume, 
 	expect(notifications[0]).toContain("resumed at round 1/3");
 	expect(lastSent().customType).toBe("loop-round"); // criteria stay off across resume
 	registry.kill(loopEntry("audit-perms")?.id as string); // leave no live loop behind
+});
+
+test("simple launch: bare `/loop <goal>` uses repo defaults and auto-sizes the budget", async () => {
+	const cwd = mkdtempSync(`${tmpdir()}/loop-simple-`);
+	mkdirSync(`${cwd}/.pi`, { recursive: true });
+	// configure once in the repo...
+	writeFileSync(`${cwd}/.pi/loop.json`, JSON.stringify({ gate: "smoke-tested", reviewModel: "pi/smol" }));
+
+	const sent: Array<{ customType: string; content: string }> = [];
+	let settled: (() => Promise<void>) | undefined;
+	let cmd: ((a: string, c: unknown) => Promise<void>) | undefined;
+	const pi = {
+		registerTool() {},
+		registerMessageRenderer() {},
+		registerCommand(_n: string, d: { handler: (a: string, c: unknown) => Promise<void> }) {
+			cmd = d.handler;
+		},
+		on(e: string, h: () => Promise<void>) {
+			if (e === "agent_settled") settled = h;
+		},
+		sendMessage(m: { customType: string; content: string }) {
+			sent.push(m);
+		},
+	};
+	const notes: string[] = [];
+	const ctx = { cwd, ui: { notify: (t: string) => notes.push(t) } };
+	const registry = getBackgroundProcessRegistry();
+	loopExtension(pi as never);
+
+	// ...then the whole launch is just the goal
+	await cmd?.("ship-thing", ctx);
+	expect(notes[notes.length - 1]).toContain("gate: smoke-tested"); // from .pi/loop.json
+	expect(notes[notes.length - 1]).toContain("review model: pi/smol");
+	expect(sent[sent.length - 1].customType).toBe("loop-criteria"); // orchestrate is the default
+
+	// 3 criteria -> budget auto-sizes to 5 (criteria + 2)
+	writeFileSync(
+		`${cwd}/.pi/loops/ship-thing/criteria.json`,
+		JSON.stringify([
+			{ id: "c1", desc: "a", verify: "x", passes: false },
+			{ id: "c2", desc: "b", verify: "y", passes: false },
+			{ id: "c3", desc: "c", verify: "z", passes: false },
+		]),
+	);
+	await settled?.();
+	await new Promise((r) => setTimeout(r, 25));
+	const entry = registry.list().find((e) => e.label === "↻ orchestrate ship-thing");
+	expect(sent[sent.length - 1].content).toContain('budget="5"');
+	const state = JSON.parse(readFileSync(`${cwd}/.pi/loops/ship-thing/state.json`, "utf-8"));
+	expect(state.budget).toBe(5);
+	registry.kill(entry?.id as string);
 });

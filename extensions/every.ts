@@ -21,6 +21,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { Text } from "@earendil-works/pi-tui";
 import { copper, heatLine } from "./lib/card.ts";
 import { getSlashSeam } from "./lib/kp-bridge.ts";
+import { leaseStatus, loadState } from "./lib/scheduler.ts";
 
 const MAX_AGE_MS = Number(process.env.PI_EVERY_MAX_AGE_DAYS ?? 7) * 24 * 60 * 60 * 1000;
 const MIN_INTERVAL_MS = 60_000;
@@ -92,6 +93,13 @@ export default function (pi: ExtensionAPI) {
 				jobs.filter((j) => j.id !== jobId),
 			);
 			clear(jobId);
+			return;
+		}
+		// Durable-daemon deference: if a live pi-scheduler daemon holds the lease,
+		// it OWNS execution — the in-session timer must not also fire (no double-run).
+		// Re-arm so we resume firing if the daemon later stops (its lease goes stale).
+		if (leaseStatus(loadState(cwd), Date.now()).held) {
+			arm(cwd, jobId, job.intervalMs);
 			return;
 		}
 		// Cross-session dedup: another pi session may have fired this already.

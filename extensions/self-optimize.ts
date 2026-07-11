@@ -33,6 +33,7 @@ import {
 	parseJournal,
 	type StandingInstruction,
 } from "./lib/correction-optimizer.ts";
+import { callKp } from "./lib/kp-bridge.ts";
 
 const MIN_SESSIONS = Math.max(2, Number(process.env.PI_SELF_MIN_SESSIONS ?? 2));
 // Measured on live bge-small vectors (10 pairs): lowest same-lesson cosine
@@ -41,45 +42,45 @@ const MIN_SESSIONS = Math.max(2, Number(process.env.PI_SELF_MIN_SESSIONS ?? 2));
 // (samples shown), while a false split hides a real lesson forever.
 const SEMANTIC_THRESHOLD = Number(process.env.PI_SELF_COSINE ?? 0.66);
 const KP_EMBED_TIMEOUT_MS = Number(process.env.PI_KP_EMBED_TIMEOUT_MS ?? 8_000);
-
-interface KpShared {
-	connect: () => Promise<{
-		callTool: (
-			req: { name: string; arguments: Record<string, unknown> },
-			schema?: undefined,
-			opts?: { timeout?: number },
-		) => Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }> }>;
-	}>;
-	timeoutMs: number;
-}
+const KP_WRITEBACK_TIMEOUT_MS = Number(process.env.PI_KP_WRITEBACK_TIMEOUT_MS ?? 6_000);
 
 /** Embed texts through the shared KP client (bge-small). Returns undefined when
  *  KP is unavailable or the count doesn't round-trip — the caller then falls
  *  back to keyword clustering. */
 async function embedViaKp(texts: string[]): Promise<number[][] | undefined> {
-	const shared = (globalThis as Record<string, unknown>).__pi_kp__ as KpShared | undefined;
-	if (!shared || texts.length === 0) return undefined;
-	try {
-		const client = await shared.connect();
-		const result = await client.callTool({ name: "pi.embed_texts", arguments: { texts } }, undefined, {
-			timeout: KP_EMBED_TIMEOUT_MS,
-		});
-		if (result.isError) return undefined;
-		const raw = result.content?.find((c) => c.type === "text")?.text;
-		if (!raw) return undefined;
-		const parsed = JSON.parse(raw) as { vectors?: number[][] };
-		const vectors = parsed.vectors;
-		if (
-			!Array.isArray(vectors) ||
-			vectors.length !== texts.length ||
-			vectors.some((v) => !Array.isArray(v) || v.length === 0)
-		) {
-			return undefined;
-		}
-		return vectors;
-	} catch {
+	if (texts.length === 0) return undefined;
+	const parsed = await callKp<{ vectors?: number[][] }>("pi.embed_texts", { texts }, KP_EMBED_TIMEOUT_MS);
+	const vectors = parsed?.vectors;
+	if (
+		!Array.isArray(vectors) ||
+		vectors.length !== texts.length ||
+		vectors.some((v) => !Array.isArray(v) || v.length === 0)
+	) {
 		return undefined;
 	}
+	return vectors;
+}
+
+/** Promote a preference into the knowledge platform as a CONFIRMED fact
+ *  (user-stated → authoritative via the evidence-gated writeback). Returns
+ *  true when KP accepted it — the local block then skips it and KP's boot
+ *  channel becomes the single injection path. */
+async function writebackPreference(text: string, sessions: number): Promise<boolean> {
+	const result = await callKp<{ decision?: string; queued?: boolean }>(
+		"pi.memory_writeback",
+		{
+			kind: "preference",
+			summary: text,
+			evidence: [
+				{
+					kind: "user",
+					note: `user correction recurred in ${sessions} distinct session(s); promoted via /self optimize apply`,
+				},
+			],
+		},
+		KP_WRITEBACK_TIMEOUT_MS,
+	);
+	return result?.decision === "confirmed" && result?.queued === true;
 }
 
 // Heuristic correction detectors. Deliberately recall-biased: false positives
@@ -87,6 +88,9 @@ async function embedViaKp(texts: string[]): Promise<number[][] | undefined> {
 const CORRECTION_RES: RegExp[] = [
 	/^\s*(no|nope|nah|stop|wrong|actually)\b/i,
 	/\b(that'?s wrong|not what i (?:said|asked|meant|wanted)|i (?:said|asked|told you)|why did you|you (?:should|shouldn'?t|keep|always|never|need to)|don'?t (?:do|use|add|include|ever|keep)|instead of|stop (?:doing|using|trying|adding))\b/i,
+	// Durable directives (same signal auto-learn nudges on; KP's content-hash
+	// dedup collapses double capture, and both paths end behind human gates).
+	/\b(from now on|going forward|always|never|remember (?:to|that))\b/i,
 ];
 
 function looksLikeCorrection(text: string): boolean {
@@ -168,9 +172,18 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// Injection: append the active standing preferences as a stable context block.
+	// Shared seam: other detectors (auto-learn's directive nudge, future
+	// signals) can journal into the SAME corrections stream so recurrence is
+	// counted once across the whole system.
+	(globalThis as Record<string, unknown>).__pi_self_record__ = (text: string, source?: string) => {
+		record(text, source === "explicit" ? "explicit" : "heuristic");
+	};
+
+	// Injection: append the active standing preferences as a stable context
+	// block — but ONLY the ones KP does not own (inKp preferences arrive via
+	// the knowledge-boot channel; injecting them here would duplicate them).
 	pi.on("context", async (event) => {
-		const steps = loadStanding();
+		const steps = loadStanding().filter((s) => !s.inKp);
 		if (steps.length === 0) return;
 		const messages = event?.messages;
 		if (!Array.isArray(messages)) return;
@@ -211,15 +224,25 @@ export default function (pi: ExtensionAPI) {
 		let applied: CorrectionProposal[] = [];
 		if (apply && proposals.length > 0) {
 			const version = currentVersion(existing) + 1;
-			const promoted: StandingInstruction[] = [
-				...existing,
-				...proposals.map((p) => ({ text: p.text, sessions: p.sessions, version })),
-			];
+			// Single-store policy: promote into the knowledge platform (confirmed
+			// Preference — its boot channel then serves it everywhere). The local
+			// file keeps every instruction, but only KP-less ones (inKp=false)
+			// inject locally, so a preference never arrives twice.
+			const promotedNew: StandingInstruction[] = [];
+			let intoKp = 0;
+			for (const p of proposals) {
+				const inKp = await writebackPreference(p.text, p.sessions);
+				if (inKp) intoKp += 1;
+				promotedNew.push({ text: p.text, sessions: p.sessions, version, inKp });
+			}
 			try {
 				mkdirSync(paths().dir, { recursive: true });
-				writeFileSync(paths().standing, `${JSON.stringify(promoted, null, 2)}\n`);
+				writeFileSync(paths().standing, `${JSON.stringify([...existing, ...promotedNew], null, 2)}\n`);
 				applied = proposals;
-				notify(`self-optimize: promoted ${proposals.length} standing preference(s) (v${version})`, "info");
+				notify(
+					`self-optimize: promoted ${proposals.length} preference(s) (v${version}) — ${intoKp} into the knowledge platform, ${proposals.length - intoKp} local`,
+					"info",
+				);
 			} catch {
 				notify("self-optimize: failed to write standing-instructions.json", "error");
 			}
@@ -329,7 +352,11 @@ export default function (pi: ExtensionAPI) {
 				);
 				return;
 			}
-			const body = steps.map((s, i) => `${i + 1}. ${s.text} (v${s.version}, ${s.sessions} sessions)`).join("\n");
+			const body = steps
+				.map(
+					(s, i) => `${i + 1}. ${s.inKp ? "[KP] " : "[local] "}${s.text} (v${s.version}, ${s.sessions} sessions)`,
+				)
+				.join("\n");
 			notify(`active standing preferences (/self forget <n> to drop):\n${body}`, "info");
 		},
 	});

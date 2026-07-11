@@ -20,6 +20,10 @@ export interface StandingInstruction {
 	/** distinct sessions that prompted it before promotion. */
 	sessions: number;
 	version: number;
+	/** True when the preference was written into the knowledge platform as a
+	 *  confirmed fact — KP's boot channel then serves it and the local
+	 *  <learned-preferences> block skips it (single injection channel). */
+	inKp?: boolean;
 }
 
 export interface CorrectionProposal {

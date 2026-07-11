@@ -17,6 +17,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { copper, heatLine } from "./lib/card.ts";
 import { rolloutFlags } from "./lib/flags.ts";
+import { markDelivered } from "./lib/kp-bridge.ts";
 
 /**
  * System-prompt appendix: pre-authorizes the broker's injected blocks so the
@@ -54,7 +55,7 @@ interface KpShared {
 }
 
 interface PacketCandidate {
-	memory?: { kind?: string; text?: string; state?: string; inject_role?: string };
+	memory?: { fact_id?: string; kind?: string; text?: string; state?: string; inject_role?: string };
 }
 
 interface ContextPacket {
@@ -113,7 +114,13 @@ function parsePacket(content: Array<{ type: string; text?: string }>): ContextPa
 		if (block.type !== "text" || !block.text) continue;
 		try {
 			const parsed = JSON.parse(block.text) as ContextPacket;
-			if (parsed && typeof parsed === "object" && "packet_id" in parsed) return parsed;
+			if (parsed && typeof parsed === "object" && "packet_id" in parsed) {
+				// Cross-channel dedup: every fact this broker injects is recorded
+				// in the shared registry so other channels (area drift, recall)
+				// never deliver the same fact twice in one session.
+				markDelivered((parsed.candidates ?? []).map((c) => c.memory?.fact_id));
+				return parsed;
+			}
 		} catch {
 			// not JSON — skip
 		}

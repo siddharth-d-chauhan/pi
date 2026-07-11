@@ -24,24 +24,14 @@ import { basename, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { copper, heatLine } from "./lib/card.ts";
+import { callKp, extractPaths, isDelivered, markDelivered } from "./lib/kp-bridge.ts";
 
 const AREA_TIMEOUT_MS = Number(process.env.PI_KP_AREA_TIMEOUT_MS ?? 4_000);
 const AREA_MAX_ITEMS = Number(process.env.PI_KP_AREA_MAX_ITEMS ?? 8);
 const BLOCK_MAX_CHARS = 1_200;
 
-interface KpShared {
-	connect: () => Promise<{
-		callTool: (
-			req: { name: string; arguments: Record<string, unknown> },
-			schema?: undefined,
-			opts?: { timeout?: number },
-		) => Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }> }>;
-	}>;
-	timeoutMs: number;
-}
-
 interface AreaPacket {
-	candidates?: Array<{ memory?: { kind?: string; text?: string; inject_role?: string } }>;
+	candidates?: Array<{ memory?: { fact_id?: string; kind?: string; text?: string; inject_role?: string } }>;
 	freshness?: { area?: string };
 }
 
@@ -61,31 +51,6 @@ function loadAreaMap(cwd: string): AreaMap | undefined {
 		// malformed map -> inert (surfaced via /areas)
 	}
 	return undefined;
-}
-
-/** Pull path-looking strings out of tool args (file_path, path, cmd text...). */
-function extractPaths(args: unknown): string[] {
-	const out: string[] = [];
-	const walk = (value: unknown): void => {
-		if (typeof value === "string") {
-			// Path-ish tokens: contain a slash or a known file extension.
-			for (const token of value.split(/[\s"'`]+/)) {
-				if (token.length > 2 && token.length < 300 && (token.includes("/") || /\.\w{1,8}$/.test(token))) {
-					out.push(token);
-				}
-			}
-			return;
-		}
-		if (Array.isArray(value)) {
-			for (const item of value) walk(item);
-			return;
-		}
-		if (value && typeof value === "object") {
-			for (const item of Object.values(value)) walk(item);
-		}
-	};
-	walk(args);
-	return out;
 }
 
 /** Which areas do these paths belong to, per the repo's map? */
@@ -142,27 +107,16 @@ export default function (pi: ExtensionAPI) {
 		if (state.injected.has(key) || state.inFlight.has(key)) return;
 		state.inFlight.add(key);
 		try {
-			const shared = (globalThis as Record<string, unknown>).__pi_kp__ as KpShared | undefined;
-			if (!shared) return;
-			const client = await shared.connect();
-			const result = await client.callTool(
-				{
-					name: "pi.context_area",
-					arguments: { repository: basename(cwd), area, max_memory_items: AREA_MAX_ITEMS },
-				},
-				undefined,
-				{ timeout: AREA_TIMEOUT_MS },
+			const packet = await callKp<AreaPacket>(
+				"pi.context_area",
+				{ repository: basename(cwd), area, max_memory_items: AREA_MAX_ITEMS },
+				AREA_TIMEOUT_MS,
 			);
-			if (result.isError) return;
-			const raw = result.content?.find((c) => c.type === "text")?.text;
-			if (!raw) return;
-			let packet: AreaPacket;
-			try {
-				packet = JSON.parse(raw) as AreaPacket;
-			} catch {
-				return;
-			}
-			const items = (packet.candidates ?? []).filter((c) => c.memory?.text).length;
+			if (!packet) return;
+			// Cross-channel dedup: drop facts the boot/task channels already
+			// delivered this session, and register what WE deliver.
+			packet.candidates = (packet.candidates ?? []).filter((c) => c.memory?.text && !isDelivered(c.memory.fact_id));
+			const items = packet.candidates.length;
 			if (items === 0) {
 				// Nothing filed under this area — remember that so we don't
 				// re-query on every subsequent touch.
@@ -170,6 +124,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			state.injected.add(key);
+			markDelivered(packet.candidates.map((c) => c.memory?.fact_id));
 			pi.sendMessage(
 				{
 					customType: "area-context",

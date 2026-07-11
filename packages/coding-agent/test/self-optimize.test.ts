@@ -81,7 +81,8 @@ test("distinct-session recurrence -> candidate -> apply -> injected as standing 
 
 	// apply promotes it
 	await s2.cmd("optimize apply", s2.ctx);
-	expect(s2.notes.some((n) => n.includes("promoted 1 standing preference"))).toBe(true);
+	// no KP in this harness -> falls back to a local promotion
+	expect(s2.notes.some((n) => n.includes("promoted 1 preference(s)") && n.includes("1 local"))).toBe(true);
 	const standing = JSON.parse(readFileSync(join(AGENT_DIR, "self", "standing-instructions.json"), "utf-8"));
 	expect(standing).toHaveLength(1);
 	expect(standing[0].text.toLowerCase()).toContain("bitbucket");

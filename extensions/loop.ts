@@ -281,6 +281,9 @@ interface OrchestratedLoop {
 	 *  round prompt from round 1; and the base-prompt version this run used. */
 	baselineSteps: BaselineStep[];
 	promptVersion: number;
+	/** Exactly-once guard: a loop journals on its FIRST terminal event only
+	 *  (complete, or kill) — a later kill of an already-finished loop is a no-op. */
+	recorded: boolean;
 	/** Verdict history for the status panel (bounded). */
 	verdicts: Array<{ round: number; verdict: string; summary: string; took: number }>;
 	/** git HEAD at loop start — the reviewer diffs against this. */
@@ -366,8 +369,12 @@ function loadJournal(cwd: string): RunRecord[] {
 	}
 }
 
-/** Append this run's scored record — the offline optimizer's training data. */
+/** Append this run's scored record — the offline optimizer's training data.
+ *  Exactly-once: the first terminal event wins; a subsequent kill of an
+ *  already-recorded loop must NOT double-count (it would skew recurrence). */
 function appendRunRecord(loop: OrchestratedLoop, completed: boolean): void {
+	if (loop.recorded) return;
+	loop.recorded = true;
 	const cwd = loop.dir.replace(/\/\.pi\/loops\/[^/]+$/, "");
 	const record: RunRecord = {
 		goal: loop.goal,
@@ -712,6 +719,7 @@ async function startOrchestration(
 		learnedSteps: opts.restore?.learnedSteps ?? [],
 		baselineSteps: loadBaselineSteps(opts.cwd),
 		promptVersion: currentPromptVersion(loadBaselineSteps(opts.cwd)),
+		recorded: false,
 		verdicts: [],
 		baseline,
 		roundStartedAt: 0,

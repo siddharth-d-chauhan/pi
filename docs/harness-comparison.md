@@ -171,36 +171,44 @@ sandbox) and *continuous critique* (watchdog), take opencode's *cheap safety gua
 memory, executable procedural memory, self-optimization) exactly as they are, because on those
 axes we already lead the field.
 
-## Coverage gaps — remaining to verify (not yet deeply checked)
+## Coverage status — what's covered, partial, and not checked
 
-The synthesis above is solid on what's covered; these areas were only partially
-inventoried (agents killed to save tokens) and should be confirmed before acting:
+All the parallel agents eventually reported (the session-limit ones finished late),
+so coverage is far more complete than mid-sweep. Honest final state:
 
-- **omp swarm internals** — have README + schema/executor comments (YAML
-  pipeline/parallel/sequential/DAG, subagent-per-node, shared-workspace comms,
-  `.swarm_<name>/` state, standalone `omp-swarm` runner). NOT verified: the
-  wave/iteration scheduler, dependency resolution (`dag.ts`), failure/retry
-  semantics, `pipeline.ts`/`state.ts` mechanics. (We're skipping swarm anyway, so
-  low priority.)
-- **omp core-loop/session mechanics** — goal mode, plan mode, TTSR, `/tree`
-  branching, auto-retry, steering/interrupt queue: NOT inventoried. Worth a look
-  only if we adopt omp patterns beyond the native engine.
-- **omp TUI** — rendering approach, agent-hub equivalent, background surfacing:
-  NOT inventoried.
-- **omp native adoption feasibility (the load-bearing question for Tier-1 #1/#2)** —
-  confirm `@oh-my-pi/pi-natives` (or the `pi-ast`/`pi-iso` crates) can be consumed
-  standalone against OUR pi base: N-API/napi version, platform build/prebuilts,
-  license, and whether the JS API surface (`astEdit`, `isoStart/Stop/Diff`) is
-  usable without the whole omp coding-agent. THIS gates the top recommendation.
-- **claude-code broader inventory** — the AgentTool/subagent internals are fully
-  covered; the rest (complete hooks list, complete tools list, memdir file format,
-  ink TUI details, cron/RemoteTrigger/PR-subs depth, coordinator extras) is known
-  from earlier direct exploration this session but was NOT re-verified by the
-  dedicated broad agent (killed). Treat as "known, not exhaustively re-confirmed."
-- **opencode** — fully inventoried; only caveat is the repo is mid-migration
-  (shipping `packages/opencode` vs in-progress v2 `packages/core` with many TODOs),
-  so some formalized invariants (Context Epochs, event-sourcing) are spec-ahead-of-code.
+**Fully covered (exhaustive, mechanism-level, source-cited):**
+- **opencode** — all 12 dimensions (core loop v1+v2, 9-strategy fuzzy edit + apply_patch,
+  task delegation, instruction-file memory, compaction/Context-Epochs, plugins/MCP/code-mode,
+  SolidJS+opentui TUI + multi-surface, ~20 provider IDs / route decomposition, rule-engine +
+  doom-loop + arity permissioning, snapshots/GH-action).
+- **omp** — memory/mnemopi (deep), compaction/snapcompact, context-files/handoff/collab,
+  extensions/approval/providers, Rust crates (pi-ast/pi-shell/pi-iso/pi-walker), IRC agent-bus +
+  revivable-agent runtime, hashline edit format, goals/TTSR/eval/LSP-diagnostics, tool system.
+- **claude-code** — AgentTool/subagent internals, tool system + edit (with corrections), the
+  5 memory subsystems, hooks (4 persistable types)/plugins/MCP/skills, permissions/sandbox
+  (external sandbox-runtime, YOLO classifier), coordinator mode.
 
-**Highest-value thing left to check:** the native-addon feasibility bullet — it
-decides whether the two biggest recommendations (AST editing, CoW sandboxing) are a
-week of integration or a non-starter.
+**Partial (known from earlier direct exploration this session, NOT freshly source-verified):**
+- **claude-code providers/model-routing** — `useMainLoopModel`, fast mode, provider support:
+  known in outline, not deeply inventoried.
+- **claude-code TUI details** — ink rendering, footer/pills, Shift+Down task dialog, statusline:
+  known in outline.
+- **claude-code automation depth** — `ScheduleCronTool`, PR-activity subscriptions, RemoteTrigger,
+  insights: known that they exist (we borrowed the /loop cron idea), but the dedicated automation
+  agent timed out with no report, so mechanisms aren't source-cited.
+- **omp session mechanics from docs not source** — goal/plan-mode, /tree, steering queue, TUI
+  append-only renderer: covered from omp's docs, fewer line-level source citations than the rest.
+
+**Not checked at all — and the one that matters:**
+- **Adoption feasibility of the Tier-1 winners.** Can `packages/hashline` (the #1 recommend) and
+  `@oh-my-pi/pi-natives` (`pi-ast`/`pi-iso`) be consumed **standalone against OUR pi base**?
+  Unverified: hashline's coupling to omp internals (does it need `pi-ast` for `.BLK` block ops,
+  or is the hash-anchoring self-contained?), the native addon's napi version / prebuilts /
+  platform matrix / license, and whether the JS API (`astEdit`, `isoStart/Stop/Diff`) is usable
+  without the whole omp coding-agent. **This gates whether the top recommendations are a week of
+  work or a non-starter — do this check first.**
+
+**Not persisted anywhere durable:** the individual exhaustive per-harness inventories (mnemopi
+schema, Rust-crate mechanisms, opencode route decomposition, claude-code hook contract) live only
+in this session's agent transcripts. This doc is the *synthesis*; if the raw deep-dives are worth
+keeping, they'd need to be written out separately (not done — the synthesis captures the decisions).

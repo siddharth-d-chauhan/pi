@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { copper, heatLine } from "./lib/card.ts";
+import { getSlashSeam } from "./lib/kp-bridge.ts";
 
 const MAX_AGE_MS = Number(process.env.PI_EVERY_MAX_AGE_DAYS ?? 7) * 24 * 60 * 60 * 1000;
 const MIN_INTERVAL_MS = 60_000;
@@ -99,21 +100,44 @@ export default function (pi: ExtensionAPI) {
 			job.lastFired = new Date().toISOString();
 			job.fires = (job.fires ?? 0) + 1;
 			saveJobs(cwd, jobs);
-			pi.sendMessage(
-				{
-					customType: "every-fire",
-					content: [
-						`<scheduled-prompt interval="${fmtInterval(job.intervalMs)}" fire="${job.fires}">`,
-						"This is a scheduled recurring prompt the user set up. Execute it now:",
-						job.prompt,
-						"</scheduled-prompt>",
-					].join("\n"),
-					display: true,
-					details: { prompt: job.prompt, interval: fmtInterval(job.intervalMs), fires: job.fires },
-				},
-				// idle -> run now; busy -> queued as a follow-up, never an interrupt
-				{ triggerTurn: true, deliverAs: "followUp" },
-			);
+			const details = { prompt: job.prompt, interval: fmtInterval(job.intervalMs), fires: job.fires };
+			// Slash prompts execute DIRECTLY through the opt-in seam (the model
+			// cannot invoke slash commands); plain prompts go to the model.
+			const slash = /^\/(\S+)\s*(.*)$/.exec(job.prompt);
+			const handler = slash ? getSlashSeam(slash[1]) : undefined;
+			if (slash && handler) {
+				pi.sendMessage(
+					{ customType: "every-fire", content: `scheduled: ${job.prompt}`, display: true, details },
+					{ triggerTurn: false },
+				);
+				void handler(slash[2] ?? "", {
+					cwd,
+					ui: {
+						notify: (text) => {
+							pi.sendMessage(
+								{ customType: "every-fire", content: `[${job.prompt}] ${text}`, display: true, details },
+								{ triggerTurn: false },
+							);
+						},
+					},
+				});
+			} else {
+				pi.sendMessage(
+					{
+						customType: "every-fire",
+						content: [
+							`<scheduled-prompt interval="${fmtInterval(job.intervalMs)}" fire="${job.fires}">`,
+							"This is a scheduled recurring prompt the user set up. Execute it now:",
+							job.prompt,
+							"</scheduled-prompt>",
+						].join("\n"),
+						display: true,
+						details,
+					},
+					// idle -> run now; busy -> queued as a follow-up, never an interrupt
+					{ triggerTurn: true, deliverAs: "followUp" },
+				);
+			}
 		}
 		arm(cwd, jobId, job.intervalMs);
 	}

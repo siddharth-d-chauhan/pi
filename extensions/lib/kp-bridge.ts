@@ -60,6 +60,28 @@ export function resetDelivered(): void {
 	deliveredSet().clear();
 }
 
+/** Opt-in slash-command seam: extensions whose commands make sense to run from
+ *  a scheduler (/every) register their handler here, since pi has no
+ *  programmatic command-execution API. */
+export type SlashHandler = (
+	args: string,
+	ctx: { cwd: string; ui: { notify: (text: string, level: "info" | "warning" | "error") => void } },
+) => Promise<void>;
+
+function slashSeam(): Map<string, SlashHandler> {
+	const g = globalThis as Record<string, unknown>;
+	if (!(g.__pi_slash__ instanceof Map)) g.__pi_slash__ = new Map<string, SlashHandler>();
+	return g.__pi_slash__ as Map<string, SlashHandler>;
+}
+
+export function registerSlashSeam(name: string, handler: SlashHandler): void {
+	slashSeam().set(name, handler);
+}
+
+export function getSlashSeam(name: string): SlashHandler | undefined {
+	return slashSeam().get(name);
+}
+
 /** Pull path-looking strings out of tool args (file_path, path, cmd text...). */
 export function extractPaths(args: unknown): string[] {
 	const out: string[] = [];

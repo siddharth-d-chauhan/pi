@@ -3,9 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import everyExt, { parseInterval } from "../../../extensions/every.ts";
+import { registerSlashSeam } from "../../../extensions/lib/kp-bridge.ts";
 
 beforeEach(() => vi.useFakeTimers());
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+	vi.useRealTimers();
+	((globalThis as Record<string, unknown>).__pi_slash__ as Map<string, unknown>)?.clear();
+});
 
 function harness() {
 	const handlers = new Map<string, (e: unknown) => Promise<void>>();
@@ -70,6 +74,32 @@ test("schedule -> fires on interval -> repeats -> stop halts", async () => {
 	await vi.advanceTimersByTimeAsync(20 * 60_000);
 	expect(h.sent.length).toBe(2);
 	expect(JSON.parse(readFileSync(join(cwd, ".pi", "schedules.json"), "utf-8"))).toHaveLength(0);
+});
+
+test("slash prompts execute through the seam, not the model", async () => {
+	const cwd = mkdtempSync(`${tmpdir()}/every3-`);
+	const seamCalls: Array<{ args: string; cwd: string }> = [];
+	registerSlashSeam("dream", async (args, ctx) => {
+		seamCalls.push({ args, cwd: ctx.cwd });
+		ctx.ui.notify("dream dispatched", "info");
+	});
+	const h = harness();
+	await h.cmd?.("1d /dream force", h.ctx(cwd));
+	await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 1000);
+	// the seam handler ran with the right args and cwd
+	expect(seamCalls).toEqual([{ args: "force", cwd }]);
+	// no model-directed <scheduled-prompt> was sent — only status chips
+	const contents = h.sent.map((s) => s.msg.content);
+	expect(contents.some((c) => c.includes("<scheduled-prompt"))).toBe(false);
+	expect(contents.some((c) => c.includes("scheduled: /dream force"))).toBe(true);
+	expect(contents.some((c) => c.includes("[/dream force] dream dispatched"))).toBe(true);
+	// none of the chips trigger a turn
+	expect(h.sent.every((s) => s.opts?.triggerTurn === false)).toBe(true);
+	// an UNREGISTERED slash prompt falls back to model-directed text
+	const h2 = harness();
+	await h2.cmd?.("1d /nonexistent thing", h2.ctx(mkdtempSync(`${tmpdir()}/every4-`)));
+	await vi.advanceTimersByTimeAsync(24 * 60 * 60_000 + 1000);
+	expect(h2.sent.some((s) => s.msg.content.includes("<scheduled-prompt"))).toBe(true);
 });
 
 test("cross-session dedup + expiry + re-arm on session_start", async () => {

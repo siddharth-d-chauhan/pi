@@ -28,6 +28,7 @@ import { join } from "node:path";
 import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { copper, heatLine } from "./lib/card.ts";
+import { registerSlashSeam } from "./lib/kp-bridge.ts";
 
 const THROTTLE_MS = Number(process.env.PI_DREAM_THROTTLE_MS ?? 20 * 60 * 60 * 1000);
 
@@ -102,34 +103,43 @@ export default function (pi: ExtensionAPI) {
 		);
 	});
 
+	const dreamHandler = async (
+		args: string,
+		ctx: Pick<ExtensionCommandContext, "cwd"> & {
+			ui: { notify: (t: string, l: "info" | "warning" | "error") => void };
+		},
+	) => {
+		const sub = (args ?? "").trim().toLowerCase();
+		const last = lastRun();
+		const ago = last ? Math.round((Date.now() - last) / 3_600_000) : undefined;
+		if (sub === "status") {
+			ctx.ui.notify(last ? `last dream: ${ago}h ago` : "no dream has run yet — /dream to start one", "info");
+			return;
+		}
+		if (sub !== "force" && last && Date.now() - last < THROTTLE_MS) {
+			ctx.ui.notify(
+				`dreamt ${ago}h ago — memory consolidation is throttled to ~${Math.round(THROTTLE_MS / 3_600_000)}h. /dream force to run anyway`,
+				"info",
+			);
+			return;
+		}
+		recordRun();
+		pi.sendMessage(
+			{
+				customType: "dream",
+				content: dreamPrompt(ctx.cwd),
+				display: true,
+				details: { forced: sub === "force" },
+			},
+			{ triggerTurn: true },
+		);
+	};
+
 	pi.registerCommand("dream", {
 		description:
 			"Reflective memory consolidation: /dream [force|status] — merge dupes, flag contradictions, prune proposals",
-		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const sub = (args ?? "").trim().toLowerCase();
-			const last = lastRun();
-			const ago = last ? Math.round((Date.now() - last) / 3_600_000) : undefined;
-			if (sub === "status") {
-				ctx.ui.notify(last ? `last dream: ${ago}h ago` : "no dream has run yet — /dream to start one", "info");
-				return;
-			}
-			if (sub !== "force" && last && Date.now() - last < THROTTLE_MS) {
-				ctx.ui.notify(
-					`dreamt ${ago}h ago — memory consolidation is throttled to ~${Math.round(THROTTLE_MS / 3_600_000)}h. /dream force to run anyway`,
-					"info",
-				);
-				return;
-			}
-			recordRun();
-			pi.sendMessage(
-				{
-					customType: "dream",
-					content: dreamPrompt(ctx.cwd),
-					display: true,
-					details: { forced: sub === "force" },
-				},
-				{ triggerTurn: true },
-			);
-		},
+		handler: dreamHandler,
 	});
+	// Schedulable: /every 1d /dream force
+	registerSlashSeam("dream", dreamHandler);
 }

@@ -24,7 +24,14 @@
  *   3. overlap: two ranges touching the same lines in one call are rejected.
  * hedit writes through the normal fs path, so guardrails/edit-lock still gate it.
  *
- * Config: KP_HASHLINE_ENABLED=0 disable.  KP_NATIVES=0 force the JS block scanner.
+ * OFF by default. hashline's only real win is edit RELIABILITY on weak models
+ * that thrash on string-match edits; a capable model doesn't need it, and the
+ * Wave-0 agent lane measured it costing ~18% MORE total tokens on MiniMax-M3
+ * (the forced hread re-read dwarfs the payload saving) plus per-turn tool-schema
+ * overhead. So it is opt-in — enable only for a genuinely weak model or a
+ * large-edit workload. See bench/RESULTS.md.
+ *
+ * Config: KP_HASHLINE_ENABLED=1 enable (off by default). KP_NATIVES=0 force the JS block scanner.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -32,7 +39,7 @@ import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadNatives } from "./lib/natives.ts";
 
-const ENABLED = process.env.KP_HASHLINE_ENABLED !== "0";
+const ENABLED = process.env.KP_HASHLINE_ENABLED === "1";
 const ALPH = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const HASH_LEN = 3;
 const SEP = "│";
@@ -205,9 +212,9 @@ function resolveBlockEnd(lines: string[], startIdx: number, path: string): numbe
 	return resolveBlockEndBraces(lines, startIdx);
 }
 
-type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
-const err = (text: string): ToolResult => ({ content: [{ type: "text", text }], isError: true });
-const ok = (text: string): ToolResult => ({ content: [{ type: "text", text }] });
+type ToolResult = { content: Array<{ type: "text"; text: string }>; details: { error?: boolean } | undefined };
+const err = (text: string): ToolResult => ({ content: [{ type: "text" as const, text }], details: { error: true } });
+const ok = (text: string): ToolResult => ({ content: [{ type: "text" as const, text }], details: undefined });
 
 export default function (pi: ExtensionAPI): void {
 	if (!ENABLED) return;
@@ -251,12 +258,15 @@ export default function (pi: ExtensionAPI): void {
 			},
 			required: ["path"],
 		},
-		async execute(_id: string, params: { path: string; offset?: number; limit?: number }): Promise<ToolResult> {
+		async execute(_id: string, params: { path?: unknown; offset?: unknown; limit?: unknown }): Promise<ToolResult> {
+			const path = String(params.path ?? "");
+			const offset = params.offset != null ? Number(params.offset) : undefined;
+			const limit = params.limit != null ? Number(params.limit) : undefined;
 			try {
-				const { lines, hashes } = readLines(params.path, process.cwd());
-				const start = Math.max(0, (params.offset ?? 1) - 1);
-				const end = params.limit ? Math.min(lines.length, start + params.limit) : lines.length;
-				markSeen(resolve(process.cwd(), params.path), hashes.slice(start, end));
+				const { lines, hashes } = readLines(path, process.cwd());
+				const start = Math.max(0, (offset ?? 1) - 1);
+				const end = limit ? Math.min(lines.length, start + limit) : lines.length;
+				markSeen(resolve(process.cwd(), path), hashes.slice(start, end));
 				const body = lines
 					.slice(start, end)
 					.map((l, i) => `${hashes[start + i]}${SEP}${l}`)
@@ -301,14 +311,16 @@ export default function (pi: ExtensionAPI): void {
 		},
 		async execute(
 			_id: string,
-			params: { path: string; changes?: Array<{ from: string; to: string; lines: unknown }> },
+			params: { path?: unknown; changes?: Array<{ from?: unknown; to?: unknown; lines?: unknown[] }> },
 		): Promise<ToolResult> {
+			const path = String(params.path ?? "");
+			const changes = (params.changes as Array<{ from: string; to: string; lines: unknown }>) ?? [];
 			const cwd = process.cwd();
-			const abs = resolve(cwd, params.path);
+			const abs = resolve(cwd, path);
 			let lines: string[];
 			let hashes: string[];
 			try {
-				({ lines, hashes } = readLines(params.path, cwd));
+				({ lines, hashes } = readLines(path, cwd));
 			} catch (e) {
 				return err(`hedit error: ${(e as Error).message}`);
 			}
@@ -316,7 +328,7 @@ export default function (pi: ExtensionAPI): void {
 			const idxOf = (h: string) => hashes.indexOf(h);
 			const shown = seen.get(abs);
 			const resolved: Array<{ s: number; e: number; lines: string[] }> = [];
-			for (const ch of params.changes ?? []) {
+			for (const ch of changes) {
 				if (shown && (!shown.has(ch.from) || !shown.has(ch.to)))
 					return err(
 						`[E_UNSEEN] anchor '${!shown.has(ch.from) ? ch.from : ch.to}' was never shown by hread on this file — ` +
@@ -349,7 +361,7 @@ export default function (pi: ExtensionAPI): void {
 				return err(`hedit write failed: ${(e as Error).message}`);
 			}
 			return ok(
-				`Applied ${resolved.length} change(s) to ${params.path} (${changed} lines replaced). ` +
+				`Applied ${resolved.length} change(s) to ${path} (${changed} lines replaced). ` +
 					`New line count: ${lines.length}.`,
 			);
 		},
@@ -377,26 +389,26 @@ export default function (pi: ExtensionAPI): void {
 			},
 			required: ["path", "from", "lines"],
 		},
-		async execute(_id: string, params: { path: string; from: string; lines: unknown }): Promise<ToolResult> {
+		async execute(_id: string, params: { path?: unknown; from?: unknown; lines?: unknown[] }): Promise<ToolResult> {
+			const path = String(params.path ?? "");
+			const from = String(params.from ?? "");
 			const cwd = process.cwd();
-			const abs = resolve(cwd, params.path);
+			const abs = resolve(cwd, path);
 			let lines: string[];
 			let hashes: string[];
 			try {
-				({ lines, hashes } = readLines(params.path, cwd));
+				({ lines, hashes } = readLines(path, cwd));
 			} catch (e) {
 				return err(`hedit_block error: ${(e as Error).message}`);
 			}
 			const shown = seen.get(abs);
-			if (shown && !shown.has(params.from))
-				return err(`[E_UNSEEN] anchor '${params.from}' was never shown by hread — run hread first.`);
-			const s = hashes.indexOf(params.from);
-			if (s < 0) return err(`[E_STALE] anchor '${params.from}' not found — re-run hread.`);
-			const e = resolveBlockEnd(lines, s, params.path);
+			if (shown && !shown.has(from))
+				return err(`[E_UNSEEN] anchor '${from}' was never shown by hread — run hread first.`);
+			const s = hashes.indexOf(from);
+			if (s < 0) return err(`[E_STALE] anchor '${from}' not found — re-run hread.`);
+			const e = resolveBlockEnd(lines, s, path);
 			if (e < 0)
-				return err(
-					`[E_NO_BLOCK] no block found from '${params.from}'. Use hedit with an explicit line range instead.`,
-				);
+				return err(`[E_NO_BLOCK] no block found from '${from}'. Use hedit with an explicit line range instead.`);
 			const newLines = unwrapLines(params.lines);
 			const removed = e - s + 1;
 			lines.splice(s, removed, ...newLines);
@@ -406,7 +418,7 @@ export default function (pi: ExtensionAPI): void {
 				return err(`hedit_block write failed: ${(e2 as Error).message}`);
 			}
 			return ok(
-				`Replaced block (lines ${s + 1}–${e + 1}, ${removed} lines) in ${params.path} ` +
+				`Replaced block (lines ${s + 1}–${e + 1}, ${removed} lines) in ${path} ` +
 					`with ${newLines.length}. New line count: ${lines.length}.`,
 			);
 		},

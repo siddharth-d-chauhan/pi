@@ -31,7 +31,7 @@ test("normalizeCommand collapses compound commands into a stable op signature", 
 // --- doom-loop guard (arity-normalized) ----------------------------------
 
 type Handler = (e: unknown) => Promise<{ block?: boolean; reason?: string }>;
-let mod: { default: (pi: unknown) => void };
+let mod: { default: (pi: never) => void };
 
 beforeAll(async () => {
 	process.env.KP_DOOMLOOP = "3"; // small threshold for a fast test
@@ -47,7 +47,7 @@ function freshHandler(): (command: string) => Promise<{ block?: boolean; reason?
 			if (e === "tool_call") handlers.push(h);
 		},
 		registerCommand() {},
-	});
+	} as never);
 	const h = handlers[0];
 	return (command: string) => h({ toolName: "bash", input: { command } });
 }

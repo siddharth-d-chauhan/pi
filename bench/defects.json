@@ -1,0 +1,45 @@
+{
+  "_comment": "Defect-catch benchmark. Each fixture is a small file with ONE subtle-but-real bug + its intended behavior. We run a reviewer over it in two modes — a generic correctness review vs the shipped 3-lens review — and measure how often each mode catches the defect. Catch = verdict 'buggy' AND the reviewer names the specific defect (tripwire regex matches its output). Reviewer only reads; nothing is executed.",
+  "fixtures": [
+    {
+      "name": "off-by-one-paginate",
+      "file": "paginate.ts",
+      "intent": "paginate(items, page, perPage) returns the items on 0-indexed `page`, with `perPage` items per page. A full page must contain exactly perPage items.",
+      "content": "/** Return the items on 0-indexed `page`, `perPage` items per page. */\nexport function paginate<T>(items: T[], page: number, perPage: number): T[] {\n  const start = page * perPage;\n  return items.slice(start, start + perPage - 1);\n}\n",
+      "defect": "slice end is start+perPage-1, so each page returns perPage-1 items (drops the last).",
+      "tripwire": "off.?by.?one|last (item|element|one|row)|one (fewer|too few|short|less|missing)|perPage ?- ?1|returns? .*(perPage ?- ?1|9 |one fewer)"
+    },
+    {
+      "name": "inverted-retry",
+      "file": "retry.ts",
+      "intent": "shouldRetry(status) returns whether an HTTP request should be retried. It must retry ONLY on server errors (status >= 500), never on client errors.",
+      "content": "/** Retry ONLY on server errors (status >= 500). */\nexport function shouldRetry(status: number): boolean {\n  return status < 500;\n}\n",
+      "defect": "condition is inverted: retries 4xx client errors and never retries 5xx server errors.",
+      "tripwire": "invert|backwards|opposite|reversed|< ?500|>= ?500|retr(y|ies|ying) .*(4xx|client)|never retr.*(5xx|server)|should be >="
+    },
+    {
+      "name": "empty-average-nan",
+      "file": "average.ts",
+      "intent": "average(nums) returns the arithmetic mean. For an EMPTY array it must return 0 (not NaN).",
+      "content": "/** Average of nums; empty array must return 0. */\nexport function average(nums: number[]): number {\n  let sum = 0;\n  for (const n of nums) sum += n;\n  return sum / nums.length;\n}\n",
+      "defect": "no empty-array guard: sum/0 returns NaN for an empty array instead of 0.",
+      "tripwire": "empty|length ?=== ?0|divi.*zero|\\bNaN\\b|zero.?length|/ ?0|nums\\.length ?=== ?0|no .*guard"
+    },
+    {
+      "name": "unanchored-id-regex",
+      "file": "id.ts",
+      "intent": "isValidId(s) returns true iff `s` is EXACTLY 8 characters, each a lowercase letter or digit. Anything longer, shorter, or containing other characters is invalid.",
+      "content": "/** True iff s is exactly 8 chars, each a lowercase letter or digit. */\nexport function isValidId(s: string): boolean {\n  return /[a-z0-9]{8}/.test(s);\n}\n",
+      "defect": "regex has no ^ $ anchors, so it matches any string CONTAINING 8 such chars (e.g. 'abcdefgh!!!' or 20-char strings pass).",
+      "tripwire": "anchor|\\^|\\$|substring|exactly|too long|extra (char|character)|length|start.*end|partial|contains|whole string"
+    },
+    {
+      "name": "foreach-async-race",
+      "file": "saveall.ts",
+      "intent": "saveAll(items, save) saves every item and must NOT resolve until ALL saves have completed.",
+      "content": "/** Save every item, then resolve — must wait for ALL saves. */\nexport async function saveAll(items: string[], save: (i: string) => Promise<void>): Promise<string> {\n  items.forEach(async (i) => {\n    await save(i);\n  });\n  return \"done\";\n}\n",
+      "defect": "forEach does not await its async callback, so saveAll returns 'done' before the saves finish (race / lost writes).",
+      "tripwire": "forEach|Promise\\.all|before .*(complete|finish|done|resolve)|does ?n.?t wait|not awaited|race|resolve.*(early|before)|for ?\\.\\.\\.of|for-of|fire.and.forget"
+    }
+  ]
+}

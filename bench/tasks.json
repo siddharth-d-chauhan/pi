@@ -1,14 +1,16 @@
 {
-  "_comment": "Wave-0 seed edit suite. Each task is a self-contained edit against `file` content. `oldString`/`newString` are what a builtin str-replace edit must emit; hashline emits two 3-char anchors + newString instead. `expect` is the file content after a correct apply. Deterministic lane needs no model.",
+  "_comment": "Wave-0 edit suite. Deterministic lane uses content/oldString/newString/startLine/endLine. Agent lane uses `intent` (the English task given to the model) and `check` (a behavioral assertion body: async fn (m, text) => boolean, where m is the imported edited module and text is the file text). Behavioral checks tolerate formatting differences a real model introduces.",
   "tasks": [
     {
       "name": "replace-function-body",
-      "file": "src/util.ts",
+      "file": "util.ts",
       "content": "export function slugify(s: string): string {\n  return s.toLowerCase().replace(/\\s+/g, \"-\");\n}\n\nexport function pad(n: number): string {\n  return String(n).padStart(2, \"0\");\n}\n",
       "oldString": "export function slugify(s: string): string {\n  return s.toLowerCase().replace(/\\s+/g, \"-\");\n}",
       "newString": "export function slugify(s: string): string {\n  return s.trim().toLowerCase().replace(/[^a-z0-9]+/g, \"-\").replace(/^-|-$/g, \"\");\n}",
       "startLine": 1,
-      "endLine": 3
+      "endLine": 3,
+      "intent": "In util.ts, improve the slugify function so it trims the input, lowercases it, replaces every run of characters that are NOT lowercase letters or digits with a single hyphen, and removes any leading or trailing hyphen. Do not change the pad function.",
+      "check": "return m.slugify('  Hello, World!! ') === 'hello-world' && m.slugify('a__b') === 'a-b' && m.pad(3) === '03';"
     },
     {
       "name": "change-config-value",
@@ -17,16 +19,9 @@
       "oldString": "  timeoutMs: 5000,",
       "newString": "  timeoutMs: 30000,",
       "startLine": 4,
-      "endLine": 4
-    },
-    {
-      "name": "insert-import",
-      "file": "app.ts",
-      "content": "import { readFile } from \"node:fs/promises\";\nimport { join } from \"node:path\";\n\nexport async function load(p: string) {\n  return readFile(join(process.cwd(), p), \"utf-8\");\n}\n",
-      "oldString": "import { join } from \"node:path\";",
-      "newString": "import { join } from \"node:path\";\nimport { existsSync } from \"node:fs\";",
-      "startLine": 2,
-      "endLine": 2
+      "endLine": 4,
+      "intent": "In config.ts, change the timeoutMs value from 5000 to 30000. Leave everything else unchanged.",
+      "check": "return m.config.timeoutMs === 30000 && m.config.port === 3000 && m.config.retries === 3;"
     },
     {
       "name": "delete-dead-branch",
@@ -35,7 +30,9 @@
       "oldString": "  if (x < 0) {\n    // legacy negative path — no longer reachable\n    return \"neg\";\n  }\n",
       "newString": "",
       "startLine": 2,
-      "endLine": 5
+      "endLine": 5,
+      "intent": "In handler.ts, delete the entire `if (x < 0)` branch (the legacy negative path) — it is unreachable dead code. Keep the rest of the handle function exactly as is.",
+      "check": "return m.handle(-1) === 'pos' && m.handle(0) === 'zero' && m.handle(5) === 'pos' && !text.includes('neg');"
     },
     {
       "name": "rewrite-large-block",
@@ -44,7 +41,9 @@
       "oldString": "  const parts = s.split(\"-\");\n  const a = Number(parts[0]);\n  const b = Number(parts[1]);\n  if (Number.isNaN(a) || Number.isNaN(b)) {\n    throw new Error(\"bad range\");\n  }\n  return [a, b];",
       "newString": "  const m = /^(\\d+)-(\\d+)$/.exec(s.trim());\n  if (!m) throw new Error(`bad range: ${s}`);\n  const a = Number(m[1]);\n  const b = Number(m[2]);\n  if (a > b) throw new Error(`inverted range: ${s}`);\n  return [a, b];",
       "startLine": 2,
-      "endLine": 8
+      "endLine": 8,
+      "intent": "Rewrite the body of parseRange in parse.ts so it parses the trimmed input with a single regex /^(\\d+)-(\\d+)$/. If it doesn't match, throw an Error whose message starts with 'bad range'. If the start number is greater than the end number, throw an Error whose message starts with 'inverted range'. Otherwise return [start, end] as numbers.",
+      "check": "try { const r = m.parseRange('2-5'); if (!(Array.isArray(r) && r[0]===2 && r[1]===5)) return false; } catch { return false; } let bad=false; try { m.parseRange('x'); } catch(e){ bad=/bad range/.test(e.message); } let inv=false; try { m.parseRange('9-2'); } catch(e){ inv=/inverted/.test(e.message); } return bad && inv;"
     }
   ]
 }

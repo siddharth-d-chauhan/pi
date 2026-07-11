@@ -28,14 +28,18 @@
  *   node bench/run.mjs --lane agent    # (requires a configured pi binary + budget)
  */
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const asJson = args.includes("--json");
 const lane = args.includes("--lane") ? args[args.indexOf("--lane") + 1] : "edit";
+const only = args.includes("--only") ? args[args.indexOf("--only") + 1] : null; // task-name filter
+const PI_BIN = process.env.BENCH_PI || "pi";
 
 // --- token estimate ------------------------------------------------------
 // A tokenizer-agnostic estimate (~4 chars/token, the standard rough constant).
@@ -155,17 +159,146 @@ function report(rows) {
 	);
 }
 
+// ---- agent lane ---------------------------------------------------------
+const alog = (m) => process.stderr.write(`${m}\n`);
+
+// Two arms force the same model to use each edit FORMAT, isolating the format's
+// effect on completion + tokens (the model otherwise picks builtin edit on its own).
+const AGENT_ARMS = [
+	{ key: "builtin", env: { KP_HASHLINE_ENABLED: "0" }, exclude: ["hread", "hedit", "hedit_block"] },
+	{ key: "hashline", env: {}, exclude: ["edit", "write", "multiedit", "str_replace", "apply_patch", "create_file"] },
+];
+
+function parseRun(jsonlines) {
+	let tokens = 0;
+	const seen = new Set();
+	const tools = {};
+	for (const line of jsonlines.split("\n")) {
+		if (!line.trim()) continue;
+		let e;
+		try {
+			e = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (e.type === "message_end" && e.message?.role === "assistant") {
+			const rid = e.message.responseId;
+			if (rid && !seen.has(rid)) {
+				seen.add(rid);
+				tokens += e.message.usage?.totalTokens || 0;
+			}
+		}
+		if (e.type === "agent_end" && Array.isArray(e.messages)) {
+			for (const msg of e.messages) {
+				if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+				for (const b of msg.content) if (b.type === "toolCall") tools[b.name] = (tools[b.name] || 0) + 1;
+			}
+		}
+	}
+	return { tokens, tools };
+}
+
+function runPi(cwd, intent, arm) {
+	return new Promise((res) => {
+		const a = ["-p", "--mode", "json", "--no-session", "--approve"];
+		if (arm.exclude?.length) a.push("--exclude-tools", arm.exclude.join(","));
+		a.push(intent);
+		let out = "";
+		let proc;
+		try {
+			proc = spawn(PI_BIN, a, { cwd, env: { ...process.env, ...arm.env }, stdio: ["ignore", "pipe", "pipe"] });
+		} catch {
+			return res("");
+		}
+		const timer = setTimeout(() => proc.kill(), 240_000);
+		proc.stdout.on("data", (d) => {
+			out += d.toString();
+		});
+		proc.stderr.on("data", () => {});
+		proc.on("close", () => {
+			clearTimeout(timer);
+			res(out);
+		});
+		proc.on("error", () => {
+			clearTimeout(timer);
+			res(out);
+		});
+	});
+}
+
+async function checkTask(task, dir) {
+	const file = join(dir, task.file);
+	let text = "";
+	try {
+		text = readFileSync(file, "utf-8");
+	} catch {
+		return false;
+	}
+	try {
+		const mod = await import(`${pathToFileURL(file).href}?v=${Date.now()}`);
+		// biome-ignore lint/security/noGlobalEval: bench check bodies are trusted local task fixtures
+		const fn = new Function("m", "text", task.check);
+		return (await fn(mod, text)) === true;
+	} catch {
+		return false;
+	}
+}
+
+async function runAgentLane() {
+	const { tasks } = JSON.parse(readFileSync(join(HERE, "tasks.json"), "utf-8"));
+	const suite = only ? tasks.filter((t) => t.name === only) : tasks;
+	alog(`\n  Wave-0 · agent lane — model completion + tokens-to-done (${PI_BIN}, ${suite.length} tasks × 2 formats)\n`);
+	const rows = [];
+	for (const task of suite) {
+		const rec = { name: task.name };
+		for (const arm of AGENT_ARMS) {
+			const dir = mkdtempSync(join(tmpdir(), `bench-${arm.key}-`));
+			writeFileSync(join(dir, task.file), task.content);
+			const out = await runPi(dir, task.intent, arm);
+			const { tokens, tools } = parseRun(out);
+			const done = await checkTask(task, dir);
+			rec[arm.key] = { done, tokens, tools };
+			alog(
+				`  ${task.name.padEnd(22)} ${arm.key.padEnd(9)} ${done ? "✓" : "✗"} · ${String(tokens).padStart(7)} tok · ${Object.keys(tools).join(",") || "none"}`,
+			);
+		}
+		rows.push(rec);
+	}
+	reportAgent(rows);
+}
+
+function reportAgent(rows) {
+	if (asJson) {
+		console.log(JSON.stringify({ lane: "agent", model: PI_BIN, rows }, null, 2));
+		return;
+	}
+	const pad = (s, n) => String(s).padEnd(n);
+	const padL = (s, n) => String(s).padStart(n);
+	console.log("\n  Wave-0 · agent lane (model-driven completion + tokens-to-done)\n");
+	console.log(
+		`  ${pad("task", 24)}${pad("builtin", 16)}${pad("hashline", 16)}`,
+	);
+	console.log(`  ${"─".repeat(56)}`);
+	for (const r of rows) {
+		const cell = (a) => `${a.done ? "✓" : "✗"} ${a.tokens} tok`;
+		console.log(`  ${pad(r.name, 24)}${pad(cell(r.builtin), 16)}${pad(cell(r.hashline), 16)}`);
+	}
+	console.log(`  ${"─".repeat(56)}`);
+	for (const arm of ["builtin", "hashline"]) {
+		const done = rows.filter((r) => r[arm].done);
+		const rate = Math.round((done.length / rows.length) * 100);
+		const meanTok = done.length ? Math.round(done.reduce((a, r) => a + r[arm].tokens, 0) / done.length) : 0;
+		console.log(
+			`  ${pad(arm.toUpperCase(), 24)}completion ${padL(`${done.length}/${rows.length}`, 5)} (${rate}%) · mean tokens-to-done ${meanTok}`,
+		);
+	}
+	console.log("");
+}
+
 if (lane === "edit") {
 	report(runEditLane());
 } else if (lane === "agent") {
-	console.log(
-		"\n  agent lane — model-driven completion-rate + tokens-to-done.\n" +
-			"  This runs a real model through the loop per task via `pi --print` and\n" +
-			"  costs tokens. Wire the pi binary + a task's verify command, then measure:\n" +
-			"    completion-rate = tasks whose criterion passes\n" +
-			"    tokens-to-done  = provider usage per completed task\n" +
-			"  Scaffold in place; run deliberately with a budget.\n",
-	);
+	await runAgentLane();
 } else {
 	console.error(`unknown lane: ${lane} (use 'edit' or 'agent')`);
 	process.exit(1);

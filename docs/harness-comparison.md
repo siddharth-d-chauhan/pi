@@ -33,7 +33,7 @@ file paths in the per-harness sections below.
 | Architecture | **client-server + SDKs** | monolith TUI | monolith TUI | monolith TUI + MCP memory svc |
 | Core loop | gather→act (no verify) | gather→act + advisor | gather→act (coordinator) | **gather→act→verify (loop)** |
 | Edit strategy | **9-strategy fuzzy replacer + patch** | **AST (tree-sitter) + hash-anchored** | line-based | line/anchor (pi) |
-| Orchestration | 1-level task delegation | **YAML swarm DAG** | **coordinator + workers** | **verified loop + chains** |
+| Orchestration | 1-level task delegation | **IRC agent-bus + revivable agents** (swarm YAML on top) | **coordinator + workers** | **verified loop + chains** |
 | Subagent isolation | child session | **CoW fs clone (8 backends)** | worktree/remote/**fork** | worktree (via agent tool) |
 | Memory | ✗ (instruction files) | **mnemopi (research-grade) + 3 more** | 5 subsystems (memdir/dream/extract/session/team-sync) | **KP governed graph + full taxonomy** |
 | Memory retrieval | lexical only | **4-voice RRF + hybrid + graph** | file recall | hot-FTS + semantic + graph, `/recall` |
@@ -98,11 +98,19 @@ Area-drift context injection with cross-channel dedup and KV-cache discipline.
 
 ### Tier 1 — high value, fits our architecture, clear win
 
-1. **AST-based editing via a native engine (from omp `pi-ast`).** Our edits are line/anchor;
-   omp's are tree-sitter-accurate across 57 languages with overlap rejection and staged-flush
-   atomicity. This is the single biggest capability gap. Path: consume `@oh-my-pi/pi-natives`
-   (it's a published npm addon) or the `pi-ast` crate as an optional native accelerator behind
-   a JS fallback — an `edit` strategy upgrade, not a rewrite. **Highest leverage.**
+0. **Hashline edit format (from omp `packages/hashline`) — the new #1.** Content-hash-anchored
+   line patches: each file section headed `[PATH#TAG]` (4-hex hash of normalized content); ops
+   name original line numbers and supply only new text (the model never retypes context lines);
+   **stale anchors are rejected before applying**, killing the "string not found"/whitespace
+   retry loops. omp's own TS edit benchmark proves the *format*, not the model, drives edit
+   reliability: Grok Code Fast 1 **6.7% → 68.3%**, MiniMax **2.1×**, Grok 4 Fast **−61% tokens**.
+   That is our exact "strong harness makes a weak model reliable" thesis, and it's a **format
+   change** (TS + a lark grammar) — far cheaper than native adoption, works with any model. Ship
+   as a new `edit` mode with per-model fallback. **Highest leverage on the whole list.**
+1. **AST-based editing via a native engine (from omp `pi-ast`).** Complements hashline (its
+   `.BLK` block ops already use tree-sitter). tree-sitter-accurate across 57 languages with
+   overlap rejection and staged-flush atomicity. Path: consume `@oh-my-pi/pi-natives` (published
+   npm addon) or the `pi-ast` crate as an optional native accelerator behind a JS fallback.
 2. **Copy-on-write task sandboxing (from omp `pi-iso`).** Our loop workers use git worktrees;
    `pi-iso` gives cheap CoW clones with git-apply-ready diffs across 8 fs backends — better
    isolation for best-of-n candidate workers and safer autonomous runs. Pairs naturally with

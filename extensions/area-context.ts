@@ -24,7 +24,7 @@ import { basename, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { copper, heatLine } from "./lib/card.ts";
-import { callKp, extractPaths, isDelivered, markDelivered } from "./lib/kp-bridge.ts";
+import { callKp, extractPaths, isDelivered, markDelivered, resetDelivered } from "./lib/kp-bridge.ts";
 
 const AREA_TIMEOUT_MS = Number(process.env.PI_KP_AREA_TIMEOUT_MS ?? 4_000);
 const AREA_MAX_ITEMS = Number(process.env.PI_KP_AREA_MAX_ITEMS ?? 8);
@@ -154,10 +154,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// New session / direction change: epoch key changes naturally; nothing to
-	// clear eagerly, but a fresh session must not inherit the old set.
+	// clear eagerly, but a fresh session must not inherit the old set — and the
+	// shared delivered-facts registry must reset too, or a /new session would
+	// suppress facts its own boot is entitled to deliver again.
 	pi.on("session_start", async () => {
 		state.injected.clear();
 		state.inFlight.clear();
+		resetDelivered();
 	});
 
 	pi.registerMessageRenderer<{ area?: string; items?: number }>("area-context", (message, options, theme) => {

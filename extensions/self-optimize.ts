@@ -179,11 +179,17 @@ export default function (pi: ExtensionAPI) {
 		record(text, source === "explicit" ? "explicit" : "heuristic");
 	};
 
+	// Preferences promoted DURING this session: KP owns them now, but this
+	// session's boot already fired before they existed — keep injecting them
+	// locally until the session ends, or they'd reach NEITHER channel today.
+	const promotedThisSession = new Set<string>();
+
 	// Injection: append the active standing preferences as a stable context
 	// block — but ONLY the ones KP does not own (inKp preferences arrive via
-	// the knowledge-boot channel; injecting them here would duplicate them).
+	// the knowledge-boot channel; injecting them here would duplicate them),
+	// plus any promoted mid-session (see above).
 	pi.on("context", async (event) => {
-		const steps = loadStanding().filter((s) => !s.inKp);
+		const steps = loadStanding().filter((s) => !s.inKp || promotedThisSession.has(s.text));
 		if (steps.length === 0) return;
 		const messages = event?.messages;
 		if (!Array.isArray(messages)) return;
@@ -233,6 +239,7 @@ export default function (pi: ExtensionAPI) {
 			for (const p of proposals) {
 				const inKp = await writebackPreference(p.text, p.sessions);
 				if (inKp) intoKp += 1;
+				promotedThisSession.add(p.text); // this session's boot predates it
 				promotedNew.push({ text: p.text, sessions: p.sessions, version, inKp });
 			}
 			try {

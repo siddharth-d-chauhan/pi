@@ -116,7 +116,11 @@ function searchIntents(query: string, cwd: string): RecallHit[] {
 }
 
 async function searchKp(query: string, limit: number): Promise<RecallHit[]> {
-	const parsed = await callKp<unknown>("knowledge.memory_search", { query, limit }, KP_SEARCH_TIMEOUT_MS);
+	// knowledge.search (NOT memory_search): it has the hot-tier read-through,
+	// so facts written this session — before graph reconciliation — are found.
+	// Verified live: a hot-only writeback ranked first here and was absent
+	// from the graph-backed memory_search.
+	const parsed = await callKp<unknown>("knowledge.search", { query, limit }, KP_SEARCH_TIMEOUT_MS);
 	if (!parsed) return [];
 	// tolerate several result shapes: bare array, {hits}, {results}, {memories}
 	const obj = parsed as Record<string, unknown>;

@@ -67,7 +67,7 @@ function installKp() {
 						freshness: { area: String(req.arguments.area) },
 					});
 				}
-				if (req.name === "knowledge.memory_search") {
+				if (req.name === "knowledge.search") {
 					return ok({ hits: kpFacts.map((f) => ({ ...f, score: 0.9 })) });
 				}
 				return ok({});

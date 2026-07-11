@@ -8,6 +8,7 @@
  *   (automatic)         a user message that looks like a correction is journaled
  *   /self note <lesson> record a lesson explicitly (high precision)
  *   /self optimize      show recurring corrections distilled into candidates
+ *                       (semantic clustering via the KP embedder, keyword fallback)
  *   /self optimize apply promote candidates into standing instructions (versioned)
  *   /self                show active standing instructions
  *   /self forget <n>     drop standing instruction n
@@ -28,11 +29,54 @@ import {
 	type CorrectionProposal,
 	type CorrectionRecord,
 	distillCorrections,
+	distillCorrectionsSemantic,
 	parseJournal,
 	type StandingInstruction,
 } from "./lib/correction-optimizer.ts";
 
 const MIN_SESSIONS = Math.max(2, Number(process.env.PI_SELF_MIN_SESSIONS ?? 2));
+const SEMANTIC_THRESHOLD = Number(process.env.PI_SELF_COSINE ?? 0.78);
+const KP_EMBED_TIMEOUT_MS = Number(process.env.PI_KP_EMBED_TIMEOUT_MS ?? 8_000);
+
+interface KpShared {
+	connect: () => Promise<{
+		callTool: (
+			req: { name: string; arguments: Record<string, unknown> },
+			schema?: undefined,
+			opts?: { timeout?: number },
+		) => Promise<{ isError?: boolean; content: Array<{ type: string; text?: string }> }>;
+	}>;
+	timeoutMs: number;
+}
+
+/** Embed texts through the shared KP client (bge-small). Returns undefined when
+ *  KP is unavailable or the count doesn't round-trip — the caller then falls
+ *  back to keyword clustering. */
+async function embedViaKp(texts: string[]): Promise<number[][] | undefined> {
+	const shared = (globalThis as Record<string, unknown>).__pi_kp__ as KpShared | undefined;
+	if (!shared || texts.length === 0) return undefined;
+	try {
+		const client = await shared.connect();
+		const result = await client.callTool({ name: "pi.embed_texts", arguments: { texts } }, undefined, {
+			timeout: KP_EMBED_TIMEOUT_MS,
+		});
+		if (result.isError) return undefined;
+		const raw = result.content?.find((c) => c.type === "text")?.text;
+		if (!raw) return undefined;
+		const parsed = JSON.parse(raw) as { vectors?: number[][] };
+		const vectors = parsed.vectors;
+		if (
+			!Array.isArray(vectors) ||
+			vectors.length !== texts.length ||
+			vectors.some((v) => !Array.isArray(v) || v.length === 0)
+		) {
+			return undefined;
+		}
+		return vectors;
+	} catch {
+		return undefined;
+	}
+}
 
 // Heuristic correction detectors. Deliberately recall-biased: false positives
 // are harmless (they only become candidates, gated by recurrence + apply).
@@ -134,7 +178,10 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
-	const optimize = (apply: boolean, notify: (t: string, l: "info" | "warning" | "error") => void): void => {
+	const optimize = async (
+		apply: boolean,
+		notify: (t: string, l: "info" | "warning" | "error") => void,
+	): Promise<void> => {
 		const records = loadJournal();
 		if (records.length === 0) {
 			notify(
@@ -144,7 +191,19 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		const existing = loadStanding();
-		const proposals = distillCorrections(records, existing, MIN_SESSIONS);
+		// Prefer semantic clustering (KP embedder) so paraphrases group even with
+		// no shared words; fall back to keyword clustering if KP is unavailable.
+		let mode: "semantic" | "keyword" = "keyword";
+		let proposals: CorrectionProposal[];
+		const vectors = await embedViaKp([...records.map((r) => r.text), ...existing.map((e) => e.text)]);
+		if (vectors) {
+			mode = "semantic";
+			const recVecs = vectors.slice(0, records.length);
+			const exVecs = vectors.slice(records.length);
+			proposals = distillCorrectionsSemantic(records, recVecs, exVecs, MIN_SESSIONS, SEMANTIC_THRESHOLD);
+		} else {
+			proposals = distillCorrections(records, existing, MIN_SESSIONS);
+		}
 		let applied: CorrectionProposal[] = [];
 		if (apply && proposals.length > 0) {
 			const version = currentVersion(existing) + 1;
@@ -170,6 +229,7 @@ export default function (pi: ExtensionAPI) {
 					totalCorrections: records.length,
 					distinctSessions: new Set(records.map((r) => r.session)).size,
 					minSessions: MIN_SESSIONS,
+					mode,
 					proposals: applied.length > 0 ? [] : proposals,
 					applied,
 					standing: existing.map((s) => ({ text: s.text, sessions: s.sessions, version: s.version })),
@@ -183,6 +243,7 @@ export default function (pi: ExtensionAPI) {
 		totalCorrections?: number;
 		distinctSessions?: number;
 		minSessions?: number;
+		mode?: "semantic" | "keyword";
 		proposals?: CorrectionProposal[];
 		applied?: CorrectionProposal[];
 		standing?: StandingInstruction[];
@@ -190,7 +251,7 @@ export default function (pi: ExtensionAPI) {
 		const d = message.details ?? {};
 		const lines: string[] = [];
 		lines.push(
-			`${copper("▎")} ⚙ ${theme.fg("text", "self-optimize")} · ${theme.fg("muted", `${d.totalCorrections ?? 0} corrections across ${d.distinctSessions ?? 0} sessions · promote ≥${d.minSessions ?? 2}`)}`,
+			`${copper("▎")} ⚙ ${theme.fg("text", "self-optimize")} · ${theme.fg("muted", `${d.totalCorrections ?? 0} corrections across ${d.distinctSessions ?? 0} sessions · promote ≥${d.minSessions ?? 2} · ${d.mode ?? "keyword"} clustering`)}`,
 		);
 		lines.push(heatLine(46));
 		const applied = d.applied ?? [];
@@ -236,7 +297,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (sub === "optimize") {
-				optimize(/\bapply\b/i.test(raw), notify);
+				await optimize(/\bapply\b/i.test(raw), notify);
 				return;
 			}
 			if (sub === "forget") {

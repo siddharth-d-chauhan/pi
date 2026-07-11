@@ -95,6 +95,74 @@ export function parseJournal(text: string): CorrectionRecord[] {
 	return out;
 }
 
+export function cosine(a: number[], b: number[]): number {
+	let dot = 0;
+	let na = 0;
+	let nb = 0;
+	for (let i = 0; i < a.length; i++) {
+		dot += a[i] * b[i];
+		na += a[i] * a[i];
+		nb += b[i] * b[i];
+	}
+	const denom = Math.sqrt(na) * Math.sqrt(nb);
+	return denom ? dot / denom : 0;
+}
+
+/** Semantic variant of distillCorrections: cluster by embedding cosine instead
+ *  of keyword overlap, so paraphrases with no shared words still group. Vectors
+ *  are supplied by the caller (KP embedder); recordVectors[i] pairs with
+ *  records[i], existingVectors[j] with existing[j]. Same session/threshold/
+ *  coverage policy as the keyword version. */
+export function distillCorrectionsSemantic(
+	records: CorrectionRecord[],
+	recordVectors: number[][],
+	existingVectors: number[][],
+	minSessions = 2,
+	threshold = 0.78,
+): CorrectionProposal[] {
+	const clusters: Array<{ sum: number[]; n: number; texts: string[]; sessions: Set<string>; explicit: boolean }> = [];
+	for (let i = 0; i < records.length; i++) {
+		const v = recordVectors[i];
+		if (!v || v.length === 0) continue;
+		let best = -1;
+		let bestSim = threshold;
+		for (let c = 0; c < clusters.length; c++) {
+			const centroid = clusters[c].sum.map((x) => x / clusters[c].n);
+			const sim = cosine(v, centroid);
+			if (sim >= bestSim) {
+				bestSim = sim;
+				best = c;
+			}
+		}
+		if (best >= 0) {
+			const cl = clusters[best];
+			for (let k = 0; k < v.length; k++) cl.sum[k] += v[k];
+			cl.n += 1;
+			cl.texts.push(records[i].text);
+			cl.sessions.add(records[i].session);
+			cl.explicit = cl.explicit || records[i].source === "explicit";
+		} else {
+			clusters.push({
+				sum: [...v],
+				n: 1,
+				texts: [records[i].text],
+				sessions: new Set([records[i].session]),
+				explicit: records[i].source === "explicit",
+			});
+		}
+	}
+	const proposals: CorrectionProposal[] = [];
+	for (const cl of clusters) {
+		const need = cl.explicit ? 1 : minSessions;
+		if (cl.sessions.size < need) continue;
+		const centroid = cl.sum.map((x) => x / cl.n);
+		if (existingVectors.some((ev) => ev.length > 0 && cosine(centroid, ev) >= threshold)) continue;
+		const text = [...cl.texts].sort((a, b) => b.length - a.length)[0];
+		proposals.push({ text, sessions: cl.sessions.size, samples: [...new Set(cl.texts)].slice(0, 4) });
+	}
+	return proposals.sort((a, b) => b.sessions - a.sessions);
+}
+
 /** Greedy keyword-overlap clustering of corrections, then promote clusters that
  *  span >= minSessions distinct sessions and don't already match a standing
  *  instruction. An explicit /self note counts immediately (minSessions=1 for it). */

@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { expect, test } from "vitest";
 import {
 	type CorrectionRecord,
+	cosine,
 	distillCorrections,
+	distillCorrectionsSemantic,
 	jaccard,
 	keywords,
 	parseJournal,
@@ -53,6 +55,32 @@ test("distill: a lesson recurring across DISTINCT sessions becomes a candidate",
 	// already-covered lessons are not re-proposed
 	const existing: StandingInstruction[] = [{ text: "use bitbucket not github for merges", sessions: 2, version: 2 }];
 	expect(distillCorrections(records, existing, 2).length).toBe(0);
+});
+
+test("semantic distill: paraphrases with NO shared words still cluster by vector", () => {
+	// Two ways of saying the same thing with disjoint vocabulary + one unrelated.
+	// (unit vectors; a/b near-parallel, c orthogonal-ish — what the KP embedder gives)
+	const records: CorrectionRecord[] = [
+		{ session: "s1", text: "wrap external calls in a retry", source: "heuristic" },
+		{ session: "s2", text: "add backoff around network requests", source: "heuristic" },
+		{ session: "s3", text: "the button should be blue", source: "heuristic" },
+	];
+	const vectors = [
+		[1, 0.05, 0],
+		[0.98, 0.2, 0], // ~0.96 cosine with the first -> same cluster
+		[0, 0, 1], // unrelated
+	];
+	expect(cosine(vectors[0], vectors[1])).toBeGreaterThan(0.9);
+	// no keyword overlap between the two retry phrasings
+	expect(jaccard(keywords(records[0].text), keywords(records[1].text)).valueOf()).toBeLessThan(0.2);
+	// keyword distill FAILS to group them (each its own 1-session cluster)
+	expect(distillCorrections(records, [], 2).length).toBe(0);
+	// semantic distill groups the two paraphrases across 2 sessions -> 1 candidate
+	const props = distillCorrectionsSemantic(records, vectors, [], 2, 0.78);
+	expect(props.length).toBe(1);
+	expect(props[0].sessions).toBe(2);
+	// coverage: an existing instruction whose vector is near the cluster is skipped
+	expect(distillCorrectionsSemantic(records, vectors, [[0.99, 0.1, 0]], 2, 0.78).length).toBe(0);
 });
 
 test("parseJournal tolerates junk and normalizes source", () => {

@@ -118,7 +118,7 @@ export function distillCorrectionsSemantic(
 	recordVectors: number[][],
 	existingVectors: number[][],
 	minSessions = 2,
-	threshold = 0.78,
+	threshold = 0.66,
 ): CorrectionProposal[] {
 	const clusters: Array<{ sum: number[]; n: number; texts: string[]; sessions: Set<string>; explicit: boolean }> = [];
 	for (let i = 0; i < records.length; i++) {

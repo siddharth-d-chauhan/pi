@@ -35,7 +35,11 @@ import {
 } from "./lib/correction-optimizer.ts";
 
 const MIN_SESSIONS = Math.max(2, Number(process.env.PI_SELF_MIN_SESSIONS ?? 2));
-const SEMANTIC_THRESHOLD = Number(process.env.PI_SELF_COSINE ?? 0.78);
+// Measured on live bge-small vectors (10 pairs): lowest same-lesson cosine
+// 0.681, highest different-lesson 0.639 — 0.66 is the midpoint. Recall-biased
+// on purpose: a false merge still needs distinct sessions + human `apply`
+// (samples shown), while a false split hides a real lesson forever.
+const SEMANTIC_THRESHOLD = Number(process.env.PI_SELF_COSINE ?? 0.66);
 const KP_EMBED_TIMEOUT_MS = Number(process.env.PI_KP_EMBED_TIMEOUT_MS ?? 8_000);
 
 interface KpShared {

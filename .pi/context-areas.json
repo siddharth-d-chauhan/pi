@@ -1,0 +1,12 @@
+{
+	"areas": {
+		"broker": [
+			"extensions/context-broker.ts",
+			"extensions/knowledge.ts",
+			"extensions/area-context.ts",
+			"knowledge_platform/"
+		],
+		"loop": ["extensions/loop.ts", "extensions/devbrain.ts"],
+		"tui": ["packages/tui/", "modes/interactive/"]
+	}
+}

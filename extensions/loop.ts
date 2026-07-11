@@ -32,6 +32,11 @@
  * candidate workers in worktrees, selected by execution evidence.
  * Rejections append a lesson to GUARDRAILS.md, which every later round and
  * reviewer reads — the loop learns from its failures (Ralph guardrails).
+ * Self-optimization (online GEPA-lite): when a failure CLASS (criteria /
+ * review / gate) recurs, the loop promotes its lesson from a passive
+ * guardrail into an explicit un-skippable step REWRITTEN INTO ITS OWN round
+ * prompt — the harness editing its instructions from its own failures.
+ * Learned steps persist in state.json and survive /loop resume.
  * State (PROGRESS.md, GUARDRAILS.md, criteria.json, state.json) lives in
  * .pi/loops/<goal>/; context dies, files don't — /loop resume re-attaches.
  */
@@ -251,6 +256,11 @@ interface OrchestratedLoop {
 	reviewModel?: string;
 	/** Consecutive rejected done claims; >=2 switches rounds to best-of-n candidates. */
 	rejections: number;
+	/** Self-optimization (online GEPA-lite): per-failure-class repeat counts,
+	 *  and the instructions the loop has rewritten into its own round prompt
+	 *  once a failure class recurred. */
+	failureCounts: Record<string, { count: number; evidence: string }>;
+	learnedSteps: string[];
 	/** Verdict history for the status panel (bounded). */
 	verdicts: Array<{ round: number; verdict: string; summary: string; took: number }>;
 	/** git HEAD at loop start — the reviewer diffs against this. */
@@ -321,6 +331,8 @@ function saveState(loop: OrchestratedLoop, status: string): void {
 					criteriaEnabled: loop.criteriaEnabled,
 					reviewModel: loop.reviewModel,
 					rejections: loop.rejections,
+					failureCounts: loop.failureCounts,
+					learnedSteps: loop.learnedSteps,
 					verdicts: loop.verdicts.slice(-10),
 					baseline: loop.baseline,
 					status,
@@ -342,6 +354,53 @@ function addGuardrail(loop: OrchestratedLoop, lesson: string): void {
 	} catch {
 		// best-effort
 	}
+}
+
+/** How many repeats of a failure class before the loop promotes its lesson
+ *  from a passive guardrail into an explicit round-prompt step. */
+const LEARN_THRESHOLD = Math.max(2, Number(process.env.PI_LOOP_LEARN_THRESHOLD ?? 2));
+
+/** Online GEPA-lite: turn a recurring failure CLASS into a rewritten round-
+ *  prompt instruction. A guardrail the model may skim becomes an un-skippable
+ *  numbered step once the same class of failure repeats — the loop editing its
+ *  own operating instructions from its own failures. Returns the minted step,
+ *  or undefined when the class has not yet recurred / already produced one. */
+function learnedStepFor(cls: string, evidence: string, gate?: string): string {
+	switch (cls) {
+		case "criteria":
+			return `Before ANY "done" verdict: run each remaining criterion's \`verify\` command from criteria.json and PASTE its real output into PROGRESS.md. Only flip passes=true from pasted command output — never from assertion. (learned: repeated done claims left criteria unmet — ${evidence})`;
+		case "review":
+			return `Before ANY "done" verdict: self-review the FULL diff against every acceptance criterion and fix the RECURRING class of issue the reviewer keeps finding, not just the one instance. (learned: independent review keeps rejecting — ${evidence})`;
+		case "gate":
+			return `Before ANY "done" verdict: run \`devbrain flow goal ${gate ?? "<gate>"}\` yourself and make it GREEN, pasting the result into PROGRESS.md. Do not claim done on an unverified gate. (learned: the gate keeps rejecting — ${evidence})`;
+		default:
+			return `Recurring failure "${cls}" — address its root cause before the next "done" verdict. (${evidence})`;
+	}
+}
+
+/** Record a rejection against its failure class; on the Nth repeat, rewrite the
+ *  loop's round prompt with a learned step. Returns true when a step was minted. */
+function recordFailure(loop: OrchestratedLoop, cls: string, evidence: string): boolean {
+	const registry = getBackgroundProcessRegistry();
+	const entry = loop.failureCounts[cls] ?? { count: 0, evidence };
+	entry.count += 1;
+	entry.evidence = evidence;
+	loop.failureCounts[cls] = entry;
+	if (entry.count < LEARN_THRESHOLD) return false;
+	const step = learnedStepFor(cls, evidence, loop.gate);
+	if (loop.learnedSteps.includes(step)) return false;
+	loop.learnedSteps.push(step);
+	registry.appendLog(
+		loop.id,
+		`✎ self-rewrite: '${cls}' failed ${entry.count}× — promoted a learned step into the round prompt`,
+	);
+	try {
+		appendFileSync(guardrailsPath(loop), `- [round ${loop.round}] LEARNED STEP (${cls}×${entry.count}): ${step}\n`);
+	} catch {
+		// best-effort
+	}
+	loop.notify(`loop ${loop.goal}: rewrote its round prompt after repeated '${cls}' failures`, "info");
+	return true;
 }
 
 /** Round 0: turn the one-line goal into machine-checkable acceptance criteria
@@ -386,7 +445,18 @@ function loopContractLines(loop: OrchestratedLoop): string[] {
 				'A "done" claim is MECHANICALLY REJECTED while any criterion has passes=false.',
 			]
 		: [];
+	// Learned steps (online GEPA-lite): instructions the loop rewrote into its
+	// OWN prompt after a failure class recurred. Highest priority — placed
+	// first, un-skippable, unlike the passive "go read the guardrails file".
+	const learnedLines =
+		loop.learnedSteps.length > 0
+			? [
+					`LEARNED THIS RUN — the loop rewrote these steps into its own prompt after repeated failures. Obey them BEFORE anything else:`,
+					...loop.learnedSteps.map((s, i) => `  L${i + 1}. ${s}`),
+				]
+			: [];
 	return [
+		...learnedLines,
 		`State file: ${progressPath(loop)} (read it first; it survives across rounds — context does not).`,
 		`Guardrails file: ${guardrailsPath(loop)} (read it and honor EVERY rule — it is the loop's memory of past failures).`,
 		...criteriaLines,
@@ -493,7 +563,14 @@ async function startOrchestration(
 		criteria?: boolean;
 		reviewModel?: string;
 		/** Resume: restore round/notes/baseline from a prior run's state.json. */
-		restore?: { round: number; notes: string[]; baseline?: string; rejections?: number };
+		restore?: {
+			round: number;
+			notes: string[];
+			baseline?: string;
+			rejections?: number;
+			failureCounts?: Record<string, { count: number; evidence: string }>;
+			learnedSteps?: string[];
+		};
 		notify: OrchestratedLoop["notify"];
 	},
 ): Promise<string> {
@@ -541,6 +618,8 @@ async function startOrchestration(
 		criteriaRetried: false,
 		reviewModel: opts.reviewModel ?? process.env.PI_LOOP_REVIEW_MODEL,
 		rejections: opts.restore?.rejections ?? 0,
+		failureCounts: opts.restore?.failureCounts ?? {},
+		learnedSteps: opts.restore?.learnedSteps ?? [],
 		verdicts: [],
 		baseline,
 		roundStartedAt: 0,
@@ -631,6 +710,8 @@ async function resumeOrchestration(
 		criteriaEnabled?: boolean;
 		reviewModel?: string;
 		rejections?: number;
+		failureCounts?: Record<string, { count: number; evidence: string }>;
+		learnedSteps?: string[];
 		baseline?: string;
 		status: string;
 	}
@@ -662,6 +743,8 @@ async function resumeOrchestration(
 			notes: target.notes ?? [],
 			baseline: target.baseline,
 			rejections: target.rejections,
+			failureCounts: target.failureCounts,
+			learnedSteps: target.learnedSteps,
 		},
 		notify: opts.notify,
 	}).then((msg) =>
@@ -688,6 +771,7 @@ function messageDetails(loop: OrchestratedLoop, extra?: Record<string, unknown>)
 		budget: loop.budget,
 		gate: loop.gate,
 		criteria: cs ? { passed: cs.passed, total: cs.total } : undefined,
+		learned: loop.learnedSteps.length,
 		...extra,
 	};
 }
@@ -749,6 +833,7 @@ function sendStatusPanel(
 				gate: state.gate,
 				reviewModel: state.reviewModel,
 				rejections: state.rejections ?? 0,
+				learnedSteps: state.learnedSteps ?? [],
 				verdicts: state.verdicts ?? [],
 				criteria,
 				guardrails,
@@ -972,6 +1057,7 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 		if (reviewVerdict !== "pass") {
 			loop.rejections += 1;
 			addGuardrail(loop, `review rejected a done claim: ${reviewSummary}`);
+			recordFailure(loop, "review", reviewSummary);
 			loop.notes.push(
 				`Your previous "done" claim FAILED independent review: ${reviewSummary}. Address every finding (see PROGRESS.md) before claiming done again.`,
 			);
@@ -986,6 +1072,7 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 				loop.rejections += 1;
 				registry.appendLog(loop.id, `✗ done claim REJECTED by gate '${loop.gate}' — ${gate.evidence.slice(0, 80)}`);
 				addGuardrail(loop, `gate '${loop.gate}' rejected a done claim: ${gate.evidence}`);
+				recordFailure(loop, "gate", gate.evidence);
 				loop.notes.push(
 					`Your previous "done" claim passed review but FAILED the verification gate '${loop.gate}': ${gate.evidence}. Fix that first.`,
 				);
@@ -1033,6 +1120,7 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 				`✗ done claim REJECTED mechanically — criteria ${cs.passed}/${cs.total} (remaining: ${remaining})`,
 			);
 			addGuardrail(loop, `claimed done with unmet criteria: ${remaining}`);
+			recordFailure(loop, "criteria", remaining);
 			loop.notes.push(
 				`Your "done" claim was rejected WITHOUT review: criteria.json still has ${cs.remaining.length} unmet criteria (${remaining}). Meet them (with verification evidence) or explain in PROGRESS.md why a criterion is obsolete and update its desc — never delete criteria.`,
 			);
@@ -1052,6 +1140,7 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 				loop.rejections += 1;
 				registry.appendLog(loop.id, `✗ done claim REJECTED by gate '${loop.gate}' — ${gate.evidence.slice(0, 80)}`);
 				addGuardrail(loop, `gate '${loop.gate}' rejected a done claim: ${gate.evidence}`);
+				recordFailure(loop, "gate", gate.evidence);
 				loop.notes.push(
 					`Your previous "done" claim FAILED the verification gate '${loop.gate}': ${gate.evidence}. Fix that first.`,
 				);
@@ -1113,6 +1202,7 @@ interface LoopChipDetails {
 	criteria?: { passed: number; total: number };
 	bestOfN?: boolean;
 	reviewModel?: string;
+	learned?: number;
 }
 
 interface LoopStatusDetails {
@@ -1123,6 +1213,7 @@ interface LoopStatusDetails {
 	gate?: string;
 	reviewModel?: string;
 	rejections?: number;
+	learnedSteps?: string[];
 	verdicts?: Array<{ round: number; verdict: string; summary: string; took: number }>;
 	criteria?: Criterion[];
 	guardrails?: number;
@@ -1157,6 +1248,7 @@ export default function (pi: ExtensionAPI) {
 			d?.gate ? `gate ${d.gate}` : "",
 			d?.bestOfN ? theme.fg("warning", "BEST-OF-N") : "",
 			d?.reviewModel ? `judge ${d.reviewModel}` : "",
+			d?.learned ? theme.fg("accent", `✎ ${d.learned} learned`) : "",
 		].filter(Boolean);
 		return bits.join(" · ");
 	};
@@ -1197,6 +1289,13 @@ export default function (pi: ExtensionAPI) {
 			for (const c of criteria) {
 				const mark = c.passes === true ? theme.fg("success", "✓") : theme.fg("dim", "·");
 				lines.push(`  ${mark} ${theme.fg(c.passes === true ? "text" : "dim", `${c.id} — ${c.desc.slice(0, 70)}`)}`);
+			}
+		}
+		const learned = d.learnedSteps ?? [];
+		if (learned.length > 0) {
+			lines.push(theme.fg("accent", `✎ self-rewritten steps (${learned.length}) — learned from repeated failures`));
+			for (const s of learned) {
+				lines.push(`  ${theme.fg("accent", "L")} ${theme.fg("text", s.slice(0, 88))}`);
 			}
 		}
 		const verdicts = (d.verdicts ?? []).slice(-5);

@@ -32,11 +32,16 @@
  * candidate workers in worktrees, selected by execution evidence.
  * Rejections append a lesson to GUARDRAILS.md, which every later round and
  * reviewer reads — the loop learns from its failures (Ralph guardrails).
- * Self-optimization (online GEPA-lite): when a failure CLASS (criteria /
- * review / gate) recurs, the loop promotes its lesson from a passive
- * guardrail into an explicit un-skippable step REWRITTEN INTO ITS OWN round
- * prompt — the harness editing its instructions from its own failures.
- * Learned steps persist in state.json and survive /loop resume.
+ * Self-optimization, two tiers:
+ *   ONLINE (GEPA-lite): when a failure CLASS (criteria/review/gate) recurs
+ *   within a run, the loop promotes its lesson from a passive guardrail into
+ *   an explicit un-skippable step REWRITTEN INTO ITS OWN round prompt.
+ *   Learned steps persist in state.json and survive /loop resume.
+ *   OFFLINE (/loop optimize [apply]): every run appends a scored record to
+ *   .pi/loops/_optimizer/journal.jsonl. A failure class the online tier had
+ *   to re-learn across many runs is DISTILLED into a STANDING LESSON pre-
+ *   loaded into every future loop's round prompt from round 1 (base-prompt
+ *   versioned). The effect is measured — a promoted class should recur less.
  * State (PROGRESS.md, GUARDRAILS.md, criteria.json, state.json) lives in
  * .pi/loops/<goal>/; context dies, files don't — /loop resume re-attaches.
  */
@@ -48,6 +53,15 @@ import { getBackgroundProcessRegistry } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { copper, heatLine } from "./lib/card.ts";
+import {
+	type BaselineStep,
+	distill,
+	type Proposal,
+	parseJournal,
+	type RunRecord,
+	recurrence,
+	versionTrend,
+} from "./lib/loop-optimizer.ts";
 
 const DEVBRAIN_ROOT = process.env.PI_DEVBRAIN_ROOT ?? `${process.env.HOME}/vault/tools/devbrain`;
 const DEFAULT_REPO = process.env.PI_DEVBRAIN_REPO ?? `${process.env.HOME}/projects/dev/automations/testing-automations`;
@@ -231,6 +245,8 @@ async function driveLoop(opts: {
 // park/steer/kill lifecycle in the roster.
 // ============================================================================
 
+type NotifyFn = (text: string, level: "info" | "warning" | "error") => void;
+
 interface OrchestratedLoop {
 	id: string;
 	goal: string;
@@ -261,6 +277,10 @@ interface OrchestratedLoop {
 	 *  once a failure class recurred. */
 	failureCounts: Record<string, { count: number; evidence: string }>;
 	learnedSteps: string[];
+	/** Offline optimizer: steps distilled from past runs, pre-loaded into the
+	 *  round prompt from round 1; and the base-prompt version this run used. */
+	baselineSteps: BaselineStep[];
+	promptVersion: number;
 	/** Verdict history for the status panel (bounded). */
 	verdicts: Array<{ round: number; verdict: string; summary: string; took: number }>;
 	/** git HEAD at loop start — the reviewer diffs against this. */
@@ -311,6 +331,66 @@ function criteriaStatus(loop: OrchestratedLoop): { total: number; passed: number
 	if (!items) return undefined;
 	const remaining = items.filter((c) => c.passes !== true);
 	return { total: items.length, passed: items.length - remaining.length, remaining };
+}
+
+// ---- Offline optimizer state (shared across all loops in a repo) -----------
+function optimizerDir(cwd: string): string {
+	return `${cwd}/.pi/loops/_optimizer`;
+}
+function journalPath(cwd: string): string {
+	return `${optimizerDir(cwd)}/journal.jsonl`;
+}
+function baselinePath(cwd: string): string {
+	return `${optimizerDir(cwd)}/baseline-steps.json`;
+}
+
+/** Steps distilled from many past runs, pre-loaded into EVERY new loop's round
+ *  prompt from round 1 (the offline optimizer's output). */
+function loadBaselineSteps(cwd: string): BaselineStep[] {
+	try {
+		const parsed = JSON.parse(readFileSync(baselinePath(cwd), "utf-8"));
+		if (Array.isArray(parsed)) return parsed.filter((b) => b && typeof b.text === "string");
+	} catch {
+		// none yet
+	}
+	return [];
+}
+function currentPromptVersion(steps: BaselineStep[]): number {
+	return steps.reduce((max, s) => Math.max(max, s.version ?? 1), 1);
+}
+function loadJournal(cwd: string): RunRecord[] {
+	try {
+		return parseJournal(readFileSync(journalPath(cwd), "utf-8"));
+	} catch {
+		return [];
+	}
+}
+
+/** Append this run's scored record — the offline optimizer's training data. */
+function appendRunRecord(loop: OrchestratedLoop, completed: boolean): void {
+	const cwd = loop.dir.replace(/\/\.pi\/loops\/[^/]+$/, "");
+	const record: RunRecord = {
+		goal: loop.goal,
+		promptVersion: loop.promptVersion,
+		rounds: loop.round,
+		rejections: loop.rejections,
+		completed,
+		learned: loop.learnedSteps.map((text) => ({ cls: classOfLearnedStep(text), text })),
+	};
+	try {
+		mkdirSync(optimizerDir(cwd), { recursive: true });
+		appendFileSync(journalPath(cwd), `${JSON.stringify(record)}\n`);
+	} catch {
+		// journal is best-effort
+	}
+}
+
+/** Recover the failure class from a minted learned-step (they are 1:1). */
+function classOfLearnedStep(text: string): string {
+	if (text.includes("criterion's `verify`")) return "criteria";
+	if (text.includes("independent review keeps")) return "review";
+	if (text.includes("the gate keeps")) return "gate";
+	return "other";
 }
 
 /** Persist enough state that `/loop resume <goal>` re-attaches after a pi
@@ -445,9 +525,18 @@ function loopContractLines(loop: OrchestratedLoop): string[] {
 				'A "done" claim is MECHANICALLY REJECTED while any criterion has passes=false.',
 			]
 		: [];
+	// Promoted steps (offline optimizer): lessons distilled from MANY past runs,
+	// pre-loaded from round 1 so this loop never has to re-learn them.
+	const promotedLines =
+		loop.baselineSteps.length > 0
+			? [
+					`STANDING LESSONS (v${loop.promptVersion}) — distilled from past runs, pre-loaded. Obey them from the start:`,
+					...loop.baselineSteps.map((s, i) => `  P${i + 1}. ${s.text}`),
+				]
+			: [];
 	// Learned steps (online GEPA-lite): instructions the loop rewrote into its
-	// OWN prompt after a failure class recurred. Highest priority — placed
-	// first, un-skippable, unlike the passive "go read the guardrails file".
+	// OWN prompt after a failure class recurred THIS run. Highest priority —
+	// placed first, un-skippable, unlike the passive "go read the guardrails".
 	const learnedLines =
 		loop.learnedSteps.length > 0
 			? [
@@ -456,6 +545,7 @@ function loopContractLines(loop: OrchestratedLoop): string[] {
 				]
 			: [];
 	return [
+		...promotedLines,
 		...learnedLines,
 		`State file: ${progressPath(loop)} (read it first; it survives across rounds — context does not).`,
 		`Guardrails file: ${guardrailsPath(loop)} (read it and honor EVERY rule — it is the loop's memory of past failures).`,
@@ -620,6 +710,8 @@ async function startOrchestration(
 		rejections: opts.restore?.rejections ?? 0,
 		failureCounts: opts.restore?.failureCounts ?? {},
 		learnedSteps: opts.restore?.learnedSteps ?? [],
+		baselineSteps: loadBaselineSteps(opts.cwd),
+		promptVersion: currentPromptVersion(loadBaselineSteps(opts.cwd)),
 		verdicts: [],
 		baseline,
 		roundStartedAt: 0,
@@ -636,6 +728,7 @@ async function startOrchestration(
 			registry.appendLog(loop.id, "[killed]");
 			registry.setStatus(loop.id, "cancelled");
 			saveState(loop, "cancelled");
+			appendRunRecord(loop, false);
 			activeOrchestration = undefined;
 		},
 		onSteer: (text: string) => {
@@ -648,6 +741,7 @@ async function startOrchestration(
 				loop.unwatchWorkers?.();
 				registry.setStatus(loop.id, "cancelled");
 				saveState(loop, "cancelled");
+				appendRunRecord(loop, false);
 				activeOrchestration = undefined;
 				return;
 			}
@@ -844,6 +938,62 @@ function sendStatusPanel(
 	);
 }
 
+/** /loop optimize [apply] — the offline optimizer. Reads the run journal,
+ *  distills failure classes that recurred across many runs into promotion
+ *  proposals, shows the measured before/after effect of existing promotions,
+ *  and (with apply) writes them into the baseline so every future loop starts
+ *  pre-loaded. Cheap: distillation over recorded runs, no live re-runs. */
+function runOptimizer(pi: ExtensionAPI, cwd: string, apply: boolean, notify: NotifyFn): void {
+	const runs = loadJournal(cwd);
+	if (runs.length === 0) {
+		notify(
+			"no loop runs recorded yet — run some orchestrated loops first (.pi/loops/_optimizer/journal.jsonl)",
+			"info",
+		);
+		return;
+	}
+	const existing = loadBaselineSteps(cwd);
+	const minRuns = Math.max(2, Number(process.env.PI_LOOP_OPTIMIZE_MIN_RUNS ?? 3));
+	const proposals = distill(runs, existing, minRuns);
+	const trend = versionTrend(runs);
+	const effects = existing.map((step) => ({ step, ...recurrence(runs, step) }));
+
+	let applied: Proposal[] = [];
+	if (apply && proposals.length > 0) {
+		const nextVersion = currentPromptVersion(existing) + 1;
+		const promoted: BaselineStep[] = [
+			...existing,
+			...proposals.map((p) => ({ cls: p.cls, text: p.text, runs: p.runs, version: nextVersion })),
+		];
+		try {
+			mkdirSync(optimizerDir(cwd), { recursive: true });
+			writeFileSync(baselinePath(cwd), `${JSON.stringify(promoted, null, 2)}\n`);
+			applied = proposals;
+			notify(`optimizer: promoted ${proposals.length} step(s) into base prompt v${nextVersion}`, "info");
+		} catch {
+			notify("optimizer: failed to write baseline-steps.json", "error");
+		}
+	}
+
+	pi.sendMessage(
+		{
+			customType: "loop-optimize",
+			content: `loop optimizer (${runs.length} runs)`,
+			display: true,
+			details: {
+				totalRuns: runs.length,
+				minRuns,
+				version: currentPromptVersion(existing),
+				proposals: applied.length > 0 ? [] : proposals,
+				applied,
+				existing: effects,
+				trend,
+			},
+		},
+		{ triggerTurn: false },
+	);
+}
+
 /** Mirror worker subagent lifecycle into the loop's own log while a round runs,
  *  so the loop entry alone tells the story (workers also appear in the hub). */
 function watchWorkers(loop: OrchestratedLoop): void {
@@ -1007,6 +1157,7 @@ function completeLoop(loop: OrchestratedLoop, summary: string): void {
 			`${loop.reviewEnabled ? " · review ✓" : ""}${loop.gate ? " · gate ✓" : ""}`,
 	});
 	saveState(loop, "completed");
+	appendRunRecord(loop, true);
 	loop.notify(`orchestrated loop ${loop.goal}: DONE after ${loop.round} round(s) — ${summary}`, "info");
 	activeOrchestration = undefined;
 }
@@ -1220,6 +1371,16 @@ interface LoopStatusDetails {
 	dir?: string;
 }
 
+interface LoopOptimizeDetails {
+	totalRuns?: number;
+	minRuns?: number;
+	version?: number;
+	proposals?: Proposal[];
+	applied?: Proposal[];
+	existing?: Array<{ step: BaselineStep; before: string; after: string }>;
+	trend?: Array<{ version: number; runs: number; meanScore: number }>;
+}
+
 export default function (pi: ExtensionAPI) {
 	// ---- Rich TUI: forge-styled chips for loop dispatches (collapsed by
 	// default; ctrl+o expands to the exact prompt the orchestrator received),
@@ -1312,6 +1473,55 @@ export default function (pi: ExtensionAPI) {
 		return new Text(lines.join("\n"), 0, 0);
 	});
 
+	pi.registerMessageRenderer<LoopOptimizeDetails>("loop-optimize", (message, _options, theme) => {
+		const d = message.details ?? {};
+		const lines: string[] = [];
+		lines.push(
+			`${copper("▎")} ⚙ ${theme.fg("text", "loop optimizer")} · ${theme.fg("muted", `${d.totalRuns ?? 0} runs · base v${d.version ?? 1} · promote ≥${d.minRuns ?? 3} runs`)}`,
+		);
+		lines.push(heatLine(46));
+		const applied = d.applied ?? [];
+		const proposals = d.proposals ?? [];
+		if (applied.length > 0) {
+			lines.push(theme.fg("success", `✓ promoted ${applied.length} step(s) into the base prompt`));
+			for (const p of applied) {
+				lines.push(
+					`  ${theme.fg("success", "+")} ${theme.fg("text", `[${p.cls}] `)}${theme.fg("dim", p.text.slice(0, 78))}`,
+				);
+			}
+		} else if (proposals.length > 0) {
+			lines.push(theme.fg("accent", `${proposals.length} promotion candidate(s) — /loop optimize apply to adopt`));
+			for (const p of proposals) {
+				lines.push(
+					`  ${theme.fg("accent", "▸")} ${theme.fg("text", `[${p.cls}] `)}${theme.fg("muted", `recurred in ${p.runs} runs`)} ${theme.fg("dim", `(${p.sampleGoals.join(", ").slice(0, 40)})`)}`,
+				);
+				lines.push(`    ${theme.fg("dim", p.text.slice(0, 82))}`);
+			}
+		} else {
+			lines.push(theme.fg("muted", "no new promotion candidates — nothing recurred often enough"));
+		}
+		const existing = d.existing ?? [];
+		if (existing.length > 0) {
+			lines.push(theme.fg("muted", "promoted steps — recurrence before → after (should trend to 0):"));
+			for (const e of existing) {
+				const good = e.after === "0" || /^0\//.test(e.after) || e.after === "—";
+				lines.push(
+					`  ${theme.fg(good ? "success" : "warning", "•")} ${theme.fg("text", `[${e.step.cls}] `)}${theme.fg("dim", `${e.before} → ${e.after}`)}`,
+				);
+			}
+		}
+		const trend = d.trend ?? [];
+		if (trend.length > 1) {
+			lines.push(
+				theme.fg(
+					"muted",
+					`score by version: ${trend.map((t) => `v${t.version}:${t.meanScore}(${t.runs})`).join("  ")}`,
+				),
+			);
+		}
+		return new Text(lines.join("\n"), 0, 0);
+	});
+
 	pi.registerTool({
 		name: "loop_run",
 		label: "loop",
@@ -1365,14 +1575,14 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("loop", {
 		description:
-			"Steerable loops: /loop <goal> [rounds=5] [orchestrate] [gate=cap] [rmodel=<model>] [review=off] [criteria=off] | /loop resume [<goal>] | /loop status [<goal>]",
+			"Steerable loops: /loop <goal> [rounds=5] [orchestrate] [gate=cap] [rmodel=<model>] [review=off] [criteria=off] | /loop resume [<goal>] | /loop status [<goal>] | /loop optimize [apply]",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const raw = (args ?? "").trim();
 			const parts = raw.split(/\s+/).filter(Boolean);
 			const goal = parts[0];
 			if (!goal) {
 				ctx.ui.notify(
-					"Usage: /loop <goal> [rounds=5] [orchestrate] [gate=cap] [rmodel=<model>] [review=off] [criteria=off] | /loop resume [<goal>] | /loop status [<goal>]",
+					"Usage: /loop <goal> [rounds=5] [orchestrate] [gate=cap] [rmodel=<model>] [review=off] [criteria=off] | /loop resume [<goal>] | /loop status [<goal>] | /loop optimize [apply]",
 					"error",
 				);
 				return;
@@ -1388,6 +1598,10 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (goal === "status") {
 				sendStatusPanel(pi, ctx.cwd, parts[1], (t, l) => ctx.ui.notify(t, l));
+				return;
+			}
+			if (goal === "optimize") {
+				runOptimizer(pi, ctx.cwd, /\bapply\b/i.test(raw), (t, l) => ctx.ui.notify(t, l));
 				return;
 			}
 			const roundsArg = /rounds=(\d+)/.exec(raw);

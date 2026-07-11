@@ -64,6 +64,10 @@ test("orchestrated loop v4: criteria data, review diversity, best-of-n, resume, 
 	await settle();
 	expect(lastSent().customType).toBe("loop-round");
 	expect(lastSent().content).toContain("Remaining: c1");
+	// collaboration is prompt-based: personas + per-worker models, ONE coordinator
+	expect(lastSent().content).toContain("ROLE persona");
+	expect(lastSent().content).toContain("ONLY coordinator");
+	expect(lastSent().content).toContain("chain tool");
 	expect(lastSent().details?.criteria).toEqual({ passed: 0, total: 2 });
 
 	// ---- round 1: done claim with unmet criteria → MECHANICAL rejection, no review spent

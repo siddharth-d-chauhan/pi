@@ -521,6 +521,16 @@ function loopContractLines(loop: OrchestratedLoop): string[] {
 	const reviewLine = loop.reviewEnabled
 		? "A 'done' verdict triggers an INDEPENDENT fresh-context review of the whole loop's work before it is accepted — claims that don't survive scrutiny cost a round."
 		: "";
+	// Collaboration is done with PROMPTS, not a team construct: give each
+	// worker a one-line role persona and (when useful) its own model via the
+	// agent tool's model param. YOU are the only coordinator — never delegate
+	// coordination to another coordinating agent (e.g. a team 'lead'); a
+	// second coordinator wastes rounds and hides workers from the loop's
+	// mirroring.
+	const collabLine =
+		"Workers: give each a one-line ROLE persona in its brief (e.g. scout: find+map only / builder: implement+test / qa: adversarial verify) and pick a per-worker model via the agent tool's model param when the role warrants it (cheap scout, strong builder). You are the ONLY coordinator — never delegate coordination to another coordinating agent.";
+	const chainLine =
+		"For a KNOWN multi-stage sub-task (e.g. plan→build→review), prefer running a chain (chain tool) over hand-dispatching stages — cheaper and reproducible.";
 	const cs = criteriaStatus(loop);
 	const criteriaLines = cs
 		? [
@@ -557,6 +567,8 @@ function loopContractLines(loop: OrchestratedLoop): string[] {
 		`State file: ${progressPath(loop)} (read it first; it survives across rounds — context does not).`,
 		`Guardrails file: ${guardrailsPath(loop)} (read it and honor EVERY rule — it is the loop's memory of past failures).`,
 		...criteriaLines,
+		collabLine,
+		chainLine,
 		gateLine,
 		reviewLine,
 	].filter(Boolean);

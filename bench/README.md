@@ -1,44 +1,39 @@
 # Wave-0 benchmark harness
 
-The metric that certifies "best." The harness — not the model — drives
-reliability (the same model swings 30–50 points across harnesses on
-Terminal-Bench 2.0), so we measure the harness.
+Measure the harness, not the model. The same model swings 30–50 points across
+harnesses on Terminal-Bench 2.0 — so we measure completion + cost of a real
+model through pi on a fixed task suite, and use it to test whether a harness
+change actually helps.
 
-## Lanes
-
-### `edit` (default — deterministic, no model, no tokens)
-
-```
-node bench/run.mjs          # human table
-node bench/run.mjs --json   # machine-readable
-```
-
-For each seed edit in `tasks.json`, compares the **builtin str-replace** edit
-format against the **hashline** hash-anchored format on the two axes that decide
-weak-model edit reliability:
-
-- **apply-correctness** — does the edit produce the expected file?
-- **edit-payload cost** — how much must the model *emit* to express the edit?
-  builtin must re-quote the whole `old_string`; hashline emits two 3-char
-  anchors + only the new text. The delta is exact and needs no model call.
-
-This lane answers "did graduating hashline (Wave 1) move the needle?" today.
-Current seed result: both formats apply correctly; hashline cuts mean
-edit-payload ~45% (matching omp's reported ~50–61%).
-
-### `agent` (model-driven — costs tokens)
+## Agent lane (costs tokens)
 
 ```
-node bench/run.mjs --lane agent
+node bench/run.mjs            # human table
+node bench/run.mjs --json     # machine-readable
+node bench/run.mjs --only <task>
 ```
 
-Runs a real mid-tier model through the loop per task via `pi --print`,
-capturing **completion-rate** (criterion pass) and **tokens-to-done** (real
-provider usage). Scaffolded; run deliberately with a budget. This is the lane
-that certifies the leads and gates further waves.
+Runs the configured model through `pi -p` per task, capturing **completion** (a
+behavioral `check` on the edited file) and **tokens-to-done**. Set `BENCH_PI` to
+point at a specific `pi` binary.
+
+Use it as an A/B by flipping an env between runs — e.g. measure whether a feature
+earns its cost:
+
+```
+node bench/run.mjs --json > before.json
+KP_ADVISOR=1 node bench/run.mjs --json > after.json     # continuous critic on
+PI_LOOP_REVIEW_LENSES=3 node bench/run.mjs --json        # independent review panel
+```
 
 ## Adding tasks
 
-Append to `tasks.json`: give `content` (starting file), `oldString`/`newString`
-(the builtin edit), and `startLine`/`endLine` (the hashline range). Keep tasks
-self-contained so the deterministic lane needs no external repo.
+Append to `tasks.json`: `file`+`content` (the seed file), `intent` (the English
+task), and `check` (a behavioral assertion body `fn(m, text) => boolean` over the
+imported edited module and file text). Keep tasks self-contained.
+
+## Note
+
+An earlier builtin-vs-hashline edit-format A/B lived here. hashline was removed —
+it only helps weak models and cost capable ones ~18% more tokens (see
+`RESULTS.md`). The harness is now a single-arm completion/cost baseline.

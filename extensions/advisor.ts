@@ -159,7 +159,7 @@ function runAdvisor(prompt: string, cwd: string, signal?: AbortSignal): Promise<
  * EmissionGuard — the discipline that makes a live reviewer tolerable.
  * normalize → drop content-free/LGTM → FIFO-dedupe → one-note-per-turn.
  */
-class EmissionGuard {
+export class EmissionGuard {
 	private recent: string[] = [];
 	private readonly window: number;
 	/** dropped-as-duplicate counter (feeds the /advisor duplicate-rate metric). */

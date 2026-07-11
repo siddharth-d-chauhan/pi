@@ -1,5 +1,5 @@
 {
-  "_comment": "Wave-0 edit suite. Deterministic lane uses content/oldString/newString/startLine/endLine. Agent lane uses `intent` (the English task given to the model) and `check` (a behavioral assertion body: async fn (m, text) => boolean, where m is the imported edited module and text is the file text). Behavioral checks tolerate formatting differences a real model introduces.",
+  "_comment": "Wave-0 agent-lane suite. Each task: `file`+`content` (seed file), `intent` (the English task given to the model), `check` (a behavioral assertion body: fn (m, text) => boolean over the imported edited module + file text — tolerant of formatting a real model introduces). Legacy oldString/newString/startLine/endLine fields are unused (the deterministic hashline lane was removed) and kept only as reference.",
   "tasks": [
     {
       "name": "replace-function-body",

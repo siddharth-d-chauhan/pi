@@ -1,14 +1,18 @@
 # Wave-0 benchmark results
 
-## Deterministic edit lane (no model)
+> **hashline was REMOVED** after this measurement. Its only win is edit
+> reliability on weak models; on a capable model it was pure overhead (+18%
+> tokens, per-turn tool-schema cost). The result below is kept as the rationale.
+> The harness is now a single-arm completion/cost baseline for testing other
+> features.
 
-`node bench/run.mjs` — measures apply-correctness + emitted edit-payload tokens.
+## Deterministic edit lane (no model) — historical
 
-Both formats apply correctly (5/5). **hashline cuts mean edit-payload ~45%** vs
-builtin str-replace by not re-quoting the old text (matching omp's reported
-50–61%). This is the *payload* win and it is real.
+hashline cut mean edit-payload ~45% vs builtin str-replace by not re-quoting old
+text (matching omp's 50–61%). Real, but *payload only* — see below for why it
+didn't translate to a session-level win.
 
-## Agent lane (MiniMax-M3, 4 tasks × 2 formats, 1 run each)
+## Agent lane (MiniMax-M3, 4 tasks × 2 formats, 1 run each) — historical
 
 `node bench/run.mjs --lane agent` — a real mid-tier model through pi headless,
 forced to use each edit FORMAT. Measures completion + total tokens-to-done.

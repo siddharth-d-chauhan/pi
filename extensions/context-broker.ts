@@ -470,6 +470,74 @@ export default function (pi: ExtensionAPI) {
 		state.pendingArgs.set(event.toolCallId, { command, files, cwd });
 	});
 
+	// A bash command is READ-ONLY when every segment starts with an inspect-only
+	// binary and nothing redirects output. Read-only commands skip the broker
+	// entirely: `uname -a` must never eat a gate round-trip or an advisory
+	// block (live incident 2026-07-11 — a force-push rule fronted an OS check).
+	const READ_ONLY_BINS = new Set([
+		"uname",
+		"cat",
+		"ls",
+		"grep",
+		"rg",
+		"egrep",
+		"fgrep",
+		"head",
+		"tail",
+		"find",
+		"pwd",
+		"which",
+		"whereis",
+		"env",
+		"printenv",
+		"stat",
+		"file",
+		"hostname",
+		"id",
+		"date",
+		"wc",
+		"sort",
+		"uniq",
+		"cut",
+		"tr",
+		"ps",
+		"df",
+		"du",
+		"echo",
+		"printf",
+		"type",
+		"uptime",
+		"whoami",
+		"less",
+		"more",
+		"readlink",
+		"basename",
+		"dirname",
+		"md5sum",
+		"sha256sum",
+		"jq",
+		"column",
+		"diff",
+		"tree",
+		"nproc",
+	]);
+	const READ_ONLY_GIT = /^git\s+(status|log|diff|show|branch|remote|describe|rev-parse|blame|shortlog)\b/;
+	const isReadOnlyCommand = (command: string): boolean => {
+		// discarding output to /dev/null mutates nothing
+		const normalized = command.replace(/[\d&]*>{1,2}\s*\/dev\/null/g, " ");
+		if (/[><]|\btee\b|\bsed\s+-i\b/.test(normalized)) return false; // redirects / in-place edits mutate
+		const segments = normalized
+			.split(/&&|\|\||;|\|/)
+			.map((segment) => segment.trim())
+			.filter(Boolean);
+		if (segments.length === 0) return false;
+		return segments.every((segment) => {
+			if (READ_ONLY_GIT.test(segment)) return true;
+			const bin = segment.split(/\s+/)[0]?.replace(/^\S*\//, "");
+			return bin !== undefined && READ_ONLY_BINS.has(bin);
+		});
+	};
+
 	// PI-11/12: risky tool calls consult BOTH the deterministic gate
 	// (pi.pre_action_gate — hard-blocks on enforce_pattern rules, every time)
 	// AND the advisory phase (pi.context_before_action). Advisories are surfaced
@@ -483,6 +551,8 @@ export default function (pi: ExtensionAPI) {
 		const command = typeof input.command === "string" ? input.command : undefined;
 		const cwd = typeof input.cwd === "string" ? input.cwd : undefined;
 		if (files.length === 0 && !command) return;
+		// Inspect-only commands cannot violate action rules and need no advisories.
+		if (event.toolName === "bash" && command && files.length === 0 && isReadOnlyCommand(command)) return;
 		try {
 			const shared = (globalThis as Record<string, unknown>).__pi_kp__ as KpShared | undefined;
 			if (!shared) return;

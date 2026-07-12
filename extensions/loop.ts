@@ -1736,6 +1736,7 @@ class LoopPanelComponent implements Component {
 		if (this.selCrit < this.scroll) this.scroll = this.selCrit;
 		const view = loop.criteria.slice(this.scroll, this.scroll + WINDOW);
 		const started = loop.round > 0;
+		if (this.scroll > 0) lines.push(pad(`    ${ui.faint(`… ${this.scroll} above ↑`)}`));
 		view.forEach((c, i) => {
 			const absolute = this.scroll + i;
 			const mark = ui.critMark(c.passes ? "pass" : started ? "fail" : "todo");

@@ -755,14 +755,15 @@ function reviewPrompt(loop: OrchestratedLoop, claim: string): string {
 		`- The goal: ${loop.goal}`,
 		`- ${diffLine}`,
 		criteriaLine,
-		"- Instructions: judge ONLY whether the DELIVERABLE meets the goal and the acceptance criteria. Read the",
-		"  changed code/artifacts and hunt for what is actually WRONG: logic errors, inverted conditions,",
-		"  off-by-one and boundary cases, unhandled inputs, contract mismatches between files, regressions,",
-		"  and skipped criteria. Trace a concrete input across the change where it matters.",
-		"  PASS a deliverable that is correct and meets every criterion. Do NOT fail it for PROCESS reasons —",
-		"  PROGRESS.md/audit-trail/documentation quality, verbosity, or missing prose are NOT defects in the",
-		"  work and must never cause a fail. Verdict first, then at most 5 findings with file:line (real",
-		"  deliverable defects only).",
+		"- The acceptance criteria ARE the agreed definition of done, and they all PASS. Read the changed",
+		"  code/artifacts and look for a CONCRETE DEFECT. You may fail this claim ONLY for one of:",
+		"    (a) a real BUG in the deliverable — wrong output, crash, or a broken edge case (name the input);",
+		"    (b) a criterion that passes but is GAMED — the deliverable satisfies the check without meeting",
+		"        its intent (say exactly how).",
+		"  You may NOT fail by re-interpreting the goal, inventing NEW requirements the criteria don't state,",
+		"  or citing process / documentation / loop scaffolding (e.g. .pi/ files). If the deliverable is",
+		"  correct and every criterion genuinely passes with no such defect, the verdict is PASS.",
+		"  Verdict first, then at most 5 findings with file:line (concrete deliverable defects only).",
 		"When the reviewer returns, append its findings to PROGRESS.md, then end your reply with EXACTLY one line:",
 		"REVIEW_VERDICT: pass|fail — <one-line summary of the reviewer's verdict>",
 		"Report the verdict honestly — do not soften a fail.",
@@ -1353,6 +1354,24 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 		loop.verdicts.push({ round: loop.round, verdict: `review:${reviewVerdict}`, summary: reviewSummary, took });
 
 		if (reviewVerdict !== "pass") {
+			// Tiebreaker: the acceptance criteria ARE the agreed definition of done.
+			// The reviewer may veto a couple of times to catch a real defect the
+			// criteria miss — but it cannot override OBJECTIVELY-passing criteria
+			// forever by re-interpreting the goal. After repeated rejections with
+			// every criterion green, the criteria contract wins (prevents the
+			// author-vs-reviewer deadlock that burned whole budgets on trivial work).
+			const objective = runCriteriaChecks(loop);
+			if (objective?.allPass && loop.rejections >= 2) {
+				registry.appendLog(
+					loop.id,
+					`review failed again, but all ${objective.total} criteria objectively pass after ${loop.rejections} rejections — accepting on the criteria contract (reviewer over-vetoing)`,
+				);
+				completeLoop(
+					loop,
+					`all ${objective.total} criteria pass; review over-vetoed: ${reviewSummary.slice(0, 60)}`,
+				);
+				return;
+			}
 			loop.rejections += 1;
 			addGuardrail(loop, `review rejected a done claim: ${reviewSummary}`);
 			recordFailure(loop, "review", reviewSummary);

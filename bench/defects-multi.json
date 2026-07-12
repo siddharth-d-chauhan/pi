@@ -1,0 +1,55 @@
+{
+  "_comment": "Multi-file defect-catch benchmark. Each fixture is 2 files where EACH file reads correctly in isolation — the bug is a CONTRACT MISMATCH across the call boundary (units, null-contract, boundary, ignored-failure, shared-mutable aliasing). This is the class a shallow single-file review misses. We compare a generic direct review vs an independent 3-lens PANEL (3 reviewers, one lens each, majority vote), to decide whether the opt-in panel (PI_LOOP_REVIEW_LENSES>1) earns its keep on hard defects. Catch = defect named (tripwire) AND (generic: verdict buggy / panel: >=2 of 3 reviewers buggy).",
+  "fixtures": [
+    {
+      "name": "unit-mismatch-timeout",
+      "files": [
+        { "path": "config.ts", "content": "/** The request timeout, in SECONDS. */\nexport function requestTimeout(): number {\n  return 30;\n}\n" },
+        { "path": "client.ts", "content": "import { requestTimeout } from \"./config\";\n\n/** Build a client. `timeoutMs` must be the request timeout in MILLISECONDS. */\nexport function makeClient(): { timeoutMs: number } {\n  return { timeoutMs: requestTimeout() };\n}\n" }
+      ],
+      "intent": "makeClient().timeoutMs must be the request timeout in MILLISECONDS. requestTimeout() (in config.ts) is defined in SECONDS.",
+      "defect": "client.ts uses requestTimeout() (30 seconds) directly as milliseconds — 1000x too small; it should multiply by 1000.",
+      "tripwire": "second|millisecond|1000|\\* ?1000|unit|30000|too small|convert|/ ?1000|mismatch"
+    },
+    {
+      "name": "null-contract-deref",
+      "files": [
+        { "path": "users.ts", "content": "const USERS: Record<string, { name: string }> = { u1: { name: \"Ada\" } };\n\n/** Returns undefined when no user has that id. */\nexport function findUser(id: string): { name: string } | undefined {\n  return USERS[id];\n}\n" },
+        { "path": "greet.ts", "content": "import { findUser } from \"./users\";\n\nexport function greet(id: string): string {\n  return `Hi ${findUser(id).name}`;\n}\n" }
+      ],
+      "intent": "greet(id) returns a greeting. findUser returns undefined for an unknown id, and greet must handle that without crashing.",
+      "defect": "greet.ts dereferences .name on findUser(id) which can be undefined — crashes on an unknown id.",
+      "tripwire": "undefined|null|crash|unknown|not found|optional|\\?\\.|guard|throw|missing user|can be undefined"
+    },
+    {
+      "name": "boundary-across-files",
+      "files": [
+        { "path": "range.ts", "content": "/** All indices from 0 up to and INCLUDING n. */\nexport function indices(n: number): number[] {\n  const out: number[] = [];\n  for (let i = 0; i <= n; i++) out.push(i);\n  return out;\n}\n" },
+        { "path": "sum.ts", "content": "import { indices } from \"./range\";\n\n/** Sum of every element of arr. */\nexport function sumAll(arr: number[]): number {\n  let s = 0;\n  for (const i of indices(arr.length)) s += arr[i];\n  return s;\n}\n" }
+      ],
+      "intent": "sumAll(arr) returns the sum of the elements of arr.",
+      "defect": "indices(arr.length) yields 0..length INCLUSIVE, so sumAll reads arr[arr.length] (undefined) — the sum becomes NaN.",
+      "tripwire": "off.?by.?one|inclusive|<=|length|undefined|NaN|out of bounds|one too many|extra|arr\\[arr\\.length\\]|last"
+    },
+    {
+      "name": "ignored-failure-contract",
+      "files": [
+        { "path": "store.ts", "content": "/** Persist a record. Returns false on failure (does NOT throw). */\nexport function save(rec: object): boolean {\n  try {\n    // ...write...\n    return Math.random() > 2; // pretend: often fails\n  } catch {\n    return false;\n  }\n}\n" },
+        { "path": "handler.ts", "content": "import { save } from \"./store\";\n\nexport function handle(rec: object): string {\n  save(rec);\n  return \"saved\";\n}\n" }
+      ],
+      "intent": "handle(rec) must not report 'saved' if the write failed. save() returns false on failure and does not throw.",
+      "defect": "handler.ts ignores save()'s boolean return, so it reports 'saved' even when save returned false — silent data loss.",
+      "tripwire": "ignore|return value|boolean|false|check|success|silent|data loss|discard|not checked|result of save|unchecked"
+    },
+    {
+      "name": "shared-mutable-default",
+      "files": [
+        { "path": "defaults.ts", "content": "/** Shared default options. */\nexport const DEFAULTS = { retries: 3, tags: [] as string[] };\n" },
+        { "path": "build.ts", "content": "import { DEFAULTS } from \"./defaults\";\n\n/** Options with one tag added. Must not affect other callers. */\nexport function withTag(tag: string): typeof DEFAULTS {\n  const opts = DEFAULTS;\n  opts.tags.push(tag);\n  return opts;\n}\n" }
+      ],
+      "intent": "withTag(tag) returns options with the tag added, and must NOT mutate the shared DEFAULTS — repeated calls must not accumulate tags globally.",
+      "defect": "build.ts aliases DEFAULTS (opts = DEFAULTS) and pushes into DEFAULTS.tags, mutating the shared object so tags accumulate across all callers.",
+      "tripwire": "mutat|alias|shared|reference|copy|spread|clone|accumulat|same object|push.*DEFAULTS|side.?effect|does not copy|persist"
+    }
+  ]
+}

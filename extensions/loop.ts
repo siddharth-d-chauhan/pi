@@ -1361,10 +1361,10 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 			// every criterion green, the criteria contract wins (prevents the
 			// author-vs-reviewer deadlock that burned whole budgets on trivial work).
 			const objective = runCriteriaChecks(loop);
-			if (objective?.allPass && loop.rejections >= 2) {
+			if (objective?.allPass && loop.rejections >= 1) {
 				registry.appendLog(
 					loop.id,
-					`review failed again, but all ${objective.total} criteria objectively pass after ${loop.rejections} rejections — accepting on the criteria contract (reviewer over-vetoing)`,
+					`review failed again, but all ${objective.total} criteria objectively pass after ${loop.rejections} rejection(s) — accepting on the criteria contract (reviewer over-vetoing)`,
 				);
 				completeLoop(
 					loop,

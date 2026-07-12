@@ -55,9 +55,10 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, write
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getBackgroundProcessRegistry } from "@earendil-works/pi-coding-agent";
 import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
-import { Key, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { copper, heatLine } from "./lib/card.ts";
+import * as ui from "./lib/chips.ts";
 import {
 	type BaselineStep,
 	distill,
@@ -1620,13 +1621,13 @@ type PanelTheme = Parameters<Parameters<ExtensionCommandContext["ui"]["custom"]>
 class LoopPanelComponent implements Component {
 	private idx = 0;
 	private scroll = 0;
+	private selCrit = 0;
 	private mode: "view" | "note" | "criterion" = "view";
 	private input = "";
 	private msg = "";
 	private readonly timer: ReturnType<typeof setInterval>;
 	private readonly unsub: () => void;
 	private readonly tui: TUI;
-	private readonly theme: PanelTheme;
 	private readonly done: (r: undefined) => void;
 	private readonly pi: ExtensionAPI;
 	private readonly cwd: string;
@@ -1634,14 +1635,13 @@ class LoopPanelComponent implements Component {
 	// No parameter properties — the extension loader (type-stripping) rejects them.
 	constructor(
 		tui: TUI,
-		theme: PanelTheme,
+		_theme: PanelTheme,
 		_keybindings: KeybindingsManager,
 		done: (r: undefined) => void,
 		pi: ExtensionAPI,
 		cwd: string,
 	) {
 		this.tui = tui;
-		this.theme = theme;
 		this.done = done;
 		this.pi = pi;
 		this.cwd = cwd;
@@ -1694,59 +1694,95 @@ class LoopPanelComponent implements Component {
 		}
 	}
 
+	// Design language "1B chips + 2C rail cursor" (lib/chips.ts): painted LOOP
+	// chip, SECTION headers, block bars, pills, ▣/□ marks, rim-dots, copper keys.
 	render(width: number): string[] {
-		const t = this.theme;
 		const pad = (s: string) => truncateToWidth(s, width);
 		const lines: string[] = [];
 		const loops = loopPanelModel(this.cwd);
-		lines.push(pad(t.fg("accent", t.bold(" Loop "))));
-		lines.push(heatLine(Math.min(width, 64)));
 		if (loops.length === 0) {
-			lines.push(pad(t.fg("muted", "  No loops in this project. Start one with /loop <goal>.")));
+			lines.push(pad(` ${ui.chip("LOOP")}  ${ui.soft("no loops in this project")}`));
 			lines.push("");
-			lines.push(pad(t.fg("dim", "  q/Esc close")));
+			lines.push(pad(` ${ui.faint("start one with")} ${ui.copper("/loop <goal>")}`));
+			lines.push(pad(ui.keyHints([["q", "close"]])));
 			return lines;
 		}
 		const loop = loops[Math.min(this.idx, loops.length - 1)];
-		const sel = loops.length > 1 ? t.fg("dim", `  [${this.idx + 1}/${loops.length}] ←/→ switch`) : "";
-		const statusColor = loop.status === "completed" ? "success" : loop.status === "parked" ? "warning" : "accent";
-		lines.push(pad(`  ${t.fg("text", t.bold(loop.goal.slice(0, width - 6)))}`));
+		const switcher = loops.length > 1 ? `  ${ui.faint(`${this.idx + 1}/${loops.length}`)} ${ui.copper("←→")}` : "";
+
+		// header: chip · goal · status pill · round · rejections. The goal is
+		// clamped FIRST so the status/round/rej block always survives truncation.
+		const right =
+			`${ui.statusPill(loop.status)}  ` +
+			`${ui.soft("round")} ${ui.ink(ui.bold(String(loop.round)))}${ui.faint(`/${loop.budget}`)}  ` +
+			`${ui.soft("rej")} ${loop.rejections > 0 ? ui.amber(ui.bold(String(loop.rejections))) : ui.ink("0")}${switcher}`;
+		const goalMax = Math.max(8, width - visibleWidth(right) - 12);
+		lines.push(pad(` ${ui.chip("LOOP")} ${ui.ink(ui.bold(truncateToWidth(loop.goal, goalMax, "…")))}  ${right}`));
+		lines.push("");
+
+		// CRITERIA section: count + block bar, then ▣/□ rows with the rail cursor
+		const passed = loop.criteria.filter((c) => c.passes).length;
+		const total = loop.criteria.length;
 		lines.push(
 			pad(
-				`  ${t.fg(statusColor, loop.status)} · round ${loop.round}/${loop.budget} · ${loop.rejections} rejection(s)${sel}`,
+				ui.section(
+					"criteria",
+					`${ui.ink(ui.bold(String(passed)))}${ui.faint(`/${total}`)}  ${ui.blockBar(passed, total, 10)}`,
+				),
 			),
 		);
+		const WINDOW = 8;
+		if (this.selCrit >= this.scroll + WINDOW) this.scroll = this.selCrit - WINDOW + 1;
+		if (this.selCrit < this.scroll) this.scroll = this.selCrit;
+		const view = loop.criteria.slice(this.scroll, this.scroll + WINDOW);
+		const started = loop.round > 0;
+		view.forEach((c, i) => {
+			const absolute = this.scroll + i;
+			const mark = ui.critMark(c.passes ? "pass" : started ? "fail" : "todo");
+			const failPill = !c.passes && started ? `  ${ui.pill("red", "failing")}` : "";
+			const row = ` ${mark} ${ui.faint(c.id.padEnd(3))} ${c.passes ? ui.ink(c.desc) : ui.ink(ui.bold(c.desc))}${failPill}`;
+			lines.push(absolute === this.selCrit ? ui.cursorRow(row, width) : pad(` ${row}`));
+		});
+		if (total > this.scroll + WINDOW) lines.push(pad(`    ${ui.faint(`… ${total - this.scroll - WINDOW} more ↓`)}`));
 		lines.push("");
-		const passed = loop.criteria.filter((c) => c.passes).length;
-		lines.push(pad(t.fg("muted", `  ${t.bold("Acceptance criteria")} · ${passed}/${loop.criteria.length} pass`)));
-		const critView = loop.criteria.slice(this.scroll, this.scroll + 10);
-		for (const c of critView) {
-			const mark = c.passes ? t.fg("success", "✓") : t.fg("warning", "✗");
-			lines.push(pad(`   ${mark} ${t.fg("dim", c.id)} ${t.fg("text", c.desc.slice(0, width - 10))}`));
-		}
-		if (loop.criteria.length > 10) lines.push(pad(t.fg("dim", `   …${loop.criteria.length} total · ↑/↓ scroll`)));
-		lines.push("");
-		lines.push(pad(t.fg("muted", `  ${t.bold("Rounds")}`)));
-		const rounds = loop.verdicts.slice(-8);
-		if (rounds.length === 0) lines.push(pad(t.fg("dim", "   (none yet)")));
+
+		// TIMELINE section: rim-dot · rX · verdict pill · time · summary
+		lines.push(pad(ui.section("timeline")));
+		const rounds = loop.verdicts.slice(-6);
+		if (rounds.length === 0) lines.push(pad(`   ${ui.faint("(no rounds settled yet)")}`));
 		for (const v of rounds) {
-			const vc = v.verdict.includes("fail") || v.verdict === "blocked" ? "warning" : "success";
 			lines.push(
 				pad(
-					`   ${t.fg("dim", `r${v.round}`)} ${t.fg(vc, v.verdict)} ${t.fg("dim", `(${v.took}s)`)} ${t.fg("text", (v.summary || "").slice(0, width - 20))}`,
+					`   ${ui.dotForVerdict(v.verdict)} ${ui.faint(`r${v.round}`)}  ${ui.verdictPill(v.verdict)} ${ui.faint(`${v.took}s`)}  ${ui.soft(v.summary || "")}`,
 				),
 			);
 		}
 		lines.push("");
+
+		// input mode / message / footer
 		if (this.mode !== "view") {
-			const label = this.mode === "note" ? "steer note" : "add criterion (desc | verify cmd)";
-			lines.push(pad(t.fg("accent", `  ${label} › `) + this.input + t.fg("accent", "█")));
-			lines.push(pad(t.fg("dim", "  Enter to apply · Esc to cancel")));
-		} else {
-			if (this.msg) lines.push(pad(t.fg("dim", `  ${this.msg}`)));
+			const label = this.mode === "note" ? "steer note" : "add criterion — desc | verify cmd";
+			lines.push(pad(` ${ui.copper(ui.bold(label))} ${ui.faint("›")} ${ui.ink(this.input)}${ui.amber("▌")}`));
 			lines.push(
 				pad(
-					t.fg("dim", "  s stop · m more · r resume · a add-criterion · n note · ↑/↓ scroll · ←/→ loop · q close"),
+					ui.keyHints([
+						["↵", "apply"],
+						["esc", "cancel"],
+					]),
+				),
+			);
+		} else {
+			if (this.msg) lines.push(pad(`  ${ui.faint(this.msg)}`));
+			lines.push(
+				pad(
+					ui.keyHints([
+						["s", "stop"],
+						["m", "budget"],
+						["r", "resume"],
+						["a", "criterion"],
+						["n", "note"],
+						["q", "close"],
+					]),
 				),
 			);
 		}
@@ -1779,14 +1815,17 @@ class LoopPanelComponent implements Component {
 			this.done(undefined);
 			return;
 		}
-		if (matchesKey(data, "up")) this.scroll = Math.max(0, this.scroll - 1);
-		else if (matchesKey(data, "down")) this.scroll += 1;
+		const critCount = loop?.criteria.length ?? 0;
+		if (matchesKey(data, "up")) this.selCrit = Math.max(0, this.selCrit - 1);
+		else if (matchesKey(data, "down")) this.selCrit = Math.min(Math.max(0, critCount - 1), this.selCrit + 1);
 		else if (matchesKey(data, "left")) {
 			this.idx = Math.max(0, this.idx - 1);
 			this.scroll = 0;
+			this.selCrit = 0;
 		} else if (matchesKey(data, "right")) {
 			this.idx += 1;
 			this.scroll = 0;
+			this.selCrit = 0;
 		} else if (data === "s") this.steer("stop");
 		else if (data === "m") this.steer("more 3");
 		else if (data === "r" && loop) this.resume(loop);

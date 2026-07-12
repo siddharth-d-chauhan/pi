@@ -78,6 +78,16 @@ export function parseOrchestrateGoal(raw: string): string {
 		.replace(/\s+/g, " ")
 		.trim();
 }
+
+/** Parse the LAST `LOOP_VERDICT: done|continue|blocked — summary` line from text
+ *  (the orchestrator's reply). Returns null when absent. The verdict lives in the
+ *  model's REPLY, so settleRound reads it from there, not PROGRESS.md. */
+export function parseLoopVerdict(text: string): { verdict: string; summary: string } | null {
+	const matches = [...text.matchAll(/LOOP_VERDICT:\s*(done|continue|blocked)\s*[—-]\s*(.*)/gi)];
+	const last = matches[matches.length - 1];
+	if (!last) return null;
+	return { verdict: last[1].toLowerCase(), summary: last[2].slice(0, 100) };
+}
 const ROUND_TIMEOUT_MS = Number(process.env.PI_LOOP_ROUND_TIMEOUT_MS ?? 900_000);
 const MAX_ENV_DETOURS = 3;
 const DEFAULT_ROUNDS = 5;
@@ -334,6 +344,9 @@ interface OrchestratedLoop {
 	verdicts: Array<{ round: number; verdict: string; summary: string; took: number }>;
 	/** git HEAD at loop start — the reviewer diffs against this. */
 	baseline?: string;
+	/** The orchestrator's last reply text (captured at turn_end). The verdict
+	 *  line lives in the model's REPLY, not PROGRESS.md, so we parse it here. */
+	lastMessage?: string;
 	roundStartedAt: number;
 	watchdog?: NodeJS.Timeout;
 	unwatchWorkers?: () => void;
@@ -1259,6 +1272,11 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 	} catch {
 		// keep empty — defaults below handle it
 	}
+	// The verdict line lives in the orchestrator's REPLY; PROGRESS.md is a
+	// fallback in case the model wrote it there instead. The reply goes LAST so
+	// that "take the last match" prefers THIS round's reply over any stale
+	// verdict line accumulated in PROGRESS.md.
+	const verdictText = `${progressText}\n${loop.lastMessage ?? ""}`;
 
 	// -------- criteria settle: round 0 must have produced a usable criteria.json
 	if (loop.phase === "criteria") {
@@ -1289,7 +1307,7 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 
 	// -------- review settle: the done claim faces its independent reviewer -----
 	if (loop.phase === "review") {
-		const matches = [...progressText.matchAll(/REVIEW_VERDICT:\s*(pass|fail)\s*[—-]\s*(.*)/gi)];
+		const matches = [...verdictText.matchAll(/REVIEW_VERDICT:\s*(pass|fail)\s*[—-]\s*(.*)/gi)];
 		const last = matches[matches.length - 1];
 		const reviewVerdict = last ? last[1].toLowerCase() : "fail";
 		const reviewSummary = last ? last[2].slice(0, 120) : "(no REVIEW_VERDICT found — treating as fail)";
@@ -1328,14 +1346,9 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 	}
 
 	// -------- round settle: parse the orchestrator's verdict -------------------
-	let verdict = "continue";
-	let summary = "(no verdict line found in PROGRESS.md — continuing)";
-	const matches = [...progressText.matchAll(/LOOP_VERDICT:\s*(done|continue|blocked)\s*[—-]\s*(.*)/gi)];
-	const last = matches[matches.length - 1];
-	if (last) {
-		verdict = last[1].toLowerCase();
-		summary = last[2].slice(0, 100);
-	}
+	const parsed = parseLoopVerdict(verdictText);
+	const verdict = parsed?.verdict ?? "continue";
+	const summary = parsed?.summary ?? "(no LOOP_VERDICT line in the reply — continuing)";
 	registry.appendLog(loop.id, `round ${loop.round} (${took}s): ${verdict} — ${summary}`);
 	loop.verdicts.push({ round: loop.round, verdict, summary, took });
 
@@ -1664,6 +1677,20 @@ export default function (pi: ExtensionAPI) {
 
 	// Round completion: when the session settles after a dispatched round,
 	// read the verdict from PROGRESS.md and continue/park/finish.
+	// Capture the orchestrator's reply so settleRound can read the verdict line
+	// from the MESSAGE (where the round prompt puts it) — not just PROGRESS.md.
+	pi.on("turn_end", async (event) => {
+		if (!activeOrchestration) return;
+		const msg = (event as { message?: { content?: Array<{ type?: string; text?: string }> } }).message;
+		const text = Array.isArray(msg?.content)
+			? msg.content
+					.filter((b) => b.type === "text")
+					.map((b) => b.text ?? "")
+					.join("\n")
+			: "";
+		if (text.trim()) activeOrchestration.lastMessage = text;
+	});
+
 	pi.on("agent_settled", async () => {
 		if (activeOrchestration) await settleRound(pi, activeOrchestration);
 	});

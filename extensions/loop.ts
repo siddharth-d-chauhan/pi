@@ -52,9 +52,10 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getBackgroundProcessRegistry } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
+import { Key, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { copper, heatLine } from "./lib/card.ts";
 import {
@@ -1567,6 +1568,243 @@ interface LoopOptimizeDetails {
 	trend?: Array<{ version: number; runs: number; meanScore: number }>;
 }
 
+// ---- /loop panel — the fullscreen, live, STEERABLE loop view -----------------
+
+export interface LoopPanelLoop {
+	dir: string;
+	goal: string;
+	status: string;
+	round: number;
+	budget: number;
+	rejections: number;
+	criteria: Array<{ id: string; desc: string; passes: boolean }>;
+	verdicts: Array<{ round: number; verdict: string; summary: string; took: number }>;
+}
+
+/** Pure data model for the panel: every loop in this project with its live
+ *  state + criteria, running loops first. Read from files so it works for
+ *  running, parked, and completed loops alike. */
+export function loopPanelModel(cwd: string): LoopPanelLoop[] {
+	const loopsDir = `${cwd}/.pi/loops`;
+	let dirs: string[];
+	try {
+		dirs = readdirSync(loopsDir).filter((d) => d !== "_optimizer" && existsSync(`${loopsDir}/${d}/state.json`));
+	} catch {
+		return [];
+	}
+	const out: LoopPanelLoop[] = [];
+	for (const d of dirs) {
+		const dir = `${loopsDir}/${d}`;
+		try {
+			const s = JSON.parse(readFileSync(`${dir}/state.json`, "utf-8"));
+			const crit = readCriteria(dir) ?? [];
+			out.push({
+				dir,
+				goal: typeof s.goal === "string" ? s.goal : d,
+				status: typeof s.status === "string" ? s.status : "?",
+				round: Number(s.round ?? 0),
+				budget: Number(s.budget ?? 0),
+				rejections: Number(s.rejections ?? 0),
+				criteria: crit.map((c) => ({ id: c.id, desc: c.desc, passes: c.passes === true })),
+				verdicts: Array.isArray(s.verdicts) ? s.verdicts : [],
+			});
+		} catch {
+			// skip an unreadable loop dir
+		}
+	}
+	return out.sort((a, b) => (b.status === "running" ? 1 : 0) - (a.status === "running" ? 1 : 0));
+}
+
+type PanelTheme = Parameters<Parameters<ExtensionCommandContext["ui"]["custom"]>[0]>[1];
+
+class LoopPanelComponent implements Component {
+	private idx = 0;
+	private scroll = 0;
+	private mode: "view" | "note" | "criterion" = "view";
+	private input = "";
+	private msg = "";
+	private readonly timer: ReturnType<typeof setInterval>;
+	private readonly unsub: () => void;
+	private readonly tui: TUI;
+	private readonly theme: PanelTheme;
+	private readonly done: (r: undefined) => void;
+	private readonly pi: ExtensionAPI;
+	private readonly cwd: string;
+
+	// No parameter properties — the extension loader (type-stripping) rejects them.
+	constructor(
+		tui: TUI,
+		theme: PanelTheme,
+		_keybindings: KeybindingsManager,
+		done: (r: undefined) => void,
+		pi: ExtensionAPI,
+		cwd: string,
+	) {
+		this.tui = tui;
+		this.theme = theme;
+		this.done = done;
+		this.pi = pi;
+		this.cwd = cwd;
+		this.timer = setInterval(() => this.tui.requestRender(), 1500);
+		this.unsub = getBackgroundProcessRegistry().subscribe(() => this.tui.requestRender());
+	}
+	dispose(): void {
+		clearInterval(this.timer);
+		this.unsub();
+	}
+	invalidate(): void {}
+
+	private current(): LoopPanelLoop | undefined {
+		const loops = loopPanelModel(this.cwd);
+		if (this.idx >= loops.length) this.idx = Math.max(0, loops.length - 1);
+		return loops[this.idx];
+	}
+
+	/** Steer the RUNNING loop via the registry (stop / more N / a note). */
+	private steer(text: string): void {
+		if (activeOrchestration && !activeOrchestration.killed) {
+			getBackgroundProcessRegistry().steer(activeOrchestration.id, text);
+			this.msg = `steered: ${text}`;
+		} else {
+			this.msg = "no running loop to steer — use r to resume";
+		}
+	}
+
+	private resume(loop: LoopPanelLoop): void {
+		this.msg = `resuming ${loop.goal.slice(0, 30)}…`;
+		void resumeOrchestration(this.pi, { goal: loop.goal, cwd: this.cwd, notify: () => {} });
+	}
+
+	/** Append a criterion (input: "desc | verify command") and kick the loop. */
+	private addCriterion(loop: LoopPanelLoop, raw: string): void {
+		const [desc, verify] = raw.split("|").map((s) => s.trim());
+		if (!desc) return;
+		try {
+			const items = readCriteria(loop.dir) ?? [];
+			const id = `c${items.length + 1}`;
+			items.push({ id, desc, verify: verify || undefined, passes: false });
+			writeFileSync(`${loop.dir}/criteria.json`, `${JSON.stringify(items, null, 2)}\n`);
+			this.msg = `added ${id}: ${desc.slice(0, 30)} — ${loop.status === "running" ? "loop will pick it up" : "press r to resume"}`;
+			if (loop.status === "running") this.steer(`new acceptance criterion added (${id}) — satisfy it`);
+		} catch {
+			this.msg = "failed to write criterion";
+		}
+	}
+
+	render(width: number): string[] {
+		const t = this.theme;
+		const pad = (s: string) => truncateToWidth(s, width);
+		const lines: string[] = [];
+		const loops = loopPanelModel(this.cwd);
+		lines.push(pad(t.fg("accent", t.bold(" Loop "))));
+		lines.push(heatLine(Math.min(width, 64)));
+		if (loops.length === 0) {
+			lines.push(pad(t.fg("muted", "  No loops in this project. Start one with /loop <goal>.")));
+			lines.push("");
+			lines.push(pad(t.fg("dim", "  q/Esc close")));
+			return lines;
+		}
+		const loop = loops[Math.min(this.idx, loops.length - 1)];
+		const sel = loops.length > 1 ? t.fg("dim", `  [${this.idx + 1}/${loops.length}] ←/→ switch`) : "";
+		const statusColor = loop.status === "completed" ? "success" : loop.status === "parked" ? "warning" : "accent";
+		lines.push(pad(`  ${t.fg("text", t.bold(loop.goal.slice(0, width - 6)))}`));
+		lines.push(
+			pad(
+				`  ${t.fg(statusColor, loop.status)} · round ${loop.round}/${loop.budget} · ${loop.rejections} rejection(s)${sel}`,
+			),
+		);
+		lines.push("");
+		const passed = loop.criteria.filter((c) => c.passes).length;
+		lines.push(pad(t.fg("muted", `  ${t.bold("Acceptance criteria")} · ${passed}/${loop.criteria.length} pass`)));
+		const critView = loop.criteria.slice(this.scroll, this.scroll + 10);
+		for (const c of critView) {
+			const mark = c.passes ? t.fg("success", "✓") : t.fg("warning", "✗");
+			lines.push(pad(`   ${mark} ${t.fg("dim", c.id)} ${t.fg("text", c.desc.slice(0, width - 10))}`));
+		}
+		if (loop.criteria.length > 10) lines.push(pad(t.fg("dim", `   …${loop.criteria.length} total · ↑/↓ scroll`)));
+		lines.push("");
+		lines.push(pad(t.fg("muted", `  ${t.bold("Rounds")}`)));
+		const rounds = loop.verdicts.slice(-8);
+		if (rounds.length === 0) lines.push(pad(t.fg("dim", "   (none yet)")));
+		for (const v of rounds) {
+			const vc = v.verdict.includes("fail") || v.verdict === "blocked" ? "warning" : "success";
+			lines.push(
+				pad(
+					`   ${t.fg("dim", `r${v.round}`)} ${t.fg(vc, v.verdict)} ${t.fg("dim", `(${v.took}s)`)} ${t.fg("text", (v.summary || "").slice(0, width - 20))}`,
+				),
+			);
+		}
+		lines.push("");
+		if (this.mode !== "view") {
+			const label = this.mode === "note" ? "steer note" : "add criterion (desc | verify cmd)";
+			lines.push(pad(t.fg("accent", `  ${label} › `) + this.input + t.fg("accent", "█")));
+			lines.push(pad(t.fg("dim", "  Enter to apply · Esc to cancel")));
+		} else {
+			if (this.msg) lines.push(pad(t.fg("dim", `  ${this.msg}`)));
+			lines.push(
+				pad(
+					t.fg("dim", "  s stop · m more · r resume · a add-criterion · n note · ↑/↓ scroll · ←/→ loop · q close"),
+				),
+			);
+		}
+		return lines;
+	}
+
+	handleInput(data: string): void {
+		const loop = this.current();
+		if (this.mode !== "view") {
+			if (matchesKey(data, "escape")) {
+				this.mode = "view";
+				this.input = "";
+			} else if (matchesKey(data, "return")) {
+				const text = this.input.trim();
+				if (loop && text) {
+					if (this.mode === "note") this.steer(text);
+					else this.addCriterion(loop, text);
+				}
+				this.mode = "view";
+				this.input = "";
+			} else if (matchesKey(data, "backspace")) {
+				this.input = this.input.slice(0, -1);
+			} else if (!data.startsWith("\x1b")) {
+				for (const ch of data) if (ch >= " " && ch !== "\x7f") this.input += ch;
+			}
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "escape") || data === "q") {
+			this.done(undefined);
+			return;
+		}
+		if (matchesKey(data, "up")) this.scroll = Math.max(0, this.scroll - 1);
+		else if (matchesKey(data, "down")) this.scroll += 1;
+		else if (matchesKey(data, "left")) {
+			this.idx = Math.max(0, this.idx - 1);
+			this.scroll = 0;
+		} else if (matchesKey(data, "right")) {
+			this.idx += 1;
+			this.scroll = 0;
+		} else if (data === "s") this.steer("stop");
+		else if (data === "m") this.steer("more 3");
+		else if (data === "r" && loop) this.resume(loop);
+		else if (data === "a") {
+			this.mode = "criterion";
+			this.input = "";
+		} else if (data === "n") {
+			this.mode = "note";
+			this.input = "";
+		}
+		this.tui.requestRender();
+	}
+}
+
+function openLoopPanel(ctx: ExtensionContext, pi: ExtensionAPI): Promise<undefined> {
+	return ctx.ui.custom<undefined>(
+		(tui, theme, keybindings, done) => new LoopPanelComponent(tui, theme, keybindings, done, pi, ctx.cwd),
+		{ drawer: { height: "50%" } },
+	);
+}
+
 export default function (pi: ExtensionAPI) {
 	// ---- Rich TUI: forge-styled chips for loop dispatches (collapsed by
 	// default; ctrl+o expands to the exact prompt the orchestrator received),
@@ -1806,8 +2044,16 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(msg, msg.startsWith("resumed") ? "info" : "error");
 				return;
 			}
+			if (goal === "panel" || goal === "watch") {
+				// Live, steerable drawer (criteria ✓/✗, rounds, steer keys).
+				if (ctx.mode === "tui") await openLoopPanel(ctx, pi);
+				else sendStatusPanel(pi, ctx.cwd, parts[1], (t, l) => ctx.ui.notify(t, l));
+				return;
+			}
 			if (goal === "status") {
-				sendStatusPanel(pi, ctx.cwd, parts[1], (t, l) => ctx.ui.notify(t, l));
+				// In a TUI, open the live drawer; otherwise the one-shot text panel.
+				if (ctx.mode === "tui") await openLoopPanel(ctx, pi);
+				else sendStatusPanel(pi, ctx.cwd, parts[1], (t, l) => ctx.ui.notify(t, l));
 				return;
 			}
 			if (goal === "optimize") {
@@ -1857,6 +2103,14 @@ export default function (pi: ExtensionAPI) {
 				notify: (text, level) => ctx.ui.notify(text, level),
 			});
 			ctx.ui.notify(msg, "info");
+		},
+	});
+
+	// Ctrl+Alt+L opens the live, steerable loop drawer.
+	pi.registerShortcut(Key.ctrlAlt("l"), {
+		description: "Open the live loop panel (criteria, rounds, steer)",
+		handler: async (ctx: ExtensionContext) => {
+			await openLoopPanel(ctx, pi);
 		},
 	});
 }

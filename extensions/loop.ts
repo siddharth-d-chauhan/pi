@@ -1675,9 +1675,12 @@ class LoopPanelComponent implements Component {
 		void resumeOrchestration(this.pi, { goal: loop.goal, cwd: this.cwd, notify: () => {} });
 	}
 
-	/** Append a criterion (input: "desc | verify command") and kick the loop. */
+	/** Append a criterion (input: "desc | verify command") and kick the loop.
+	 *  Split on the FIRST pipe only — verify commands routinely contain pipes. */
 	private addCriterion(loop: LoopPanelLoop, raw: string): void {
-		const [desc, verify] = raw.split("|").map((s) => s.trim());
+		const sep = raw.indexOf("|");
+		const desc = (sep < 0 ? raw : raw.slice(0, sep)).trim();
+		const verify = sep < 0 ? "" : raw.slice(sep + 1).trim();
 		if (!desc) return;
 		try {
 			const items = readCriteria(loop.dir) ?? [];

@@ -85,3 +85,29 @@ hard multi-file defects but is NOT yet validated here.
 **Caveats:** n=2 repeats; single-file, individually-catchable defects. This does
 NOT test the hard case (subtle multi-file interactions) where lens separation +
 an independent panel might still earn its keep — that remains the open question.
+
+## Multi-file defect-catch (MiniMax-M3, 5 cross-file bugs × {generic, panel} × 2 runs)
+
+`node bench/defects-multi.mjs` — the HARD case: 2-file fixtures whose bug is a
+contract mismatch across the call boundary (unit mismatch, null contract,
+boundary, ignored-failure, shared-mutable aliasing) — each file reads fine alone.
+generic direct review vs an independent 3-lens PANEL (3 reviewers, majority vote).
+
+| Defect | generic | panel |
+|---|---|---|
+| unit-mismatch-timeout | 2/2 | 2/2 |
+| null-contract-deref | 2/2 | 2/2 |
+| boundary-across-files | 2/2 | 2/2 |
+| ignored-failure-contract | 2/2 | 2/2 |
+| shared-mutable-default | 2/2 | 2/2 |
+| **total** | **10/10 (100%)** | **10/10 (100%)** |
+
+**Finding: a dead heat, at 3x the cost.** On the exact defect class the panel was
+theorized to help with — cross-file contract mismatches a shallow review misses —
+the direct review caught everything, and the panel caught nothing more while
+spending 3 reviewers per claim. Across all three benchmarks the direct review is
+sufficient for a capable model.
+
+**Action:** the entire lens/panel apparatus (REVIEW_LENSES, reviewPanelSize,
+PI_LOOP_REVIEW_LENSES, the panel branch) was REMOVED from loop.ts. Verification is
+one direct adversarial reviewer — proven, and the cheapest thing that works.

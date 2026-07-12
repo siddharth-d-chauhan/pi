@@ -669,98 +669,42 @@ function bestOfNPrompt(loop: OrchestratedLoop): string {
 	].join("\n");
 }
 
-// Perspective-diverse verification: a claim can be wrong in more than one way,
-// so the reviewer applies DISTINCT lenses rather than one generic pass. Each
-// lens hunts a different failure mode; diversity catches what redundancy can't.
-export const REVIEW_LENSES: Array<{ key: string; brief: string }> = [
-	{
-		key: "correctness",
-		brief: "does the change actually do what the goal requires? hunt logic errors, inverted/wrong conditions, off-by-one, null/undefined paths, unhandled inputs, and call sites the change breaks.",
-	},
-	{
-		key: "safety",
-		brief: "could this lose data, break security, or corrupt state? destructive/irreversible ops, secrets, missing guards, dropped validation. Any BLOCKER here fails the claim regardless of the other lenses.",
-	},
-	{
-		key: "reproduce",
-		brief: "re-run the riskiest acceptance-criteria verify checks / tests YOURSELF and confirm PROGRESS.md evidence is real execution output, not asserted. A criterion whose evidence you can't reproduce is a fail.",
-	},
-];
-
-/** Opt-in independent panel size (PI_LOOP_REVIEW_LENSES). 1 (default) = a single
- *  reviewer applying all lenses in one pass (zero extra cost, better coverage);
- *  >1 = that many INDEPENDENT fresh reviewers, one lens each (round-robin),
- *  majority-pass required. Clamped to the lens count. */
-export function reviewPanelSize(): number {
-	const n = Number(process.env.PI_LOOP_REVIEW_LENSES);
-	if (!Number.isFinite(n) || n <= 1) return 1;
-	return Math.min(Math.floor(n), REVIEW_LENSES.length);
-}
-
+// A single DIRECT adversarial correctness review. Three defect-catch benchmarks
+// (bench/defects.mjs single-file, bench/defects-multi.mjs cross-file) showed a
+// capable model catches every defect, consistently, from a direct "find what's
+// wrong" ask — and that an elaborate multi-lens ritual/panel added cost and
+// variance without catching anything more, even on hard cross-file contract
+// mismatches. So verification is one direct reviewer. (Same lesson as hashline:
+// don't over-structure a strong model.)
 function reviewPrompt(loop: OrchestratedLoop, claim: string): string {
 	const diffLine = loop.baseline
 		? `The loop started at git commit ${loop.baseline} — have the reviewer run \`git diff ${loop.baseline}\` to see ALL work the loop produced.`
 		: "Have the reviewer inspect the work products listed in PROGRESS.md directly.";
 	const modelLine = loop.reviewModel
-		? `Spawn each reviewer with the agent tool's model parameter set to "${loop.reviewModel}" — a different model than the author, so the judge does not share the author's blind spots.`
-		: "If a different model is configured for subagents, spawn each reviewer on it (the agent tool's model parameter) — a judge that does not share the author's blind spots.";
+		? `Spawn the reviewer with the agent tool's model parameter set to "${loop.reviewModel}" — a different model than the author, so the judge does not share the author's blind spots.`
+		: "If a different model is configured for subagents, spawn the reviewer on it (the agent tool's model parameter) — a judge that does not share the author's blind spots.";
 	const cs = criteriaStatus(loop);
 	const criteriaLine = cs
 		? `- The acceptance criteria in ${criteriaPath(loop)} all claim passes=true. The reviewer must SPOT-CHECK them: re-run at least the riskiest "verify" checks and confirm the recorded evidence in PROGRESS.md is real, not asserted.`
 		: "";
-	const panel = reviewPanelSize();
-	const briefLines = [
-		"Give each reviewer a self-contained brief containing:",
+	return [
+		`<loop-review loop="${loop.goal}" round="${loop.round}">`,
+		`The loop just claimed DONE: "${claim}".`,
+		"Before this claim is accepted, dispatch EXACTLY ONE fresh-context reviewer via the agent tool.",
+		modelLine,
+		"The reviewer is adversarial — its job is to find reasons the claim is FALSE, not to confirm it.",
+		"Give the reviewer a self-contained brief containing:",
 		`- The goal: ${loop.goal}`,
 		`- The state files to read: ${progressPath(loop)} and ${guardrailsPath(loop)}`,
 		`- ${diffLine}`,
 		criteriaLine,
-	];
-
-	// DEFAULT (panel = 1): a single DIRECT adversarial correctness review. The
-	// defect-catch benchmark (bench/defects.mjs) showed a capable model catches
-	// more, and more consistently, from a direct "find what's wrong" ask than
-	// from an elaborate multi-lens ritual (the ritual added variance, not
-	// catches — same lesson as hashline: don't over-structure a strong model).
-	if (panel <= 1) {
-		return [
-			`<loop-review loop="${loop.goal}" round="${loop.round}">`,
-			`The loop just claimed DONE: "${claim}".`,
-			"Before this claim is accepted, dispatch EXACTLY ONE fresh-context reviewer via the agent tool.",
-			modelLine,
-			"The reviewer is adversarial — its job is to find reasons the claim is FALSE, not to confirm it.",
-			...briefLines,
-			"- Instructions: verify the goal is ACTUALLY met — read the changed code/artifacts and think hard about",
-			"  what's wrong: logic errors, inverted conditions, off-by-one and boundary cases, unhandled inputs,",
-			"  regressions, skipped acceptance criteria, and claims in PROGRESS.md never verified by execution.",
-			"  Trace a concrete input where it matters. Verdict first, then at most 5 findings with file:line.",
-			"When the reviewer returns, append its findings to PROGRESS.md, then end your reply with EXACTLY one line:",
-			"REVIEW_VERDICT: pass|fail — <one-line summary of the reviewer's verdict>",
-			"Report the verdict honestly — do not soften a fail.",
-			"</loop-review>",
-		]
-			.filter(Boolean)
-			.join("\n");
-	}
-
-	// OPT-IN (PI_LOOP_REVIEW_LENSES>1): independent lens PANEL + majority vote — a
-	// different mechanism from the single-agent ritual (independent perspectives
-	// voting, not one agent following a checklist). Plausibly better on hard
-	// multi-file defects; NOT yet validated by the benchmark.
-	const lensList = REVIEW_LENSES.map((l) => `  · ${l.key.toUpperCase()}: ${l.brief}`).join("\n");
-	return [
-		`<loop-review loop="${loop.goal}" round="${loop.round}">`,
-		`The loop just claimed DONE: "${claim}".`,
-		`Before this claim is accepted, dispatch a PANEL of ${panel} INDEPENDENT fresh-context reviewers via the agent tool, each owning ONE lens (assign the lenses below round-robin). They must NOT share context.`,
-		modelLine,
-		"Each reviewer is adversarial — its job is to find reasons the claim is FALSE through its own lens, not to confirm it.",
-		"ACCEPT the done claim only if a MAJORITY of reviewers pass AND the SAFETY lens found no BLOCKER; otherwise it fails and costs a round.",
-		"VERIFICATION LENSES (distinct failure modes — one reviewer each):",
-		lensList,
-		...briefLines,
-		"- Verdict first, then at most 5 findings with file:line, tagged by lens.",
-		"When the reviewers return, append their findings to PROGRESS.md, then end your reply with EXACTLY one line:",
-		"REVIEW_VERDICT: pass|fail — <one-line summary; on fail, name the lens and the blocking finding>",
+		"- Instructions: verify the goal is ACTUALLY met — read the changed code/artifacts and think hard about",
+		"  what's wrong: logic errors, inverted conditions, off-by-one and boundary cases, unhandled inputs,",
+		"  contract mismatches BETWEEN files, regressions, skipped acceptance criteria, and claims in",
+		"  PROGRESS.md never verified by execution. Trace a concrete input across the change where it matters.",
+		"  Verdict first, then at most 5 findings with file:line.",
+		"When the reviewer returns, append its findings to PROGRESS.md, then end your reply with EXACTLY one line:",
+		"REVIEW_VERDICT: pass|fail — <one-line summary of the reviewer's verdict>",
 		"Report the verdict honestly — do not soften a fail.",
 		"</loop-review>",
 	]

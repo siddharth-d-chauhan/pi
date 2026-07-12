@@ -69,6 +69,15 @@ import {
 
 const DEVBRAIN_ROOT = process.env.PI_DEVBRAIN_ROOT ?? `${process.env.HOME}/vault/tools/devbrain`;
 const DEFAULT_REPO = process.env.PI_DEVBRAIN_REPO ?? `${process.env.HOME}/projects/dev/automations/testing-automations`;
+
+/** The orchestrate goal = the whole `/loop` argument minus recognized flags.
+ *  (Using the first token truncated every multi-word goal to one word.) */
+export function parseOrchestrateGoal(raw: string): string {
+	return raw
+		.replace(/\b(?:rounds|gate|rmodel|review|criteria)=\S+/gi, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
 const ROUND_TIMEOUT_MS = Number(process.env.PI_LOOP_ROUND_TIMEOUT_MS ?? 900_000);
 const MAX_ENV_DETOURS = 3;
 const DEFAULT_ROUNDS = 5;
@@ -741,7 +750,7 @@ async function startOrchestration(
 		return `an orchestrated loop is already running (${activeOrchestration.goal}) — kill it first`;
 	}
 	const registry = getBackgroundProcessRegistry();
-	const dir = `${opts.cwd}/.pi/loops/${opts.goal.replace(/[^a-zA-Z0-9-]/g, "_")}`;
+	const dir = `${opts.cwd}/.pi/loops/${opts.goal.replace(/[^a-zA-Z0-9-]/g, "_").slice(0, 80) || "loop"}`;
 	mkdirSync(dir, { recursive: true });
 	if (!existsSync(`${dir}/PROGRESS.md`)) {
 		writeFileSync(
@@ -1676,8 +1685,10 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (goal === "resume") {
+				// Full goal after "resume" (minus flags), not just the first word.
+				const resumeGoal = parseOrchestrateGoal(raw.replace(/^resume\s+/i, "")) || undefined;
 				const msg = await resumeOrchestration(pi, {
-					goal: parts[1],
+					goal: resumeGoal,
 					cwd: ctx.cwd,
 					notify: (text, level) => ctx.ui.notify(text, level),
 				});
@@ -1715,8 +1726,16 @@ export default function (pi: ExtensionAPI) {
 			const roundsArg = /rounds=(\d+)/.exec(raw);
 			const gateArg = /gate=(\S+)/.exec(raw);
 			const rmodelArg = /rmodel=(\S+)/.exec(raw);
+			// The GOAL is the whole argument minus recognized flags — NOT parts[0]
+			// (that is only for subcommand detection above; using it truncated every
+			// multi-word goal to its first word).
+			const goalText = parseOrchestrateGoal(raw);
+			if (!goalText) {
+				ctx.ui.notify("Usage: /loop <goal>  (a goal is required after any flags)", "error");
+				return;
+			}
 			const msg = await startOrchestration(pi, {
-				goal,
+				goal: goalText,
 				rounds: roundsArg ? Number(roundsArg[1]) : (defaults.rounds ?? DEFAULT_ROUNDS),
 				autoBudget: !roundsArg && defaults.rounds === undefined,
 				cwd: ctx.cwd,

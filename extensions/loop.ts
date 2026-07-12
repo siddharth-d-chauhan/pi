@@ -953,7 +953,10 @@ async function resumeOrchestration(
 			// unreadable state — skip
 		}
 	}
-	const resumable = states.filter((s) => s.status === "running" || s.status === "parked");
+	// running/parked resume as-is; a COMPLETED loop can also be re-opened — that's
+	// how you add a new acceptance criterion and tell the loop to keep going (the
+	// added criterion fails its verify command, so the loop works to satisfy it).
+	const resumable = states.filter((s) => s.status === "running" || s.status === "parked" || s.status === "completed");
 	const target = opts.goal ? resumable.find((s) => s.goal === opts.goal) : resumable[0];
 	if (!target) {
 		const known = resumable.map((s) => s.goal).join(", ") || "none";
@@ -1792,7 +1795,9 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (goal === "resume") {
 				// Full goal after "resume" (minus flags), not just the first word.
-				const resumeGoal = parseOrchestrateGoal(raw.replace(/^resume\s+/i, "")) || undefined;
+				// Strip the "resume" verb (with or without a trailing goal). Bare
+				// "/loop resume" -> undefined goal -> resume the most-recent loop.
+				const resumeGoal = parseOrchestrateGoal(raw.replace(/^resume\b\s*/i, "")) || undefined;
 				const msg = await resumeOrchestration(pi, {
 					goal: resumeGoal,
 					cwd: ctx.cwd,

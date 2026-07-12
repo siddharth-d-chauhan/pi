@@ -1353,35 +1353,34 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 		registry.appendLog(loop.id, `review (${took}s): ${reviewVerdict} — ${reviewSummary}`);
 		loop.verdicts.push({ round: loop.round, verdict: `review:${reviewVerdict}`, summary: reviewSummary, took });
 
-		if (reviewVerdict !== "pass") {
-			// Tiebreaker: the acceptance criteria ARE the agreed definition of done.
-			// The reviewer may veto a couple of times to catch a real defect the
-			// criteria miss — but it cannot override OBJECTIVELY-passing criteria
-			// forever by re-interpreting the goal. After repeated rejections with
-			// every criterion green, the criteria contract wins (prevents the
-			// author-vs-reviewer deadlock that burned whole budgets on trivial work).
-			const objective = runCriteriaChecks(loop);
-			if (objective?.allPass && loop.rejections >= 1) {
-				registry.appendLog(
-					loop.id,
-					`review failed again, but all ${objective.total} criteria objectively pass after ${loop.rejections} rejection(s) — accepting on the criteria contract (reviewer over-vetoing)`,
-				);
-				completeLoop(
-					loop,
-					`all ${objective.total} criteria pass; review over-vetoed: ${reviewSummary.slice(0, 60)}`,
-				);
-				return;
-			}
+		// EXOGENOUS verification is the gate — NOT the LLM reviewer. The field is
+		// clear (SWE-agent/OpenHands terminate on tests; recursive self-review
+		// collapses): a model reviewing a model oscillates via agreeableness bias
+		// and "fixing" what isn't broken. So the independent review is ADVISORY —
+		// if the objective criteria all still pass, the loop COMPLETES regardless
+		// of the reviewer's opinion (its findings are logged). Only a criterion
+		// that actually FAILS its verify command reopens the loop.
+		const objective = runCriteriaChecks(loop);
+		if (objective && !objective.allPass) {
 			loop.rejections += 1;
-			addGuardrail(loop, `review rejected a done claim: ${reviewSummary}`);
-			recordFailure(loop, "review", reviewSummary);
+			const failing = objective.failing.join(", ");
+			registry.appendLog(loop.id, `✗ criteria still failing: ${failing} — another round`);
+			addGuardrail(loop, `criteria unmet after review: ${failing}`);
+			recordFailure(loop, "criteria", failing);
 			loop.notes.push(
-				`Your previous "done" claim FAILED independent review: ${reviewSummary}. Address every finding (see PROGRESS.md) before claiming done again.`,
+				`These acceptance criteria FAIL when the loop runs their verify commands: ${failing}. Make them pass.`,
 			);
 			nextRound(pi, loop);
 			return;
 		}
-		// Review passed → the mechanical gate (if any) has the final word.
+		if (reviewVerdict !== "pass") {
+			registry.appendLog(
+				loop.id,
+				`review raised concerns but all ${objective?.total ?? 0} criteria objectively pass — ADVISORY, not blocking: ${reviewSummary}`,
+			);
+		}
+		// All exogenous criteria pass. A devbrain gate (if configured) is ALSO
+		// exogenous, so it still gates.
 		if (loop.gate) {
 			setPhase(loop, `gating: devbrain goal '${loop.gate}'`);
 			const gate = await runGate(loop);

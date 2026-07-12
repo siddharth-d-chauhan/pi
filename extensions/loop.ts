@@ -633,10 +633,11 @@ function loopContractLines(loop: OrchestratedLoop): string[] {
 		? [
 				`Acceptance criteria: ${criteriaPath(loop)} — ${cs.passed}/${cs.total} passing.`,
 				cs.remaining.length > 0
-					? `Remaining: ${cs.remaining.map((c) => `${c.id} (${c.desc.slice(0, 60)})`).join("; ")}`
-					: "All criteria pass — verify nothing regressed before claiming done.",
-				'Flip a criterion\'s "passes" to true ONLY after running its verify check and appending the evidence to PROGRESS.md.',
-				'A "done" claim is MECHANICALLY REJECTED while any criterion has passes=false.',
+					? `Still failing: ${cs.remaining.map((c) => `${c.id} (${c.desc.slice(0, 60)})`).join("; ")}`
+					: "All criteria pass.",
+				"The LOOP runs each criterion's verify command ITSELF after your round and sets passes objectively — " +
+					"you do NOT need to run them, paste evidence, or re-verify passing criteria. Spend the round making the " +
+					"FAILING criteria true by doing the actual work; the loop handles verification and converges automatically.",
 			]
 		: [];
 	// Promoted steps (offline optimizer): lessons distilled from MANY past runs,
@@ -679,24 +680,21 @@ function roundPrompt(loop: OrchestratedLoop): string {
 		`You are the ORCHESTRATOR of an autonomous loop. Goal: ${loop.goal}`,
 		...loopContractLines(loop),
 		steering,
-		"This round, do exactly this:",
-		"1. Read PROGRESS.md and GUARDRAILS.md. Decide: is the goal genuinely DONE (verified, not claimed)?",
-		"2. If NOT done: dispatch 1-3 workers via the agent tool with precise, self-contained briefs —",
-		"   parallel only when tasks are independent; worktree isolation for write work. Include",
-		"   relevant PROGRESS excerpts and guardrails in each brief.",
-		"   ALWAYS SYNTHESIZE: never brief a worker with 'based on the findings, fix it' — read the",
-		"   findings yourself and write a spec with exact file paths, line numbers, and the change.",
-		"   Include a one-line PURPOSE so the worker calibrates depth (e.g. 'informs the fix — report",
-		"   file:line + signatures' / 'quick pre-merge check — happy path only').",
-		"   CONTINUE vs SPAWN: a worker fixing ITS OWN failure keeps its loaded context — send the",
-		"   failure back to the SAME worker via agent_message; spawn FRESH for new tasks and reviews.",
-		"   Use the devbrain tool to VERIFY product-facing results (triage-typed).",
-		"3. Append to PROGRESS.md: what was attempted, what was verified, what remains.",
-		"   If anything FAILED this round, append the distilled lesson to GUARDRAILS.md (one line).",
+		"This round: make ONE focused increment toward the FAILING criteria — do NOT re-verify or self-review.",
+		"1. Read PROGRESS.md and GUARDRAILS.md briefly.",
+		"2. Advance the failing criteria: dispatch a worker via the agent tool (worktree isolation for write",
+		"   work) with a precise, self-contained brief — OR make the change directly if it is trivial.",
+		"   SYNTHESIZE: read the findings yourself and give the worker exact file paths, line numbers, and the",
+		"   change, plus a one-line PURPOSE. Send a failure back to the SAME worker via agent_message; spawn",
+		"   FRESH for new tasks. You are the only coordinator.",
+		"3. Append a SHORT note to PROGRESS.md (what changed this round). Do NOT run the criteria verify",
+		"   commands, paste their output, or dispatch your own reviewer — the LOOP runs the verify commands",
+		"   itself and runs an INDEPENDENT review after a done verdict. Re-verifying here wastes the round.",
 		"4. End your reply with EXACTLY one line:",
-		"   LOOP_VERDICT: done|continue|blocked — <one-line summary>",
-		"   (use `blocked` when a human decision is required; say what you need)",
-		"Do not do the work yourself in this session — dispatch it. Keep your own output short.",
+		"   LOOP_VERDICT: done|continue|blocked — <short summary>",
+		"   Say `done` once the failing criteria are addressed (the loop confirms objectively, then reviews);",
+		"   `blocked` when a human decision is required (say what you need).",
+		"Keep the round FOCUSED and SHORT: one increment, then the verdict. Do not gold-plate or re-audit.",
 		"</loop-round>",
 	].join("\n");
 }
@@ -745,24 +743,26 @@ function reviewPrompt(loop: OrchestratedLoop, claim: string): string {
 		: "If a different model is configured for subagents, spawn the reviewer on it (the agent tool's model parameter) — a judge that does not share the author's blind spots.";
 	const cs = criteriaStatus(loop);
 	const criteriaLine = cs
-		? `- The acceptance criteria in ${criteriaPath(loop)} all claim passes=true. The reviewer must SPOT-CHECK them: re-run at least the riskiest "verify" checks and confirm the recorded evidence in PROGRESS.md is real, not asserted.`
+		? `- Acceptance criteria live in ${criteriaPath(loop)}. Re-run the riskiest "verify" commands yourself against the actual deliverable and confirm they genuinely pass.`
 		: "";
 	return [
 		`<loop-review loop="${loop.goal}" round="${loop.round}">`,
 		`The loop just claimed DONE: "${claim}".`,
 		"Before this claim is accepted, dispatch EXACTLY ONE fresh-context reviewer via the agent tool.",
 		modelLine,
-		"The reviewer is adversarial — its job is to find reasons the claim is FALSE, not to confirm it.",
+		"The reviewer is adversarial — its job is to find reasons the DELIVERABLE is wrong, not to confirm it.",
 		"Give the reviewer a self-contained brief containing:",
 		`- The goal: ${loop.goal}`,
-		`- The state files to read: ${progressPath(loop)} and ${guardrailsPath(loop)}`,
 		`- ${diffLine}`,
 		criteriaLine,
-		"- Instructions: verify the goal is ACTUALLY met — read the changed code/artifacts and think hard about",
-		"  what's wrong: logic errors, inverted conditions, off-by-one and boundary cases, unhandled inputs,",
-		"  contract mismatches BETWEEN files, regressions, skipped acceptance criteria, and claims in",
-		"  PROGRESS.md never verified by execution. Trace a concrete input across the change where it matters.",
-		"  Verdict first, then at most 5 findings with file:line.",
+		"- Instructions: judge ONLY whether the DELIVERABLE meets the goal and the acceptance criteria. Read the",
+		"  changed code/artifacts and hunt for what is actually WRONG: logic errors, inverted conditions,",
+		"  off-by-one and boundary cases, unhandled inputs, contract mismatches between files, regressions,",
+		"  and skipped criteria. Trace a concrete input across the change where it matters.",
+		"  PASS a deliverable that is correct and meets every criterion. Do NOT fail it for PROCESS reasons —",
+		"  PROGRESS.md/audit-trail/documentation quality, verbosity, or missing prose are NOT defects in the",
+		"  work and must never cause a fail. Verdict first, then at most 5 findings with file:line (real",
+		"  deliverable defects only).",
 		"When the reviewer returns, append its findings to PROGRESS.md, then end your reply with EXACTLY one line:",
 		"REVIEW_VERDICT: pass|fail — <one-line summary of the reviewer's verdict>",
 		"Report the verdict honestly — do not soften a fail.",

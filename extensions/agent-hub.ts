@@ -28,18 +28,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { heatLine } from "./lib/card.ts";
+import * as ui from "./lib/chips.ts";
 
 type Theme = Parameters<Parameters<ExtensionCommandContext["ui"]["custom"]>[0]>[1];
-
-const STATUS_GLYPH: Record<BackgroundProcessSnapshot["status"], string> = {
-	running: "▶",
-	idle: "◌",
-	parked: "⏸",
-	completed: "✓",
-	failed: "✗",
-	cancelled: "⊘",
-};
 
 function formatTokens(tokens: number): string {
 	return tokens < 1000 ? `${tokens}` : `${(tokens / 1000).toFixed(1)}k`;
@@ -97,14 +88,6 @@ export function groupActivity(
 	}
 	for (const section of SECTION_ORDER) groups[section].sort((a, b) => b.startedAt - a.startedAt);
 	return groups;
-}
-
-function glyphColor(status: BackgroundProcessSnapshot["status"]): "accent" | "success" | "error" | "warning" | "dim" {
-	if (status === "running") return "accent";
-	if (status === "completed") return "success";
-	if (status === "failed") return "error";
-	if (status === "cancelled") return "warning";
-	return "dim";
 }
 
 function headline(snapshot: BackgroundProcessSnapshot): string {
@@ -297,17 +280,29 @@ export class AgentHubComponent implements Component {
 		const snapshot = this.snapshots.find((item) => item.id === this.detailId);
 		const entry = this.detailId ? getBackgroundProcessRegistry().get(this.detailId) : undefined;
 		if (!snapshot || !entry) {
-			return [theme.fg("muted", "  Activity is no longer available."), "", theme.fg("dim", "  Esc back · q close")];
+			return [
+				pad(`  ${ui.soft("this activity is no longer available")}`),
+				"",
+				pad(
+					ui.keyHints([
+						["esc", "back"],
+						["q", "close"],
+					]),
+				),
+			];
 		}
 
 		const lines: string[] = [];
-		const glyph = STATUS_GLYPH[snapshot.status] ?? "·";
 		const kind = activityKind(snapshot);
-		lines.push(pad(`${theme.fg(glyphColor(snapshot.status), glyph)} ${theme.fg("accent", theme.bold(kind))}`));
-		lines.push(pad(theme.fg("dim", `  ${snapshot.status} · ${formatTaskAge(snapshot)} · ${snapshot.id}`)));
-		lines.push(pad(theme.fg("text", `  ${snapshot.label}`)));
+		// header: kind chip · status pill · id, then label/summary, then metrics
+		lines.push(
+			pad(
+				` ${ui.chip(kind.toUpperCase())} ${ui.statusPill(snapshot.status)} ${ui.faint(snapshot.id)}  ${ui.faint(formatTaskAge(snapshot))}`,
+			),
+		);
+		lines.push(pad(`  ${ui.ink(snapshot.label)}`));
 		if (snapshot.summary && snapshot.summary !== snapshot.label) {
-			lines.push(pad(theme.fg("muted", `  ${snapshot.summary}`)));
+			lines.push(pad(`  ${ui.soft(snapshot.summary)}`));
 		}
 		const metrics = snapshot.metrics;
 		if (metrics) {
@@ -317,69 +312,75 @@ export class AgentHubComponent implements Component {
 				metrics.requests ? `${metrics.requests} req` : undefined,
 				metrics.contextPct ? `${metrics.contextPct.toFixed(0)}% ctx` : undefined,
 			].filter((part): part is string => part !== undefined);
-			if (parts.length > 0) lines.push(pad(theme.fg("dim", `  ${parts.join(" · ")}`)));
-		}
-		lines.push("");
-		const visible = entry.log.slice(this.detailTop, this.detailTop + DETAIL_LINES);
-		if (visible.length === 0) {
-			lines.push(pad(theme.fg("muted", "  (no activity yet)")));
-		} else {
-			for (const raw of visible) lines.push(pad(theme.fg("toolOutput", `  ${sanitizeLogLine(raw)}`)));
+			if (parts.length > 0) lines.push(pad(`  ${ui.faint(parts.join(" · "))}`));
 		}
 		lines.push("");
 		const position =
 			entry.log.length > DETAIL_LINES
-				? ` · lines ${this.detailTop + 1}-${this.detailTop + visible.length}/${entry.log.length}`
+				? ui.faint(
+						`${this.detailTop + 1}-${this.detailTop + Math.min(DETAIL_LINES, entry.log.length - this.detailTop)}/${entry.log.length}`,
+					)
 				: "";
-		lines.push(
-			pad(
-				theme.fg(
-					"dim",
-					`  ↑/↓ scroll · PgUp/PgDn · Esc back${snapshot.status === "running" && snapshot.canKill ? " · x kill" : ""} · q close${position}`,
-				),
-			),
-		);
+		lines.push(pad(ui.section("output", position)));
+		const visible = entry.log.slice(this.detailTop, this.detailTop + DETAIL_LINES);
+		if (visible.length === 0) {
+			lines.push(pad(`  ${ui.faint("(no output yet)")}`));
+		} else {
+			for (const raw of visible) lines.push(pad(theme.fg("toolOutput", `  ${sanitizeLogLine(raw)}`)));
+		}
+		lines.push("");
+		const hints: Array<[string, string]> = [
+			["↑↓", "scroll"],
+			["⇧↓", "running"],
+		];
+		if (snapshot.status === "running" && snapshot.canKill) hints.push(["x", "kill"]);
+		hints.push(["esc", "back"], ["q", "close"]);
+		lines.push(pad(ui.keyHints(hints)));
 		return lines;
 	}
 
 	render(width: number): string[] {
 		if (this.detailId) return this.renderDetail(width);
-		const theme = this.theme;
 		const lines: string[] = [];
 		const pad = (s: string) => truncateToWidth(s, width);
-		lines.push(pad(theme.fg("accent", theme.bold(" Activity "))));
-		lines.push(heatLine(Math.min(width, 60)));
-		lines.push(
-			pad(
-				"  " +
-					FILTERS.map((filter) =>
-						filter === this.filter
-							? theme.bg("selectedBg", theme.fg("accent", ` ${filter} `))
-							: theme.fg("dim", ` ${filter} `),
-					).join(" "),
-			),
-		);
-		if (this.snapshots.length === 0) {
-			lines.push(pad(theme.fg("muted", `  No ${this.filter === "all" ? "activity" : this.filter} this session.`)));
-		}
+
+		// header: AGENTS chip · running/needs-input rollup · filter chips (right)
 		const groups = groupActivity(this.snapshots, "all");
+		const runningN = this.snapshots.filter((s) => s.status === "running").length;
+		const needsN = groups["needs-input"].length;
+		const rollup = [
+			runningN > 0 ? `${ui.amber(ui.bold(String(runningN)))} ${ui.soft("running")}` : "",
+			needsN > 0 ? `${ui.blue(ui.bold(String(needsN)))} ${ui.soft("needs input")}` : "",
+		]
+			.filter(Boolean)
+			.join(ui.faint("  ·  "));
+		const filters = FILTERS.map((filter) =>
+			filter === this.filter ? ui.pill("blue", filter) : ui.faint(` ${filter} `),
+		).join(" ");
+		lines.push(pad(ui.rowAlign(` ${ui.chip("AGENTS")}  ${rollup}`, filters, width)));
+		lines.push("");
+
+		if (this.snapshots.length === 0) {
+			lines.push(pad(`  ${ui.soft(`no ${this.filter === "all" ? "activity" : this.filter} this session`)}`));
+			lines.push("");
+			lines.push(pad(ui.keyHints([["q", "close"]])));
+			return lines;
+		}
+
 		let rowIndex = 0;
 		for (const section of SECTION_ORDER) {
 			const entries = groups[section];
-			lines.push(pad(theme.fg("muted", `  ${theme.bold(SECTION_LABELS[section])} · ${entries.length}`)));
-			if (entries.length === 0) lines.push(pad(theme.fg("dim", "    (none)")));
+			if (entries.length === 0) continue;
+			lines.push(pad(ui.section(SECTION_LABELS[section], ui.faint(String(entries.length)))));
 			for (const snapshot of entries) {
-				const cursor = rowIndex === this.selected ? theme.fg("accent", "  ›") : "   ";
-				const glyph = STATUS_GLYPH[snapshot.status] ?? "·";
 				const kind = activityKind(snapshot);
-				const age = theme.fg("dim", formatTaskAge(snapshot));
-				const status = theme.fg(glyphColor(snapshot.status), snapshot.status);
-				const group = snapshot.group ? theme.fg("dim", ` · ${snapshot.group}`) : "";
-				lines.push(
-					pad(
-						`${cursor} ${theme.fg(glyphColor(snapshot.status), glyph)} ${theme.fg("accent", theme.bold(kind))} ${status} · ${age}${group} · ${theme.fg("text", headline(snapshot))}`,
-					),
-				);
+				const group = snapshot.group ? ui.faint(` · ${snapshot.group}`) : "";
+				const left =
+					` ${ui.dotForStatus(snapshot.status)} ${ui.copper(kind.padEnd(6))} ` +
+					`${ui.statusPill(snapshot.status)} ${ui.ink(headline(snapshot))}${group}`;
+				const right = ui.faint(formatTaskAge(snapshot));
+				const row = ui.rowAlign(left, right, width - 1);
+				lines.push(rowIndex === this.selected ? ui.cursorRow(row, width) : pad(` ${row}`));
 				rowIndex++;
 			}
 		}
@@ -389,19 +390,30 @@ export class AgentHubComponent implements Component {
 			const target = this.snapshots[this.selected];
 			lines.push(
 				pad(
-					theme.fg("accent", `  steer ${target?.agentType ?? "agent"} › `) +
-						this.steerText +
-						theme.fg("accent", "█"),
+					` ${ui.copper(ui.bold(`steer ${target?.agentType ?? "agent"}`))} ${ui.faint("›")} ${ui.ink(this.steerText)}${ui.amber("▌")}`,
 				),
 			);
-			lines.push(pad(theme.fg("dim", "  Enter to send · Esc to cancel")));
+			lines.push(
+				pad(
+					ui.keyHints([
+						["↵", "send"],
+						["esc", "cancel"],
+					]),
+				),
+			);
 		} else {
 			lines.push(
 				pad(
-					theme.fg(
-						"dim",
-						"  ↑/↓ select · ⇧↓ running · ←/→/Tab filter · Enter logs · x kill · s message · r revive · q/Esc close",
-					),
+					ui.keyHints([
+						["↑↓", "select"],
+						["⇧↓", "running"],
+						["←→", "filter"],
+						["↵", "logs"],
+						["x", "kill"],
+						["s", "message"],
+						["r", "revive"],
+						["q", "close"],
+					]),
 				),
 			);
 		}

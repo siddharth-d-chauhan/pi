@@ -102,6 +102,27 @@ export function dotForVerdict(verdict: string): string {
 	return dot("done");
 }
 
+/** Background-process status → rim dot. */
+export function dotForStatus(status: string): string {
+	const s = status.toLowerCase();
+	if (s === "running") return dot("working");
+	if (s === "completed" || s === "done") return dot("done");
+	if (s === "failed" || s === "cancelled") return dot("fail");
+	if (s === "parked") return dot("info");
+	return dot("idle");
+}
+
+// ---- row with a right-flush trailing field (e.g. age) -----------------------
+/** Compose `left … right` so the whole thing is exactly `width` visible cells,
+ *  right flush at the end. Left is truncated (with …) if the pair overflows. */
+export function rowAlign(left: string, right: string, width: number): string {
+	const rw = visibleWidth(right);
+	const room = Math.max(0, width - rw - 1);
+	const l = truncateToWidth(left, room);
+	const gap = Math.max(1, width - visibleWidth(l) - rw);
+	return l + " ".repeat(gap) + right;
+}
+
 // ---- SECTION header ----------------------------------------------------------
 export function section(label: string, suffix = ""): string {
 	return ` ${soft(bold(label.toUpperCase()))}${suffix ? `  ${suffix}` : ""}`;

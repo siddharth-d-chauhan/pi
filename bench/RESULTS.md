@@ -54,3 +54,34 @@ Small n (4 tasks, small files), one model, single run each (no variance). Token
 counts include heavy navigation (find/bash/read) the model chose. This measures
 *token cost*, not the *reliability* axis where hashline's real claim lives —
 that needs a genuinely weak model and/or harder edits to exercise.
+
+## Defect-catch benchmark (MiniMax-M3, 5 planted bugs × 2 review modes × 2 runs)
+
+`node bench/defects.mjs` — does the shipped 3-lens review catch bugs a generic
+review misses? Catch = VERDICT buggy AND the reviewer names the specific defect.
+
+| Defect | generic | lenses |
+|---|---|---|
+| off-by-one-paginate | 2/2 | 1/2 |
+| inverted-retry | 2/2 | 2/2 |
+| empty-average-nan | 2/2 | 2/2 |
+| unanchored-id-regex | 2/2 | 1/2 |
+| foreach-async-race | 2/2 | 2/2 |
+| **total** | **10/10 (100%)** | **8/10 (80%)** |
+
+**Finding: the 3-lens single-reviewer default did NOT help and slightly hurt.**
+Generic direct review caught every defect on both runs (100%, perfectly
+consistent). The 3-lens ritual caught fewer and beat generic on nothing — the
+misses were run-2 variance (run 1 caught them), i.e. the elaborate checklist
+made a capable model LESS consistent, not more thorough. Same lesson as hashline:
+don't over-structure a strong model.
+
+**Action:** the loop's DEFAULT review is now a single DIRECT adversarial
+correctness review (what measured best). The multi-lens structure is kept only
+for the OPT-IN independent panel (`PI_LOOP_REVIEW_LENSES>1`) — a different
+mechanism (independent perspectives + majority vote) that's plausibly better on
+hard multi-file defects but is NOT yet validated here.
+
+**Caveats:** n=2 repeats; single-file, individually-catchable defects. This does
+NOT test the hard case (subtle multi-file interactions) where lens separation +
+an independent panel might still earn its keep — that remains the open question.

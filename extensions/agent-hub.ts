@@ -1,10 +1,12 @@
 /**
- * Agent Hub Extension — a focusable overlay for managing subagents.
+ * Agent Hub Extension — a focusable bottom drawer for managing subagents.
  *
- * `/agents` opens a live roster of every subagent the `agent` tool has
- * registered this session: status, label, age, tokens/cost. From the list:
+ * `/agents` opens a Claude-style live activity view over the shared background
+ * registry: subagents, delegated work, background shells, and extension tasks.
+ * Entries are grouped by Needs input / Working / Completed. From the list:
  *
- *   ↑/↓  select        x  kill the selected running agent
+ *   ↑/↓  select        ←/→/Tab  filter all/agents/processes
+ *   Enter open detail  x  kill running / remove finished
  *   s    steer/message (running: steer; idle/parked: wake with a message)
  *   r    revive a parked agent   q/Esc  close
  *
@@ -22,8 +24,9 @@ import {
 	formatTaskAge,
 	getBackgroundProcessRegistry,
 	reviveAgent,
+	sanitizeLogLine,
 } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { heatLine } from "./lib/card.ts";
 
@@ -42,27 +45,112 @@ function formatTokens(tokens: number): string {
 	return tokens < 1000 ? `${tokens}` : `${(tokens / 1000).toFixed(1)}k`;
 }
 
-class AgentHubComponent implements Component {
+type ActivityFilter = "all" | "agents" | "processes";
+export type ActivitySection = "needs-input" | "working" | "completed";
+
+const FILTERS: ActivityFilter[] = ["all", "agents", "processes"];
+const SECTION_ORDER: ActivitySection[] = ["needs-input", "working", "completed"];
+const DETAIL_LINES = 16;
+
+const SECTION_LABELS: Record<ActivitySection, string> = {
+	"needs-input": "Needs input",
+	working: "Working",
+	completed: "Completed",
+};
+
+function isAgent(snapshot: BackgroundProcessSnapshot): boolean {
+	return snapshot.kind === "subagent" || snapshot.kind === "delegation";
+}
+
+function isLoop(snapshot: BackgroundProcessSnapshot): boolean {
+	return snapshot.kind === "delegation" && /^↻\s+(?:loop|orchestrate)\b/.test(snapshot.label);
+}
+
+export function activityKind(snapshot: BackgroundProcessSnapshot): string {
+	if (isLoop(snapshot)) return "loop";
+	if (isAgent(snapshot)) return snapshot.agentType ?? "agent";
+	return snapshot.kind === "shell" ? "$" : snapshot.kind;
+}
+
+export function activitySection(snapshot: BackgroundProcessSnapshot): ActivitySection {
+	if (snapshot.status === "running") return "working";
+	if (snapshot.status === "completed" || snapshot.status === "cancelled") return "completed";
+	return "needs-input";
+}
+
+function matchesFilter(snapshot: BackgroundProcessSnapshot, filter: ActivityFilter): boolean {
+	if (filter === "all") return true;
+	return filter === "agents" ? isAgent(snapshot) : !isAgent(snapshot);
+}
+
+export function groupActivity(
+	snapshots: BackgroundProcessSnapshot[],
+	filter: ActivityFilter,
+): Record<ActivitySection, BackgroundProcessSnapshot[]> {
+	const groups: Record<ActivitySection, BackgroundProcessSnapshot[]> = {
+		"needs-input": [],
+		working: [],
+		completed: [],
+	};
+	for (const snapshot of snapshots) {
+		if (matchesFilter(snapshot, filter)) groups[activitySection(snapshot)].push(snapshot);
+	}
+	for (const section of SECTION_ORDER) groups[section].sort((a, b) => b.startedAt - a.startedAt);
+	return groups;
+}
+
+function glyphColor(status: BackgroundProcessSnapshot["status"]): "accent" | "success" | "error" | "warning" | "dim" {
+	if (status === "running") return "accent";
+	if (status === "completed") return "success";
+	if (status === "failed") return "error";
+	if (status === "cancelled") return "warning";
+	return "dim";
+}
+
+function headline(snapshot: BackgroundProcessSnapshot): string {
+	const latest = snapshot.logTail.at(-1);
+	return snapshot.summary?.trim() || (latest ? sanitizeLogLine(latest) : "") || snapshot.label;
+}
+
+export class AgentHubComponent implements Component {
 	focused = false;
 
 	private selected = 0;
 	private steering = false;
 	private steerText = "";
+	private filter: ActivityFilter = "all";
+	private detailId: string | undefined;
+	private detailTop = 0;
+	private followTail = true;
 	private snapshots: BackgroundProcessSnapshot[] = [];
 	private readonly unsubscribe: () => void;
 	private readonly tui: TUI;
 	private readonly theme: Theme;
+	private readonly keybindings: KeybindingsManager;
 	private readonly done: (result: undefined) => void;
 
-	constructor(tui: TUI, theme: Theme, done: (result: undefined) => void) {
+	constructor(tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: (result: undefined) => void) {
 		this.tui = tui;
 		this.theme = theme;
+		this.keybindings = keybindings;
 		this.done = done;
 		this.refresh();
 		this.unsubscribe = getBackgroundProcessRegistry().subscribe(() => {
 			this.refresh();
 			this.tui.requestRender();
 		});
+	}
+
+	/** Cycle the selection among RUNNING tasks (wraps). In detail view, jumps the
+	 *  detail to the next running task — Claude's shift+↓ transcript cycling. */
+	private cycleRunning(direction: 1 | -1): void {
+		const running = this.snapshots.map((s, i) => ({ s, i })).filter(({ s }) => s.status === "running");
+		if (running.length === 0) return;
+		const currentId = this.detailId ?? this.snapshots[this.selected]?.id;
+		const at = running.findIndex(({ s }) => s.id === currentId);
+		const next = running[(at + direction + running.length) % running.length];
+		this.selected = next.i;
+		if (this.detailId) this.openDetail(next.s);
 	}
 
 	dispose(): void {
@@ -72,18 +160,70 @@ class AgentHubComponent implements Component {
 	invalidate(): void {}
 
 	private refresh(): void {
-		this.snapshots = getBackgroundProcessRegistry()
-			.list()
-			.filter((snap) => snap.kind === "subagent" || snap.kind === "delegation")
-			// Cluster chain members under their group, newest groups first.
-			.sort((a, b) => (a.group ?? "").localeCompare(b.group ?? "") || b.startedAt - a.startedAt);
+		const selectedId = this.snapshots[this.selected]?.id;
+		const groups = groupActivity(getBackgroundProcessRegistry().list(), this.filter);
+		this.snapshots = SECTION_ORDER.flatMap((section) => groups[section]);
+		if (selectedId) {
+			const nextIndex = this.snapshots.findIndex((snapshot) => snapshot.id === selectedId);
+			if (nextIndex >= 0) this.selected = nextIndex;
+		}
 		if (this.selected >= this.snapshots.length) {
 			this.selected = Math.max(0, this.snapshots.length - 1);
 		}
+		if (this.detailId && this.followTail) {
+			const entry = getBackgroundProcessRegistry().get(this.detailId);
+			this.detailTop = Math.max(0, (entry?.log.length ?? 0) - DETAIL_LINES);
+		}
+	}
+
+	private cycleFilter(direction: -1 | 1): void {
+		const index = FILTERS.indexOf(this.filter);
+		this.filter = FILTERS[(index + direction + FILTERS.length) % FILTERS.length];
+		this.selected = 0;
+		this.refresh();
+	}
+
+	private openDetail(selected: BackgroundProcessSnapshot): void {
+		this.detailId = selected.id;
+		this.followTail = true;
+		const entry = getBackgroundProcessRegistry().get(selected.id);
+		this.detailTop = Math.max(0, (entry?.log.length ?? 0) - DETAIL_LINES);
+	}
+
+	private scrollDetail(delta: number): void {
+		const entry = this.detailId ? getBackgroundProcessRegistry().get(this.detailId) : undefined;
+		const maxTop = Math.max(0, (entry?.log.length ?? 0) - DETAIL_LINES);
+		this.detailTop = Math.max(0, Math.min(maxTop, this.detailTop + delta));
+		this.followTail = this.detailTop === maxTop;
 	}
 
 	handleInput(data: string): void {
 		const selected = this.snapshots[this.selected];
+
+		if (this.detailId) {
+			const detail = this.snapshots.find((snapshot) => snapshot.id === this.detailId);
+			if (matchesKey(data, "shift+down")) {
+				this.cycleRunning(1);
+			} else if (matchesKey(data, "shift+up")) {
+				this.cycleRunning(-1);
+			} else if (this.keybindings.matches(data, "tui.select.cancel")) {
+				this.detailId = undefined;
+			} else if (data === "q") {
+				this.done(undefined);
+			} else if (this.keybindings.matches(data, "tui.select.up")) {
+				this.scrollDetail(-1);
+			} else if (this.keybindings.matches(data, "tui.select.down")) {
+				this.scrollDetail(1);
+			} else if (this.keybindings.matches(data, "tui.select.pageUp")) {
+				this.scrollDetail(-DETAIL_LINES);
+			} else if (this.keybindings.matches(data, "tui.select.pageDown")) {
+				this.scrollDetail(DETAIL_LINES);
+			} else if (data === "x") {
+				if (detail?.canKill && detail.status === "running") getBackgroundProcessRegistry().kill(detail.id);
+			}
+			this.tui.requestRender();
+			return;
+		}
 
 		if (this.steering) {
 			if (matchesKey(data, "escape")) {
@@ -92,10 +232,9 @@ class AgentHubComponent implements Component {
 			} else if (matchesKey(data, "return")) {
 				if (selected && this.steerText.trim()) {
 					const text = this.steerText.trim();
-					if (selected.status === "running") {
+					if (selected.status === "running" || isLoop(selected)) {
 						getBackgroundProcessRegistry().steer(selected.id, text);
 					} else {
-						// idle/parked: lifecycle delivery (wakes or revives the agent)
 						void deliverToAgent(selected.id, text, { from: "user" });
 					}
 				}
@@ -112,21 +251,38 @@ class AgentHubComponent implements Component {
 			return;
 		}
 
-		if (matchesKey(data, "escape") || data === "q") {
+		if (this.keybindings.matches(data, "tui.select.cancel") || data === "q") {
 			this.done(undefined);
 			return;
 		}
-		if (matchesKey(data, "up")) {
+		if (matchesKey(data, "shift+down")) {
+			this.cycleRunning(1);
+		} else if (matchesKey(data, "shift+up")) {
+			this.cycleRunning(-1);
+		} else if (this.keybindings.matches(data, "tui.select.up")) {
 			this.selected = Math.max(0, this.selected - 1);
-		} else if (matchesKey(data, "down")) {
+		} else if (this.keybindings.matches(data, "tui.select.down")) {
 			this.selected = Math.min(Math.max(0, this.snapshots.length - 1), this.selected + 1);
+		} else if (this.keybindings.matches(data, "tui.editor.cursorLeft")) {
+			this.cycleFilter(-1);
+		} else if (
+			this.keybindings.matches(data, "tui.editor.cursorRight") ||
+			this.keybindings.matches(data, "tui.input.tab")
+		) {
+			this.cycleFilter(1);
+		} else if (this.keybindings.matches(data, "tui.select.confirm") && selected) {
+			this.openDetail(selected);
 		} else if (data === "x" && selected?.canKill && selected.status === "running") {
 			getBackgroundProcessRegistry().kill(selected.id);
+		} else if (data === "x" && selected && selected.status !== "running" && selected.status !== "idle") {
+			getBackgroundProcessRegistry().unregister(selected.id);
 		} else if (data === "r" && selected?.status === "parked") {
-			void reviveAgent(selected.id);
+			if (isLoop(selected)) getBackgroundProcessRegistry().steer(selected.id, "more 1");
+			else void reviveAgent(selected.id);
 		} else if (
 			data === "s" &&
 			selected &&
+			isAgent(selected) &&
 			(selected.status === "running" || selected.status === "idle" || selected.status === "parked")
 		) {
 			this.steering = true;
@@ -135,45 +291,96 @@ class AgentHubComponent implements Component {
 		this.tui.requestRender();
 	}
 
+	private renderDetail(width: number): string[] {
+		const theme = this.theme;
+		const pad = (text: string) => truncateToWidth(text, width);
+		const snapshot = this.snapshots.find((item) => item.id === this.detailId);
+		const entry = this.detailId ? getBackgroundProcessRegistry().get(this.detailId) : undefined;
+		if (!snapshot || !entry) {
+			return [theme.fg("muted", "  Activity is no longer available."), "", theme.fg("dim", "  Esc back · q close")];
+		}
+
+		const lines: string[] = [];
+		const glyph = STATUS_GLYPH[snapshot.status] ?? "·";
+		const kind = activityKind(snapshot);
+		lines.push(pad(`${theme.fg(glyphColor(snapshot.status), glyph)} ${theme.fg("accent", theme.bold(kind))}`));
+		lines.push(pad(theme.fg("dim", `  ${snapshot.status} · ${formatTaskAge(snapshot)} · ${snapshot.id}`)));
+		lines.push(pad(theme.fg("text", `  ${snapshot.label}`)));
+		if (snapshot.summary && snapshot.summary !== snapshot.label) {
+			lines.push(pad(theme.fg("muted", `  ${snapshot.summary}`)));
+		}
+		const metrics = snapshot.metrics;
+		if (metrics) {
+			const parts = [
+				metrics.tokens ? `${formatTokens(metrics.tokens)} tok` : undefined,
+				metrics.costUsd ? `$${metrics.costUsd.toFixed(4)}` : undefined,
+				metrics.requests ? `${metrics.requests} req` : undefined,
+				metrics.contextPct ? `${metrics.contextPct.toFixed(0)}% ctx` : undefined,
+			].filter((part): part is string => part !== undefined);
+			if (parts.length > 0) lines.push(pad(theme.fg("dim", `  ${parts.join(" · ")}`)));
+		}
+		lines.push("");
+		const visible = entry.log.slice(this.detailTop, this.detailTop + DETAIL_LINES);
+		if (visible.length === 0) {
+			lines.push(pad(theme.fg("muted", "  (no activity yet)")));
+		} else {
+			for (const raw of visible) lines.push(pad(theme.fg("toolOutput", `  ${sanitizeLogLine(raw)}`)));
+		}
+		lines.push("");
+		const position =
+			entry.log.length > DETAIL_LINES
+				? ` · lines ${this.detailTop + 1}-${this.detailTop + visible.length}/${entry.log.length}`
+				: "";
+		lines.push(
+			pad(
+				theme.fg(
+					"dim",
+					`  ↑/↓ scroll · PgUp/PgDn · Esc back${snapshot.status === "running" && snapshot.canKill ? " · x kill" : ""} · q close${position}`,
+				),
+			),
+		);
+		return lines;
+	}
+
 	render(width: number): string[] {
+		if (this.detailId) return this.renderDetail(width);
 		const theme = this.theme;
 		const lines: string[] = [];
 		const pad = (s: string) => truncateToWidth(s, width);
-		lines.push(pad(theme.fg("accent", theme.bold(" Agent Hub "))));
+		lines.push(pad(theme.fg("accent", theme.bold(" Activity "))));
 		lines.push(heatLine(Math.min(width, 60)));
-
+		lines.push(
+			pad(
+				"  " +
+					FILTERS.map((filter) =>
+						filter === this.filter
+							? theme.bg("selectedBg", theme.fg("accent", ` ${filter} `))
+							: theme.fg("dim", ` ${filter} `),
+					).join(" "),
+			),
+		);
 		if (this.snapshots.length === 0) {
-			lines.push(pad(theme.fg("muted", "  No subagents this session. Spawn one with the agent tool.")));
+			lines.push(pad(theme.fg("muted", `  No ${this.filter === "all" ? "activity" : this.filter} this session.`)));
 		}
-		let lastGroup: string | undefined;
-		for (let i = 0; i < this.snapshots.length; i++) {
-			const snap = this.snapshots[i];
-			if (snap.group && snap.group !== lastGroup) {
-				lines.push(pad(theme.fg("muted", `  ⛓ chain ${theme.bold(snap.group)}`)));
-			}
-			lastGroup = snap.group;
-			const indent = snap.group ? "  " : "";
-			const cursor = (i === this.selected ? theme.fg("accent", "› ") : "  ") + indent;
-			const glyph = STATUS_GLYPH[snap.status] ?? "·";
-			const glyphColor =
-				snap.status === "running"
-					? "accent"
-					: snap.status === "failed"
-						? "error"
-						: snap.status === "cancelled"
-							? "warning"
-							: "dim";
-			const name = theme.fg("accent", theme.bold(snap.agentType ?? "agent"));
-			const metricsParts: string[] = [formatTaskAge(snap)];
-			if (snap.metrics?.tokens) metricsParts.push(`${formatTokens(snap.metrics.tokens)} tok`);
-			if (snap.metrics?.costUsd) metricsParts.push(`$${snap.metrics.costUsd.toFixed(4)}`);
-			const metrics = theme.fg("dim", metricsParts.join(" · "));
-			const label = theme.fg("muted", snap.label);
-			lines.push(pad(`${cursor}${theme.fg(glyphColor, glyph)} ${name} ${metrics} ${label}`));
-			// Live activity preview (latest log line) under the selected agent.
-			if (i === this.selected && snap.status === "running" && snap.logTail.length > 0) {
-				const activity = snap.logTail[snap.logTail.length - 1];
-				lines.push(pad(theme.fg("dim", `${indent}    ${activity}`)));
+		const groups = groupActivity(this.snapshots, "all");
+		let rowIndex = 0;
+		for (const section of SECTION_ORDER) {
+			const entries = groups[section];
+			lines.push(pad(theme.fg("muted", `  ${theme.bold(SECTION_LABELS[section])} · ${entries.length}`)));
+			if (entries.length === 0) lines.push(pad(theme.fg("dim", "    (none)")));
+			for (const snapshot of entries) {
+				const cursor = rowIndex === this.selected ? theme.fg("accent", "  ›") : "   ";
+				const glyph = STATUS_GLYPH[snapshot.status] ?? "·";
+				const kind = activityKind(snapshot);
+				const age = theme.fg("dim", formatTaskAge(snapshot));
+				const status = theme.fg(glyphColor(snapshot.status), snapshot.status);
+				const group = snapshot.group ? theme.fg("dim", ` · ${snapshot.group}`) : "";
+				lines.push(
+					pad(
+						`${cursor} ${theme.fg(glyphColor(snapshot.status), glyph)} ${theme.fg("accent", theme.bold(kind))} ${status} · ${age}${group} · ${theme.fg("text", headline(snapshot))}`,
+					),
+				);
+				rowIndex++;
 			}
 		}
 
@@ -189,29 +396,41 @@ class AgentHubComponent implements Component {
 			);
 			lines.push(pad(theme.fg("dim", "  Enter to send · Esc to cancel")));
 		} else {
-			lines.push(pad(theme.fg("dim", "  ↑/↓ select · x kill · s steer/message · r revive · q/Esc close")));
+			lines.push(
+				pad(
+					theme.fg(
+						"dim",
+						"  ↑/↓ select · ⇧↓ running · ←/→/Tab filter · Enter logs · x kill · s message · r revive · q/Esc close",
+					),
+				),
+			);
 		}
 		return lines;
 	}
 }
 
 export function openHub(ctx: ExtensionContext): Promise<undefined> {
-	return ctx.ui.custom<undefined>((tui, theme, _keybindings, done) => new AgentHubComponent(tui, theme, done), {
-		overlay: true,
-		overlayOptions: { anchor: "center", width: "80%", minWidth: 56, maxHeight: "70%", margin: 1 },
-	});
+	return ctx.ui.custom<undefined>(
+		(tui, theme, keybindings, done) => new AgentHubComponent(tui, theme, keybindings, done),
+		{ drawer: { height: "40%" } },
+	);
 }
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("agents", {
-		description: "Open the agent hub (roster, kill, steer)",
+		description: "Open unified subagent and background-process activity",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
 			await openHub(ctx);
 		},
 	});
 	// Ctrl+Alt+A opens the agent roster (quick-key parity with Claude Code).
+	// Note: pi core already routes the plain Down arrow on an empty editor here
+	// when subagents/delegations are active (and to the built-in background-log
+	// panel otherwise), so we deliberately do NOT bind Shift+Down — that would
+	// shadow the core panel. Inside the hub, Shift+↑/↓ cycles between running
+	// tasks and Enter opens the selected task's live logs.
 	pi.registerShortcut(Key.ctrlAlt("a"), {
-		description: "Open the agent hub (roster, kill, steer)",
+		description: "Open unified subagent and background-process activity",
 		handler: async (ctx: ExtensionContext) => {
 			await openHub(ctx);
 		},

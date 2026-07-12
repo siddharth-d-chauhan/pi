@@ -1,4 +1,15 @@
-import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import {
+	Box,
+	type Component,
+	Container,
+	getCapabilities,
+	Image,
+	Spacer,
+	Text,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
@@ -20,6 +31,64 @@ const COLLAPSE_HEAD_LINES = 28;
 function ruleShell(color: Parameters<typeof theme.fg>[0]): (text: string) => string {
 	return (text: string) => theme.fg(color, "▎") + text.slice(1);
 }
+
+const SGR = /^\x1b\[[0-9;]*m/;
+
+/**
+ * Place a status `dot` on a card's header line so it reads as part of the
+ * existing chrome, without growing the line past `width` (the TUI asserts on
+ * overflow). Three chrome shapes are handled:
+ *   • `▎` left rule  → `▎ ○ $ echo …`  (dot after the rail)
+ *   • `╭─ …` box top → `╭─ ○ $ echo … ─╮`  (dot as the first title token;
+ *     dashes are removed from the border run so the `╮` corner survives)
+ *   • neither        → `○ …`  (plain prefix, clamped)
+ */
+function injectStatusDot(line: string, dot: string, width: number): string {
+	const rail = line.indexOf("▎");
+	if (rail >= 0) {
+		let end = rail + "▎".length;
+		const reset = line.slice(end).match(SGR);
+		if (reset) end += reset[0].length;
+		return truncateToWidth(`${line.slice(0, end)} ${dot}${line.slice(end)}`, width);
+	}
+	const corner = line.search(/[╭├╰]/);
+	if (corner >= 0) {
+		// advance past the corner and its "─ " lead-in (tolerating SGR codes)
+		let end = corner + 1;
+		while (end < line.length) {
+			const sgr = line.slice(end).match(SGR);
+			if (sgr) {
+				end += sgr[0].length;
+				continue;
+			}
+			if (line[end] === "─" || line[end] === " ") {
+				end++;
+				continue;
+			}
+			break;
+		}
+		let out = `${line.slice(0, end)}${dot}${line.slice(end)}`;
+		// reclaim the added cells from the border run so width — and the closing
+		// corner — are preserved.
+		while (visibleWidth(out) > width) {
+			const i = out.lastIndexOf("─");
+			if (i < 0) break;
+			out = out.slice(0, i) + out.slice(i + 1);
+		}
+		return out;
+	}
+	return truncateToWidth(dot + line, width);
+}
+
+const SGR_G = /\x1b\[[0-9;]*m/g;
+const CHROME = /[\s▎│╭╮╰╯├┤┬┴┼─]/g;
+
+/** True when a line carries real text — not just rail/box glyphs and spaces.
+ *  Used to skip a box's blank padding/border rows when placing the status dot. */
+function hasHeaderText(line: string): boolean {
+	return line.replace(SGR_G, "").replace(CHROME, "").length > 0;
+}
+
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
@@ -261,7 +330,7 @@ export class ToolExecutionComponent extends Container {
 			const lines: string[] = [];
 			if (contentLines.length > 0) {
 				lines.push("");
-				lines.push(...contentLines);
+				lines.push(...this.withStatusDot(contentLines, width));
 			}
 			for (let i = 0; i < this.imageComponents.length; i++) {
 				const spacer = this.imageSpacers[i];
@@ -276,7 +345,29 @@ export class ToolExecutionComponent extends Container {
 			return lines;
 		}
 
-		return super.render(width);
+		return this.withStatusDot(super.render(width), width);
+	}
+
+	/**
+	 * Chips-language status marker: a rim-coloured ○ after the rail on the first
+	 * content line — amber while running, green on success, red on error, dim
+	 * before start. Unifies tool cards with the loop panel / agents hub / widget.
+	 */
+	private statusDotColor(): Parameters<typeof theme.fg>[0] {
+		if (this.result) return this.result.isError ? "error" : "success";
+		return this.executionStarted ? "warning" : "dim";
+	}
+
+	private withStatusDot(lines: string[], width: number): string[] {
+		// The header is the first line with real text — NOT a pure-chrome line
+		// (a box border/padding row of only rail, frame glyphs and spaces), which
+		// `.trim()` would wrongly accept because `▎`/`╭` are non-space.
+		const header = lines.findIndex((line) => hasHeaderText(line));
+		if (header < 0) return lines;
+		const dot = `${theme.fg(this.statusDotColor(), "○")} `;
+		const copy = lines.slice();
+		copy[header] = injectStatusDot(copy[header], dot, width);
+		return copy;
 	}
 
 	private updateDisplay(): void {

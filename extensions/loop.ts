@@ -395,6 +395,44 @@ function criteriaStatus(loop: OrchestratedLoop): { total: number; passed: number
 	return { total: items.length, passed: items.length - remaining.length, remaining };
 }
 
+/** Run each criterion's `verify` command in the project root and set `passes`
+ *  OBJECTIVELY from the exit code (0 = pass) — "verifiable automated checks, not
+ *  agent self-assessment" (the SOTA loop-termination rule). This is the primary
+ *  convergence signal, so the loop no longer depends on the model emitting a
+ *  clean text verdict or honestly flipping passes. Criteria with no verify
+ *  command keep their existing value. Persists the updated criteria.json. */
+export function runCriteriaChecks(
+	loop: OrchestratedLoop,
+): { total: number; passed: number; allPass: boolean; failing: string[] } | undefined {
+	const items = readCriteria(loop.dir);
+	if (!items) return undefined;
+	const cwd = loop.dir.split("/.pi/loops/")[0] || process.cwd();
+	let changed = false;
+	for (const c of items) {
+		if (!c.verify) continue; // no command → leave the model-set value
+		let ok = false;
+		try {
+			execFileSync("bash", ["-c", c.verify], { cwd, timeout: 60_000, stdio: "ignore" });
+			ok = true; // exit 0 = pass
+		} catch {
+			ok = false; // non-zero / timeout = fail
+		}
+		if (c.passes !== ok) {
+			c.passes = ok;
+			changed = true;
+		}
+	}
+	if (changed) {
+		try {
+			writeFileSync(criteriaPath(loop), `${JSON.stringify(items, null, 2)}\n`);
+		} catch {
+			// best-effort persistence
+		}
+	}
+	const failing = items.filter((c) => c.passes !== true).map((c) => c.id);
+	return { total: items.length, passed: items.length - failing.length, allPass: failing.length === 0, failing };
+}
+
 // ---- Offline optimizer state (shared across all loops in a repo) -----------
 function optimizerDir(cwd: string): string {
 	return `${cwd}/.pi/loops/_optimizer`;
@@ -1362,7 +1400,30 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 		return;
 	}
 
-	if (verdict === "done") {
+	// PRIMARY convergence signal — run the criteria's OWN verify commands and set
+	// passes objectively (SOTA rule: verifiable checks, not agent self-assessment).
+	// This lets the loop converge without depending on the model emitting a clean
+	// text verdict (the fragile signal that stalled real runs). Without criteria,
+	// fall back to the model's verdict.
+	const checked = runCriteriaChecks(loop);
+	if (checked) {
+		registry.appendLog(
+			loop.id,
+			`criteria checked: ${checked.passed}/${checked.total} pass${checked.failing.length ? ` (failing ${checked.failing.join(",")})` : ""}`,
+		);
+	}
+	const objectivelyDone = checked ? checked.allPass : verdict === "done";
+	// A model "done" claim the checks contradict is rejected with the failing ids.
+	if (verdict === "done" && checked && !checked.allPass) {
+		loop.rejections += 1;
+		addGuardrail(loop, `claimed done but verify commands still fail: ${checked.failing.join(", ")}`);
+		recordFailure(loop, "criteria", checked.failing.join(", "));
+		loop.notes.push(
+			`Your "done" claim is rejected: I ran the criteria verify commands myself and these still FAIL: ${checked.failing.join(", ")}. Make them pass.`,
+		);
+	}
+
+	if (objectivelyDone) {
 		// Verified-done, stage 0 (free): the criteria data must agree. A prose
 		// claim cannot outrank criteria.json — remaining criteria reject it
 		// before any review tokens are spent.

@@ -26,6 +26,7 @@ import {
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { copper, rtrimAnsi } from "./lib/card.ts";
+import * as ui from "./lib/chips.ts";
 import { icon, onIconModeChange } from "./lib/icons.ts";
 
 const WIDGET_KEY = "orchestra";
@@ -41,19 +42,10 @@ function isAgent(snap: BackgroundProcessSnapshot): boolean {
 	return snap.kind === "subagent" || snap.kind === "delegation";
 }
 
-function statusGlyph(status: BackgroundProcessSnapshot["status"], theme: ThemeLike): string {
-	switch (status) {
-		case "running":
-			return theme.fg("accent", icon("running"));
-		case "completed":
-			return theme.fg("success", icon("ok"));
-		case "failed":
-			return theme.fg("error", icon("fail"));
-		case "cancelled":
-			return theme.fg("warning", icon("cancelled"));
-		default: // idle | parked
-			return theme.fg("dim", icon("idle"));
-	}
+// Rim-colored ○ dot, matching the agents hub and loop panel (chips language) —
+// replaces the old accent-blue ▶ / success ✓ / error ✗ glyph set.
+function statusGlyph(status: BackgroundProcessSnapshot["status"]): string {
+	return ui.dotForStatus(status);
 }
 
 function elapsed(snap: BackgroundProcessSnapshot): string {
@@ -70,7 +62,7 @@ function agentRow(snap: BackgroundProcessSnapshot, theme: ThemeLike): string {
 	const tokens = snap.metrics?.tokens;
 	if (tokens) parts.push(`${tokens < 1000 ? tokens : `${(tokens / 1000).toFixed(1)}k`} tok`);
 	const meta = parts.length > 0 ? theme.fg("dim", ` · ${parts.join(" · ")}`) : "";
-	return `${statusGlyph(snap.status, theme)} ${theme.fg("text", name)}${meta}`;
+	return `${statusGlyph(snap.status)} ${theme.fg("text", name)}${meta}`;
 }
 
 function teamLine(team: TeamDefinition, theme: ThemeLike): string {
@@ -188,11 +180,9 @@ class OrchestraWidget implements Component {
 			const treeLines: string[] = [];
 			for (const [group, members] of grouped) {
 				const flow = members
-					.map((snap) => `${statusGlyph(snap.status, theme)}${theme.fg("text", ` ${snap.agentType ?? ""}`)}`)
+					.map((snap) => `${statusGlyph(snap.status)}${theme.fg("text", ` ${snap.agentType ?? ""}`)}`)
 					.join(theme.fg("dim", " → "));
-				treeLines.push(
-					`${theme.fg("accent", icon("chain"))} ${theme.fg("muted", `chain ${theme.bold(group)}`)}  ${flow}`,
-				);
+				treeLines.push(`${copper(icon("chain"))} ${theme.fg("muted", `chain ${theme.bold(group)}`)}  ${flow}`);
 			}
 			const { roots, children } = buildTree(ungrouped);
 			const pushNode = (snap: BackgroundProcessSnapshot, depth: number, isLast: boolean): void => {

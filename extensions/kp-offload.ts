@@ -18,6 +18,12 @@
  *   select    context_recall({id}) → knowledge.fetch_blob(blob_ref) → exact text
  *   isolate   each session archives into its own KP group partition
  *
+ * AUTO-RECALL ON SHIFT: measurement showed the model itself under/over-triggers
+ * context_recall. So on a WorkFrame direction change (pi_context_shift), the
+ * HARNESS — not the model — matches the new direction against each block's
+ * keywords and injects the relevant block's head verbatim. Deterministic,
+ * deduped, fail-open. Disable with KP_OFFLOAD_AUTORECALL=0.
+ *
  * The ref→id map is kept IN the extension so the model only needs a short id
  * ("A1"), or can call context_recall with no args to list what's archived.
  *
@@ -49,11 +55,14 @@ interface ArchiveEntry {
 	blobRef: string;
 	descriptor: string;
 	chars: number;
+	keywords: Set<string>; // salient terms, for auto-recall relevance matching
 }
 
 const MAX_ARCHIVE_CHARS = 200_000; // cap a single ingest; head+tail beyond this
 const HEAD_RATIO = 0.6;
 const TOOL_RESULT_CAP = 4_000; // per tool-result truncation, head+tail
+const AUTO_RECALL_MIN_OVERLAP = 3; // min direction↔block term overlap to auto-inject
+const AUTO_RECALL_INJECT_CHARS = 8_000; // bound the auto-injected head (full block via recall)
 
 const recallSchema = Type.Object({
 	id: Type.Optional(Type.String({ description: 'archived block id (e.g. "A1"); omit to LIST all archived blocks' })),
@@ -169,6 +178,81 @@ export function buildDigest(messages: Message[]): string {
 	return out.join("\n\n");
 }
 
+const STOPWORDS = new Set(
+	(
+		"the and for that with this from have will your you are was were his her they them then than into over " +
+		"about which what when where would could should their there here also been being does done each more most " +
+		"some such only very just like into onto upon while these those able across after again against because " +
+		"before between during through under above below same other another every any all can may might must not"
+	).split(" "),
+);
+
+/** Extract up to `max` salient lowercase terms (content words, by frequency). */
+export function keywordsOf(text: string, max = 40): Set<string> {
+	const freq = new Map<string, number>();
+	for (const w of text.toLowerCase().match(/[a-z][a-z0-9_]{3,}/g) ?? []) {
+		if (STOPWORDS.has(w)) continue;
+		freq.set(w, (freq.get(w) ?? 0) + 1);
+	}
+	return new Set(
+		[...freq.entries()]
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, max)
+			.map(([w]) => w),
+	);
+}
+
+/** Pull display text out of a tool result (content blocks or a raw value). */
+export function extractResultText(result: unknown): string {
+	if (typeof result === "string") return result;
+	const content = (result as { content?: unknown })?.content;
+	if (Array.isArray(content)) {
+		return (content as Array<{ type?: string; text?: string }>)
+			.map((b) => (b.type === "text" ? (b.text ?? "") : ""))
+			.join(" ");
+	}
+	try {
+		return JSON.stringify(result ?? "");
+	} catch {
+		return "";
+	}
+}
+
+/** Overlap count between a direction's words and an archived block's keywords. */
+export function relevance(directionWords: Set<string>, blockKeywords: Set<string>): number {
+	let n = 0;
+	for (const k of blockKeywords) if (directionWords.has(k)) n++;
+	return n;
+}
+
+/** fetch_blob → decoded verbatim text (parses the JSON envelope). */
+async function fetchBlobText(blobRef: string, offset = 0, maxChars = 20_000): Promise<string> {
+	const envelope = await kpCall("knowledge.fetch_blob", {
+		locator: blobRef,
+		offset: Math.max(0, offset),
+		max_chars: maxChars,
+	});
+	try {
+		const parsed = JSON.parse(envelope) as {
+			text?: string;
+			truncated?: boolean;
+			offset?: number;
+			returned_chars?: number;
+		};
+		if (typeof parsed.text === "string") {
+			let text = parsed.text;
+			if (parsed.truncated) {
+				const next = (parsed.offset ?? 0) + (parsed.returned_chars ?? text.length);
+				text += `\n…[truncated — recall {"offset":${next}} for more]`;
+			}
+			return text;
+		}
+	} catch {
+		// non-JSON (shouldn't happen) — fall through to raw
+	}
+	return envelope;
+}
+
 /** A one-line typed table-of-contents for the archived region. */
 export function describe(messages: Message[]): string {
 	const { staleReads, census } = analyzeForEviction(messages as never);
@@ -217,7 +301,7 @@ export default function (pi: ExtensionAPI): void {
 
 			const id = `A${++counter}`;
 			const descriptor = describe(messages);
-			archive.set(id, { id, blobRef, descriptor, chars: transcript.length });
+			archive.set(id, { id, blobRef, descriptor, chars: transcript.length, keywords: keywordsOf(transcript) });
 
 			// COMPRESS (tier 1): return a DETERMINISTIC compaction — the digest +
 			// pointer, with NO LLM summarization pass (pi uses result.compaction
@@ -266,31 +350,7 @@ export default function (pi: ExtensionAPI): void {
 				};
 			}
 			try {
-				// fetch_blob returns a JSON envelope {text, truncated, byte_size, …};
-				// hand the model the decoded verbatim text, plus a paging hint.
-				const envelope = await kpCall("knowledge.fetch_blob", {
-					locator: entry.blobRef,
-					offset: Math.max(0, input.offset ?? 0),
-					max_chars: 20_000,
-				});
-				let text = envelope;
-				try {
-					const parsed = JSON.parse(envelope) as {
-						text?: string;
-						truncated?: boolean;
-						offset?: number;
-						returned_chars?: number;
-					};
-					if (typeof parsed.text === "string") {
-						text = parsed.text;
-						if (parsed.truncated) {
-							const next = (parsed.offset ?? 0) + (parsed.returned_chars ?? text.length);
-							text += `\n…[truncated — recall {"id":"${entry.id}","offset":${next}} for more]`;
-						}
-					}
-				} catch {
-					// non-JSON (shouldn't happen) — return as-is
-				}
+				const text = await fetchBlobText(entry.blobRef, input.offset ?? 0);
 				return { content: [{ type: "text" as const, text }], details: undefined };
 			} catch (err) {
 				return {
@@ -303,14 +363,68 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
+	// AUTO-RECALL ON SHIFT: the measured weakness is that the model itself
+	// under/over-triggers context_recall. So on a WorkFrame direction change
+	// (pi_context_shift — the broker's phase signal), the HARNESS decides: match
+	// the new direction against each archived block's keywords and, if one is
+	// clearly relevant and not already surfaced, inject its head verbatim so the
+	// model just HAS it — no retrieval gamble. Deterministic, deduped, fail-open.
+	// Disable with KP_OFFLOAD_AUTORECALL=0.
+	const autoRecall = process.env.KP_OFFLOAD_AUTORECALL !== "0";
+	const injected = new Set<string>();
+	pi.on("tool_execution_end", async (event) => {
+		if (!autoRecall) return;
+		const e = event as { toolName?: string; result?: unknown };
+		if (e.toolName !== "pi_context_shift" || archive.size === 0) return;
+		try {
+			const direction = extractResultText(e.result).toLowerCase();
+			const words = new Set(direction.match(/[a-z][a-z0-9_]{3,}/g) ?? []);
+			if (words.size === 0) return;
+			let best: ArchiveEntry | undefined;
+			let bestScore = 0;
+			for (const entry of archive.values()) {
+				if (injected.has(entry.id)) continue;
+				const score = relevance(words, entry.keywords);
+				if (score > bestScore) {
+					bestScore = score;
+					best = entry;
+				}
+			}
+			if (!best || bestScore < AUTO_RECALL_MIN_OVERLAP) return; // no clear match → inject nothing
+			const head = await fetchBlobText(best.blobRef, 0, AUTO_RECALL_INJECT_CHARS);
+			injected.add(best.id);
+			await pi.sendMessage(
+				{
+					customType: "kp-auto-recall",
+					content:
+						`[auto-recalled archive ${best.id} — relevant to the new direction (${bestScore} term match). ` +
+						`Full block via context_recall({"id":"${best.id}"}).]\n${head}`,
+					display: true,
+					details: { id: best.id, score: bestScore },
+				},
+				{ triggerTurn: false },
+			);
+		} catch {
+			// fail-open: auto-recall is a best-effort assist, never blocks the turn
+		}
+	});
+
 	pi.registerCommand("kpoffload", {
 		description: "KP offload+retrieve compaction status (archived blocks this session)",
 		handler: async (_args, ctx) => {
 			const lines =
 				archive.size === 0
 					? "no blocks archived yet"
-					: [...archive.values()].map((a) => `${a.id} · ${a.descriptor} · ${a.chars} chars`).join("\n");
-			ctx.ui.notify(`KP offload: ENABLED · group ${group}\n${lines}`, "info");
+					: [...archive.values()]
+							.map(
+								(a) =>
+									`${a.id} · ${a.descriptor} · ${a.chars} chars${injected.has(a.id) ? " · auto-recalled" : ""}`,
+							)
+							.join("\n");
+			ctx.ui.notify(
+				`KP offload: ENABLED · group ${group} · auto-recall ${autoRecall ? "on" : "off"}\n${lines}`,
+				"info",
+			);
 		},
 	});
 }

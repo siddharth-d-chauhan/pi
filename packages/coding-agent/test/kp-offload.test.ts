@@ -1,5 +1,13 @@
 import { describe as ddescribe, expect, it } from "vitest";
-import { buildDigest, clip, serialize, describe as toc } from "../../../extensions/kp-offload.ts";
+import {
+	buildDigest,
+	clip,
+	extractResultText,
+	keywordsOf,
+	relevance,
+	serialize,
+	describe as toc,
+} from "../../../extensions/kp-offload.ts";
 
 ddescribe("kp-offload serialization", () => {
 	it("clip keeps short strings verbatim and head+tails long ones", () => {
@@ -80,5 +88,28 @@ ddescribe("kp-offload serialization", () => {
 		expect(d).toContain("reads");
 		// the digest must be far smaller than the full serialized transcript
 		expect(d.length).toBeLessThan(serialize(msgs).length + 200);
+	});
+
+	it("keywordsOf keeps salient content words and drops stopwords", () => {
+		const kw = keywordsOf("The auth guard must validate service tokens and reject expired tokens with a 401");
+		expect(kw.has("tokens")).toBe(true);
+		expect(kw.has("guard")).toBe(true);
+		expect(kw.has("validate")).toBe(true);
+		expect(kw.has("with")).toBe(false); // stopword
+		expect(kw.has("the")).toBe(false); // stopword
+	});
+
+	it("relevance scores direction↔block term overlap", () => {
+		const block = keywordsOf("refactor the auth guard to allow service tokens without breaking sessions");
+		const near = new Set("now fix the auth guard token validation".match(/[a-z][a-z0-9_]{3,}/g) ?? []);
+		const far = new Set("unrelated database migration for billing".match(/[a-z][a-z0-9_]{3,}/g) ?? []);
+		expect(relevance(near, block)).toBeGreaterThanOrEqual(2); // guard, auth (token vs tokens differ)
+		expect(relevance(far, block)).toBe(0);
+	});
+
+	it("extractResultText handles content blocks, strings, and objects", () => {
+		expect(extractResultText("hello")).toBe("hello");
+		expect(extractResultText({ content: [{ type: "text", text: "shift to auth" }] })).toBe("shift to auth");
+		expect(extractResultText({ new_request: "x" })).toContain("new_request");
 	});
 });

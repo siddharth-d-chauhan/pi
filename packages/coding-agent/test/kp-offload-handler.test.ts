@@ -11,9 +11,11 @@ interface MockPi {
 	handlers: Map<string, Handler>;
 	tools: Map<string, ToolDef>;
 	commands: Map<string, unknown>;
+	sent: Array<{ customType?: string; content?: string }>;
 	on(event: string, handler: Handler): void;
 	registerTool(def: ToolDef): void;
 	registerCommand(name: string, def: unknown): void;
+	sendMessage(msg: { customType?: string; content?: string }, opts?: unknown): Promise<void>;
 }
 
 function mockPi(): MockPi {
@@ -21,6 +23,7 @@ function mockPi(): MockPi {
 		handlers: new Map(),
 		tools: new Map(),
 		commands: new Map(),
+		sent: [],
 		on(event, handler) {
 			p.handlers.set(event, handler);
 		},
@@ -29,6 +32,9 @@ function mockPi(): MockPi {
 		},
 		registerCommand(name, def) {
 			p.commands.set(name, def);
+		},
+		async sendMessage(msg) {
+			p.sent.push(msg);
 		},
 	};
 	return p;
@@ -158,5 +164,89 @@ describe("kp-offload compaction wiring", () => {
 		const handler = pi.handlers.get("session_before_compact")!;
 		const result = await handler({ preparation: { messagesToSummarize: [] } }, { compact: () => {} });
 		expect(result).toBeUndefined(); // let pi compact normally
+	});
+
+	it("auto-recalls the relevant block on a pi_context_shift (no model call)", async () => {
+		mockKp();
+		const pi = mockPi();
+		kpOffload(pi as never);
+
+		// 1) create an archived block about the auth guard / service tokens
+		const compact = pi.handlers.get("session_before_compact")!;
+		await compact(
+			{
+				preparation: {
+					firstKeptEntryId: "e1",
+					tokensBefore: 500,
+					messagesToSummarize: [
+						{
+							role: "user",
+							content: "refactor the auth guard to allow service tokens without breaking sessions",
+						},
+						{
+							role: "assistant",
+							content: "done — service tokens now bypass the user check but keep the scope gate",
+						},
+					],
+				},
+			},
+			{},
+		);
+
+		// 2) a direction shift whose text overlaps that block's keywords
+		const shift = pi.handlers.get("tool_execution_end")!;
+		await shift(
+			{
+				toolName: "pi_context_shift",
+				result: { content: [{ type: "text", text: "now revisit the auth guard service tokens scope handling" }] },
+			},
+			{},
+		);
+		await flush();
+
+		// harness injected the block's content — deterministically, no context_recall call
+		expect(pi.sent).toHaveLength(1);
+		expect(pi.sent[0].customType).toBe("kp-auto-recall");
+		expect(pi.sent[0].content).toContain("service tokens now bypass the user check");
+
+		// 3) an UNRELATED shift injects nothing, and the same block isn't re-injected
+		await shift(
+			{
+				toolName: "pi_context_shift",
+				result: { content: [{ type: "text", text: "unrelated billing database migration" }] },
+			},
+			{},
+		);
+		await flush();
+		expect(pi.sent).toHaveLength(1); // still just the one
+	});
+
+	it("does not auto-recall when KP_OFFLOAD_AUTORECALL=0", async () => {
+		process.env.KP_OFFLOAD_AUTORECALL = "0";
+		mockKp();
+		const pi = mockPi();
+		kpOffload(pi as never);
+		const compact = pi.handlers.get("session_before_compact")!;
+		await compact(
+			{
+				preparation: {
+					firstKeptEntryId: "e1",
+					tokensBefore: 500,
+					messagesToSummarize: [{ role: "user", content: "auth guard service tokens scope" }],
+				},
+			},
+			{},
+		);
+		const shift = pi.handlers.get("tool_execution_end")!;
+		await shift(
+			{
+				toolName: "pi_context_shift",
+				result: { content: [{ type: "text", text: "auth guard service tokens scope" }] },
+			},
+			{},
+		);
+		await flush();
+		expect(pi.sent).toHaveLength(0);
+		delete process.env.KP_OFFLOAD_AUTORECALL;
 	});
 });

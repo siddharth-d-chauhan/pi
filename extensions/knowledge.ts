@@ -54,6 +54,30 @@ function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
  *  tool calls must not be able to alter memory state or trigger reconciliation. */
 const CORE = new Set(["knowledge_search", "pi_context_task", "pi_context_shift", "pi_semantic_expand"]);
 
+/** Code + flow query surface — promoted from the proxy to direct mounts so the
+ *  model can (and, via the guideline below, is TOLD to) query codebase structure
+ *  while coding instead of grepping blind. find_code / code_search / resolve_symbol
+ *  answer "what exists / where"; trace / neighbors answer "how it flows / what
+ *  connects"; pi_context_code is the broker's code packet. */
+const CODE = new Set([
+	"knowledge_find_code",
+	"knowledge_code_search",
+	"knowledge_resolve_symbol",
+	"knowledge_trace",
+	"knowledge_neighbors",
+	"pi_context_code",
+]);
+
+/** The prompt fix: a single Guidelines directive (attached to the anchor code
+ *  tool) that makes the model reach for these while coding. */
+const CODE_GUIDELINE = [
+	"Before writing or editing code, QUERY the codebase graph instead of guessing or grepping blind: " +
+		"use kp find_code / code_search to locate existing implementations and utilities to REUSE, " +
+		"kp resolve_symbol for a symbol's real definition and its callers, and kp trace / neighbors to " +
+		"follow call and data FLOW and see what connects. Prefer reusing existing code over reinventing it, " +
+		"and check the flow before changing shared code.",
+];
+
 /** pi-normalized names of the mountable KP surface (server uses dots). */
 const READ_ONLY = new Set([
 	...CORE,
@@ -193,7 +217,7 @@ export default function (pi: ExtensionAPI) {
 		for (const tool of tools) {
 			const piName = tool.name.replace(/\./g, "_");
 			if (!READ_ONLY.has(piName)) continue; // only the vetted read surface mounts
-			if (!CORE.has(piName)) {
+			if (!CORE.has(piName) && !CODE.has(piName)) {
 				proxied.push({
 					piName,
 					server: tool.name,
@@ -206,12 +230,19 @@ export default function (pi: ExtensionAPI) {
 			// server docstrings run long and ship in every request.
 			const fullDesc = (tool.description ?? piName).trim();
 			const firstSentence = fullDesc.split(/(?<=\.)\s/, 1)[0] ?? fullDesc;
+			const isCode = CODE.has(piName);
 			pi.registerTool({
 				name: piName,
 				label: piName.startsWith("pi_context")
 					? piName.replace(/^pi_/, "ctx ")
 					: piName.replace(/^knowledge_/, "kp "),
 				description: firstSentence.length > 220 ? `${firstSentence.slice(0, 219)}…` : firstSentence,
+				// Surface code/flow query in the model's tool list + tell it WHEN to
+				// use them (the guideline rides once, on the anchor tool).
+				promptSnippet: isCode
+					? `${piName.replace(/^knowledge_/, "kp ").replace(/^pi_/, "ctx ")} — query code/flow before editing`
+					: undefined,
+				promptGuidelines: piName === "knowledge_find_code" ? CODE_GUIDELINE : undefined,
 				parameters: tool.inputSchema as never,
 				async execute(_id: string, params: Record<string, unknown>, signal: AbortSignal) {
 					const c = await connect();

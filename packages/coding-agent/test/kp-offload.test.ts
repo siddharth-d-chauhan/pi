@@ -1,5 +1,5 @@
 import { describe as ddescribe, expect, it } from "vitest";
-import { clip, serialize, describe as toc } from "../../../extensions/kp-offload.ts";
+import { buildDigest, clip, serialize, describe as toc } from "../../../extensions/kp-offload.ts";
 
 ddescribe("kp-offload serialization", () => {
 	it("clip keeps short strings verbatim and head+tails long ones", () => {
@@ -53,5 +53,32 @@ ddescribe("kp-offload serialization", () => {
 
 	it("serialize skips empty messages", () => {
 		expect(serialize([{ role: "assistant", content: [] }])).toBe("");
+	});
+
+	it("buildDigest extracts user intent, assistant conclusions, and errors VERBATIM", () => {
+		const msgs = [
+			{ role: "user", content: "add exponentiation to the calculator" },
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "let me look" },
+					{ type: "toolCall", toolName: "read", input: { path: "calc.ts" } },
+					{ type: "text", text: "added ** operator, right-associative" },
+				],
+			},
+			{ role: "tool", content: [{ type: "toolResult", text: "npm test\nError: 2**3**2 expected 512 got 64" }] },
+			{ role: "assistant", content: [{ type: "toolCall", toolName: "edit", input: { path: "calc.ts" } }] },
+		];
+		const d = buildDigest(msgs);
+		// verbatim intent + conclusion (not paraphrased)
+		expect(d).toContain("user: add exponentiation to the calculator");
+		expect(d).toContain("did: added ** operator, right-associative");
+		// error line lifted verbatim
+		expect(d).toContain("Error: 2**3**2 expected 512 got 64");
+		// typed activity line
+		expect(d).toContain("activity:");
+		expect(d).toContain("reads");
+		// the digest must be far smaller than the full serialized transcript
+		expect(d.length).toBeLessThan(serialize(msgs).length + 200);
 	});
 });

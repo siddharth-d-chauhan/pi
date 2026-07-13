@@ -71,7 +71,7 @@ describe("kp-offload compaction wiring", () => {
 		delete g.__pi_kp__;
 	});
 
-	it("archives verbatim, cancels the blind compaction, and re-compacts with a pointer", async () => {
+	it("archives verbatim and returns a DETERMINISTIC compaction (digest + pointer, no LLM)", async () => {
 		mockKp();
 		const pi = mockPi();
 		kpOffload(pi as never);
@@ -79,33 +79,39 @@ describe("kp-offload compaction wiring", () => {
 		const handler = pi.handlers.get("session_before_compact");
 		expect(handler).toBeDefined();
 
-		const compactCalls: Array<{ customInstructions?: string }> = [];
 		const event = {
 			preparation: {
+				firstKeptEntryId: "entry-42",
+				tokensBefore: 12345,
 				messagesToSummarize: [
-					{ role: "user", content: "fix the auth guard" },
+					{ role: "user", content: "fix the auth guard to allow service tokens" },
 					{
 						role: "assistant",
 						content: [
 							{ type: "text", text: "reading it" },
 							{ type: "toolCall", toolName: "read", input: { path: "guard.ts" } },
+							{ type: "text", text: "done — service tokens now bypass the user check" },
 						],
 					},
 				],
 			},
 		};
-		const ctx = { compact: (opts: { customInstructions?: string }) => compactCalls.push(opts) };
 
-		const result = (await handler!(event, ctx)) as { cancel?: boolean };
-		expect(result?.cancel).toBe(true); // blind compaction cancelled
-		await flush(); // let the deferred re-compact fire
-
-		expect(compactCalls).toHaveLength(1);
-		const instr = compactCalls[0].customInstructions ?? "";
-		expect(instr).toContain("archived VERBATIM");
-		expect(instr).toContain("context_recall");
-		expect(instr).toMatch(/A1/); // the block id
-		expect(instr).toContain("1 reads"); // typed TOC from describe()
+		const result = (await handler!(event, {})) as {
+			compaction?: { summary: string; firstKeptEntryId: string; tokensBefore: number };
+			cancel?: boolean;
+		};
+		// deterministic path: returns a compaction, does NOT cancel/re-trigger
+		expect(result?.cancel).toBeUndefined();
+		expect(result?.compaction).toBeDefined();
+		const comp = result.compaction!;
+		expect(comp.firstKeptEntryId).toBe("entry-42"); // passed through from preparation
+		expect(comp.tokensBefore).toBe(12345);
+		// digest carries VERBATIM high-value spans + the recall pointer
+		expect(comp.summary).toContain("fix the auth guard to allow service tokens"); // user intent, verbatim
+		expect(comp.summary).toContain("service tokens now bypass the user check"); // assistant conclusion
+		expect(comp.summary).toContain("context_recall");
+		expect(comp.summary).toMatch(/A1/);
 	});
 
 	it("context_recall lists blocks, then returns the exact archived text (envelope decoded)", async () => {
@@ -115,8 +121,14 @@ describe("kp-offload compaction wiring", () => {
 		const handler = pi.handlers.get("session_before_compact")!;
 
 		const original = "VERBATIM decision: service tokens bypass the user check\nline-4000 END";
-		const event = { preparation: { messagesToSummarize: [{ role: "assistant", content: original }] } };
-		await handler(event, { compact: () => {} });
+		const event = {
+			preparation: {
+				firstKeptEntryId: "e1",
+				tokensBefore: 100,
+				messagesToSummarize: [{ role: "assistant", content: original }],
+			},
+		};
+		await handler(event, {});
 		await flush();
 
 		const recall = pi.tools.get("context_recall")!;

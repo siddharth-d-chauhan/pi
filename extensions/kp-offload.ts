@@ -1,26 +1,29 @@
 /**
- * kp-offload.ts — lossless offload+retrieve compaction backed by the knowledge
- * platform (write / select / compress / isolate).
+ * kp-offload.ts — two-tier, lossless offload+retrieve compaction backed by the
+ * knowledge platform (write / select / compress / isolate). Best-of-both:
  *
- * pi's built-in compaction (and steered eviction) SUMMARIZE the oldest turns —
- * lossy by construction. This instead ARCHIVES the evicted region VERBATIM to
- * KP and leaves only a pointer in the live window. Nothing is destroyed: the
- * exact bytes live in KP and come back on demand via the `context_recall` tool
- * (`knowledge.fetch_blob` → verbatim UTF-8). Worst case is a retrieval miss, not
- * information loss — and, unlike omp's snapcompact, it needs no vision model.
+ *   TIER 1 (in-window)  a DETERMINISTIC digest of high-value spans copied
+ *     VERBATIM — user intent, each assistant turn's conclusion, error lines,
+ *     a typed activity line. Answers common follow-ups with NO recall call.
+ *   TIER 2 (in KP)      the FULL evicted region, byte-for-byte, one
+ *     context_recall away for any detail the digest doesn't hold.
+ *
+ * Unlike pi's blind LLM summary (lossy) this loses nothing; unlike omp's
+ * snapcompact it needs no vision model. And the compaction event costs ZERO
+ * model tokens: the handler returns `{compaction}` directly (pi uses it
+ * verbatim, skipping the summarizer) — the digest is EXTRACTED, not generated.
  *
  *   write     knowledge.ingest(evicted transcript) → blob_ref   (per-session group)
- *   compress  ctx.compact steers the summary to keep only a pointer + typed TOC
+ *   compress  return {compaction:{summary: digest + pointer}}   (no LLM)
  *   select    context_recall({id}) → knowledge.fetch_blob(blob_ref) → exact text
  *   isolate   each session archives into its own KP group partition
  *
  * The ref→id map is kept IN the extension so the model only needs a short id
- * ("A1"), or can call context_recall with no args to list what's archived —
- * robust even if the summarizer garbles the pointer.
+ * ("A1"), or can call context_recall with no args to list what's archived.
  *
  * Reuses knowledge.ts's shared KP MCP client (globalThis.__pi_kp__); fail-open:
- * if KP is unreachable or anything throws, pi compacts normally (no data risk).
- * Runs only at the compaction boundary — no per-turn cost.
+ * if KP is unreachable or anything throws, pi runs its normal compaction (no
+ * data risk). Runs only at the compaction boundary — no per-turn cost.
  *
  * OFF by default. KP_OFFLOAD=1 to enable.
  */
@@ -119,6 +122,53 @@ export function serialize(messages: Message[]): string {
 	return out.join("\n\n");
 }
 
+const ERROR_RE = /\b(error|failed|failure|exception|traceback|denied|refused|not found|cannot|exit code [1-9])\b/i;
+
+/**
+ * The in-window DIGEST (tier 1): high-value spans copied VERBATIM — user intent,
+ * each assistant turn's conclusion, and error lines — plus a typed activity line.
+ * Extraction, NOT summarization: no LLM call, and the facts it keeps are exact,
+ * so common follow-ups are answered without a recall. Everything else lives in
+ * the KP archive (tier 2), one context_recall away.
+ */
+export function buildDigest(messages: Message[]): string {
+	const points: string[] = [];
+	const errors: string[] = [];
+	for (const msg of messages) {
+		const role = msg.role ?? "";
+		const texts: string[] = [];
+		if (typeof msg.content === "string") {
+			texts.push(msg.content);
+		} else {
+			for (const b of msg.content ?? []) {
+				if (b.type === "text" && typeof b.text === "string") {
+					texts.push(b.text);
+				} else if (b.type === "toolResult" || b.type === "toolResponse") {
+					const body = typeof b.text === "string" ? b.text : "";
+					for (const line of body.split("\n")) {
+						if (ERROR_RE.test(line) && line.trim()) errors.push(clip(line.trim(), 200));
+					}
+				}
+			}
+		}
+		const joined = texts.join(" ").trim();
+		if (!joined) continue;
+		if (role === "user") points.push(`user: ${clip(joined, 400)}`);
+		else if (role === "assistant") points.push(`did: ${clip(texts[texts.length - 1].trim(), 300)}`);
+	}
+	const out: string[] = [];
+	if (points.length) out.push(points.slice(0, 30).join("\n"));
+	if (errors.length)
+		out.push(
+			`errors:\n${[...new Set(errors)]
+				.slice(0, 12)
+				.map((e) => `• ${e}`)
+				.join("\n")}`,
+		);
+	out.push(`activity: ${describe(messages)}`);
+	return out.join("\n\n");
+}
+
 /** A one-line typed table-of-contents for the archived region. */
 export function describe(messages: Message[]): string {
 	const { staleReads, census } = analyzeForEviction(messages as never);
@@ -141,27 +191,22 @@ export default function (pi: ExtensionAPI): void {
 	const group = `pi-archive-${Date.now().toString(36)}`;
 	const archive = new Map<string, ArchiveEntry>();
 	let counter = 0;
-	let steering = false; // let our own re-triggered compaction through
 
-	pi.on("session_before_compact", async (event, ctx) => {
+	pi.on("session_before_compact", async (event) => {
 		const e = event as {
-			preparation?: { messagesToSummarize?: Message[] };
+			preparation?: { messagesToSummarize?: Message[]; firstKeptEntryId?: string; tokensBefore?: number };
 			customInstructions?: string;
-			reason?: string;
 		};
-		if (steering) {
-			steering = false;
-			return;
-		}
 		try {
 			if (e.customInstructions) return; // respect explicit /compact
-			const messages = e.preparation?.messagesToSummarize ?? [];
-			if (!messages.length) return; // nothing to archive
+			const prep = e.preparation;
+			const messages = prep?.messagesToSummarize ?? [];
+			if (!prep?.firstKeptEntryId || !messages.length) return; // nothing to archive
 
 			const transcript = clip(serialize(messages), MAX_ARCHIVE_CHARS);
 			if (!transcript.trim()) return;
 
-			// WRITE: archive verbatim → KP, get a durable blob_ref.
+			// WRITE (tier 2): archive verbatim → KP, get a durable blob_ref.
 			const ingest = await kpCall("knowledge.ingest", {
 				text: transcript,
 				source: "pi-session-archive",
@@ -174,27 +219,23 @@ export default function (pi: ExtensionAPI): void {
 			const descriptor = describe(messages);
 			archive.set(id, { id, blobRef, descriptor, chars: transcript.length });
 
-			// COMPRESS: keep only a pointer in-window; re-run the SAME compaction
-			// with steering that forbids restating the archived content.
-			steering = true;
-			setTimeout(() => {
-				try {
-					ctx.compact({
-						customInstructions:
-							`The oldest turns were archived VERBATIM to external storage — nothing is lost. ` +
-							`Write a brief continuity summary, then add exactly this line:\n` +
-							`↳ archived (${id}: ${descriptor}) — retrieve exact earlier content with the context_recall tool ` +
-							`(no args to list, or {"id":"${id}"} to fetch this block).\n` +
-							`Do NOT reproduce the archived content in your summary; it is recallable on demand.`,
-					});
-				} catch {
-					steering = false;
-				}
-			}, 0);
-			return { cancel: true };
+			// COMPRESS (tier 1): return a DETERMINISTIC compaction — the digest +
+			// pointer, with NO LLM summarization pass (pi uses result.compaction
+			// verbatim). Common questions are answered from the digest; anything
+			// deeper is one context_recall away.
+			const digest = buildDigest(messages);
+			const summary =
+				`${digest}\n\n↳ full earlier detail archived (${id}: ${descriptor}). The digest above covers the ` +
+				`essentials — call context_recall({"id":"${id}"}) ONLY for a detail it does not contain.`;
+			return {
+				compaction: {
+					summary,
+					firstKeptEntryId: prep.firstKeptEntryId,
+					tokensBefore: prep.tokensBefore ?? 0,
+				},
+			};
 		} catch {
-			steering = false;
-			return; // fail-open: let pi compact normally
+			return; // fail-open: let pi run its normal LLM compaction
 		}
 	});
 

@@ -5,6 +5,15 @@ import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import { theme } from "../theme/theme.ts";
 
+// Copper accent (truecolor) — the chips design language's signature hue, shared
+// with the loop panel / agents hub / tool cards so the footer reads as the same
+// system. A mid-tone that stays legible on both light and dark grounds.
+const copper = (text: string): string => `\x1b[38;2;184;115;51m${text}\x1b[39m`;
+
+// A small status pill: dim-tinted background with a copper label. Used for the
+// auto-compaction mode indicator, matching the pills in the drawer surfaces.
+const pill = (label: string): string => theme.bg("selectedBg", copper(` ${label} `));
+
 /**
  * Sanitize text for display in a single-line status.
  * Removes newlines, tabs, carriage returns, and other control characters.
@@ -149,11 +158,10 @@ export class FooterComponent implements Component {
 		// 70/90 %-of-window thresholds (red/yellow) but route through the
 		// statusLine token when context is healthy.
 		let contextPercentStr: string;
-		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
 		const contextPercentDisplay =
 			contextPercent === "?"
-				? `?/${formatTokens(contextWindow)}${autoIndicator}`
-				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+				? `?/${formatTokens(contextWindow)}`
+				: `${contextPercent}%/${formatTokens(contextWindow)}`;
 		if (contextPercentValue > 90) {
 			contextPercentStr = theme.fg("error", contextPercentDisplay);
 		} else if (contextPercentValue > 70) {
@@ -162,6 +170,9 @@ export class FooterComponent implements Component {
 			contextPercentStr = theme.getStatusLineColor("context")(contextPercentDisplay);
 		}
 		statsParts.push(contextPercentStr);
+		// Auto-compaction mode as a chips-language pill (state in form) rather
+		// than a plain "(auto)" suffix.
+		if (this.autoCompactEnabled) statsParts.push(pill("auto"));
 		if (areExperimentalFeaturesEnabled()) {
 			statsParts.push(`${sep("•")} ${theme.bold(theme.fg("warning", "xp"))}`);
 		}
@@ -241,8 +252,12 @@ export class FooterComponent implements Component {
 				.join(" ");
 		}
 
-		const pwdColored = theme.getStatusLineColor("path")(pwd);
-		const pwdWidth = visibleWidth(pwd);
+		// Copper π lead marker — the chips-language signature, tying the footer to
+		// the `π loop` panel header and the AGENTS hub chip.
+		const lead = `${copper("π")} `;
+		const leadWidth = 2;
+		const pwdColored = lead + theme.getStatusLineColor("path")(pwd);
+		const pwdWidth = leadWidth + visibleWidth(pwd);
 		let pwdLine: string;
 		let statusFits = false;
 		if (statusLine && pwdWidth + minPadding + visibleWidth(statusLine) <= width) {

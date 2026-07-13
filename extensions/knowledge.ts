@@ -66,6 +66,9 @@ const CODE = new Set([
 	"knowledge_trace",
 	"knowledge_neighbors",
 	"pi_context_code",
+	// completeness: missing implementation / missing tests for a rule or symbol.
+	"knowledge_gaps",
+	"knowledge_coverage",
 ]);
 
 /** The prompt fix: a single Guidelines directive (attached to the anchor code
@@ -75,7 +78,8 @@ const CODE_GUIDELINE = [
 		"use kp find_code / code_search to locate existing implementations and utilities to REUSE, " +
 		"kp resolve_symbol for a symbol's real definition and its callers, and kp trace / neighbors to " +
 		"follow call and data FLOW and see what connects. Prefer reusing existing code over reinventing it, " +
-		"and check the flow before changing shared code.",
+		"and check the flow before changing shared code. When finishing, use kp gaps / coverage to check for " +
+		"missing implementation or tests.",
 ];
 
 /** pi-normalized names of the mountable KP surface (server uses dots). */

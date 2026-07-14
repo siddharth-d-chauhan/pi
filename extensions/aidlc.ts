@@ -168,11 +168,23 @@ function installReady(): boolean {
 	return existsSync(enginePath());
 }
 
+/** Shell-like tokenizer for /aidlc arguments (double/single quotes group). */
+export function tokenizeArgs(raw: string): string[] {
+	const tokens: string[] = [];
+	const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+	let match = re.exec(raw);
+	while (match) {
+		tokens.push(match[1] ?? match[2] ?? match[3]);
+		match = re.exec(raw);
+	}
+	return tokens;
+}
+
 /** The conductor contract. Covers the ROUTING the engine cannot inject itself
  *  (everything between directives); stage-execution depth arrives via the
  *  engine's own conductor persona on the first run-stage directive, and each
  *  stage file loads only when named — pi does not duplicate that prose. */
-function conductorKickoff(cwd: string, intentArgs: string): string {
+function conductorKickoff(cwd: string, intentArgs: string, firstDirective?: string): string {
 	// PATH carries bun for the engine's own child spawns (report → aidlc-state).
 	const engine = `CLAUDE_PROJECT_DIR="${cwd}" PATH="${join(bunBin(), "..")}:$PATH" ${bunBin()} ${enginePath()}`;
 	return [
@@ -216,7 +228,10 @@ function conductorKickoff(cwd: string, intentArgs: string): string {
 		"Project knowledge: when pi's knowledge tools are available, USE them inside stages — codemap/KP",
 		"(pi_context_code, knowledge_call, knowledge_search, context_recall) for reverse-engineering and",
 		"before code-generation edits, instead of broad file paging; store durable decisions with remember.",
-		`Start now: run NEXT with the argument ${JSON.stringify(intentArgs)}.`,
+		firstDirective
+			? `pi already ran the first NEXT for ${JSON.stringify(intentArgs)}. Its directive:\n${firstDirective}\n` +
+				"Act on this directive now (step 2 of the loop) — do NOT re-run that first NEXT."
+			: `Start now: run NEXT with the argument ${JSON.stringify(intentArgs)}.`,
 		"</aidlc-conductor>",
 	].join("\n");
 }
@@ -288,12 +303,18 @@ export default function aidlc(pi: ExtensionAPI) {
 				return;
 			}
 			// Everything else — an intent, compose "<desc>", --scope/--stage/--phase
-			// jumps, --resume, intent/space verbs — goes to the engine verbatim
-			// through the conductor loop.
+			// jumps, --resume, intent/space verbs — is tokenized and run through
+			// the FIRST next call deterministically here (the launch routing —
+			// compose verb vs --scope vs freeform — must not depend on the model),
+			// and the resulting directive is handed to the conductor to act on.
 			active = true;
 			lastSignature = "";
 			nudges = 0;
-			pi.sendUserMessage(conductorKickoff(ctx.cwd, raw));
+			const first = await runEngine(ctx.cwd, ["next", ...tokenizeArgs(raw)]);
+			const firstDirective = parseDirective(first.out);
+			pi.sendUserMessage(
+				conductorKickoff(ctx.cwd, raw, firstDirective ? JSON.stringify(firstDirective) : undefined),
+			);
 		},
 	});
 

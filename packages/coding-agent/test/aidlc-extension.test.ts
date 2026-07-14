@@ -3,7 +3,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { activeStateFile, directivePending, humanWaitState, parseDirective } from "../../../extensions/aidlc.ts";
+import {
+	activeStateFile,
+	directivePending,
+	humanWaitState,
+	parseDirective,
+	tokenizeArgs,
+} from "../../../extensions/aidlc.ts";
 
 describe("aidlc directive parsing", () => {
 	it("parses the engine's single JSON directive", () => {
@@ -20,6 +26,15 @@ describe("aidlc directive parsing", () => {
 
 	it("returns undefined for garbage", () => {
 		expect(parseDirective("boom\nnot json")).toBeUndefined();
+	});
+
+	it("tokenizes /aidlc arguments shell-like so the compose verb stays a leading token", () => {
+		expect(tokenizeArgs('compose "brownfield feature: skip ideation"')).toEqual([
+			"compose",
+			"brownfield feature: skip ideation",
+		]);
+		expect(tokenizeArgs("--scope bugfix fix the CSV bug")).toEqual(["--scope", "bugfix", "fix", "the", "CSV", "bug"]);
+		expect(tokenizeArgs("")).toEqual([]);
 	});
 
 	it("classifies pending vs human-turn directive kinds", () => {
@@ -88,6 +103,14 @@ describe.skipIf(!engineAvailable)("aidlc engine smoke (real awslabs engine)", ()
 			},
 		});
 	}
+
+	it("routes the compose verb to the composer (never a --scope value)", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "aidlc-compose-"));
+		const tokens = tokenizeArgs('compose "brownfield feature: skip ideation, keep reverse-engineering"');
+		const directive = parseDirective(run(cwd, engine, ["next", ...tokens]));
+		expect(directive?.kind).toBe("print");
+		expect(directive?.message).toContain("composer");
+	});
 
 	it("keeps workflow state in the project and enforces the human-presence gate", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "aidlc-engine-"));

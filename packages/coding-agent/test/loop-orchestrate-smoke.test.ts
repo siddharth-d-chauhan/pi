@@ -15,6 +15,7 @@ test("orchestrated loop v4: criteria data, review diversity, best-of-n, resume, 
 
 	const pi = {
 		registerTool() {},
+		registerShortcut() {},
 		registerMessageRenderer(customType: string, fn: (m: unknown, o: unknown, t: unknown) => unknown) {
 			renderers.set(customType, fn);
 		},
@@ -30,7 +31,11 @@ test("orchestrated loop v4: criteria data, review diversity, best-of-n, resume, 
 	};
 
 	const notifications: string[] = [];
-	const ctx = { cwd, ui: { notify: (t: string, l: string) => notifications.push(`[${l}] ${t}`) } };
+	const ctx = {
+		cwd,
+		sessionManager: { getSessionId: () => "test-session" },
+		ui: { notify: (t: string, l: string) => notifications.push(`[${l}] ${t}`) },
+	};
 	const registry = getBackgroundProcessRegistry();
 	const loopEntry = (goal: string) => registry.list().find((e) => e.label === `↻ orchestrate ${goal}`);
 	const lastSent = () => sent[sent.length - 1];
@@ -43,7 +48,7 @@ test("orchestrated loop v4: criteria data, review diversity, best-of-n, resume, 
 	if (!loopCommand || !settledHandler) throw new Error("extension did not register");
 
 	// ---- launch: criteria phase (round 0) dispatches first, review model recorded
-	await loopCommand("ship-export rounds=6 orchestrate rmodel=pi/smol", ctx);
+	await loopCommand("ship-export rounds=6 rmodel=pi/smol", ctx);
 	expect(notifications[notifications.length - 1]).toContain("review model: pi/smol");
 	const dir = `${cwd}/.pi/loops/ship-export`;
 	const progress = `${dir}/PROGRESS.md`;
@@ -55,30 +60,32 @@ test("orchestrated loop v4: criteria data, review diversity, best-of-n, resume, 
 	expect(lastSent().customType).toBe("loop-criteria");
 	expect(lastSent().content).toContain("unusable");
 
-	// write usable criteria → round 1 dispatched with remaining criteria listed
+	// write usable criteria → round 1 dispatched with the failing criteria listed.
+	// verify commands are REAL: the loop executes them itself and sets passes
+	// objectively, so a criterion "passes" by making its command exit 0.
 	const criteria = [
-		{ id: "c1", desc: "export endpoint returns CSV", verify: "curl /export", passes: false },
-		{ id: "c2", desc: "unit tests pass", verify: "npm test", passes: false },
+		{ id: "c1", desc: "export endpoint returns CSV", verify: "false", passes: false },
+		{ id: "c2", desc: "unit tests pass", verify: "false", passes: false },
 	];
 	writeFileSync(`${dir}/criteria.json`, JSON.stringify(criteria));
 	await settle();
 	expect(lastSent().customType).toBe("loop-round");
-	expect(lastSent().content).toContain("Remaining: c1");
+	expect(lastSent().content).toContain("Still failing: c1");
 	// collaboration is prompt-based: personas + per-worker models, ONE coordinator
 	expect(lastSent().content).toContain("ROLE persona");
 	expect(lastSent().content).toContain("ONLY coordinator");
 	expect(lastSent().content).toContain("chain tool");
 	expect(lastSent().details?.criteria).toEqual({ passed: 0, total: 2 });
 
-	// ---- round 1: done claim with unmet criteria → MECHANICAL rejection, no review spent
+	// ---- round 1: done claim while verify commands fail → MECHANICAL rejection, no review spent
 	appendFileSync(progress, "\nLOOP_VERDICT: done — shipped it\n");
 	await settle();
 	expect(lastSent().customType).toBe("loop-round"); // not loop-review
-	expect(lastSent().content).toContain("rejected WITHOUT review");
-	expect(readFileSync(`${dir}/GUARDRAILS.md`, "utf-8")).toContain("unmet criteria");
+	expect(lastSent().content).toContain("I ran the criteria verify commands myself");
+	expect(readFileSync(`${dir}/GUARDRAILS.md`, "utf-8")).toContain("verify commands still fail");
 
-	// ---- round 2: still one criterion unmet → second rejection
-	criteria[0].passes = true;
+	// ---- round 2: c1's verify now exits 0, c2 still fails → second rejection
+	criteria[0].verify = "true";
 	writeFileSync(`${dir}/criteria.json`, JSON.stringify(criteria));
 	appendFileSync(progress, "\nLOOP_VERDICT: done — c1 verified\n");
 	await settle();
@@ -87,32 +94,24 @@ test("orchestrated loop v4: criteria data, review diversity, best-of-n, resume, 
 	expect(lastSent().content).toContain("BEST-OF-N");
 	expect(lastSent().details?.bestOfN).toBe(true);
 
-	// ---- round 3 (best-of-n): all criteria met → review dispatched on the diverse model
-	criteria[1].passes = true;
+	// ---- round 3 (best-of-n): all verify commands pass → review dispatched on the diverse model
+	criteria[1].verify = "true";
 	writeFileSync(`${dir}/criteria.json`, JSON.stringify(criteria));
 	appendFileSync(progress, "\nLOOP_VERDICT: done — all criteria verified\n");
 	await settle();
 	expect(lastSent().customType).toBe("loop-review");
 	expect(lastSent().content).toContain('model parameter set to "pi/smol"');
-	expect(lastSent().content).toContain("SPOT-CHECK");
+	expect(lastSent().content).toContain("adversarial");
 
-	// review fails → guardrail + another round
+	// review verdict is ADVISORY: objective criteria all pass, so even a failing
+	// review completes the loop (its findings are logged, not blocking).
 	appendFileSync(progress, "\nREVIEW_VERDICT: fail — evidence for c2 was asserted, not run\n");
-	await settle();
-	expect(lastSent().customType).toBe("loop-round");
-	expect(readFileSync(`${dir}/GUARDRAILS.md`, "utf-8")).toContain("review rejected");
-
-	// ---- round 4: done again → review → pass → completed with criteria in summary
-	appendFileSync(progress, "\nLOOP_VERDICT: done — reran c2 with real evidence\n");
-	await settle();
-	expect(lastSent().customType).toBe("loop-review");
-	appendFileSync(progress, "\nREVIEW_VERDICT: pass — verified against diff and criteria\n");
 	await settle();
 	expect(loopEntry("ship-export")?.status).toBe("completed");
 	expect(loopEntry("ship-export")?.summary).toContain("criteria 2/2 ✓");
 	const state = JSON.parse(readFileSync(`${dir}/state.json`, "utf-8"));
 	expect(state.status).toBe("completed");
-	expect(state.rejections).toBeGreaterThanOrEqual(3);
+	expect(state.rejections).toBeGreaterThanOrEqual(2);
 	expect(state.verdicts.length).toBeGreaterThan(0);
 
 	// ---- /loop status renders a rich panel from files alone
@@ -131,7 +130,7 @@ test("orchestrated loop v4: criteria data, review diversity, best-of-n, resume, 
 	expect(panelText).toContain("c1");
 
 	// ---- criteria=off review=off loop goes straight to rounds; blocked parks; resume works
-	await loopCommand("audit-perms rounds=3 orchestrate review=off criteria=off", ctx);
+	await loopCommand("audit-perms rounds=3 review=off criteria=off", ctx);
 	expect(lastSent().customType).toBe("loop-round");
 	appendFileSync(`${cwd}/.pi/loops/audit-perms/PROGRESS.md`, "\nLOOP_VERDICT: blocked — need staging creds?\n");
 	await settle();
@@ -160,6 +159,7 @@ test("simple launch: bare `/loop <goal>` uses repo defaults and auto-sizes the b
 	let cmd: ((a: string, c: unknown) => Promise<void>) | undefined;
 	const pi = {
 		registerTool() {},
+		registerShortcut() {},
 		registerMessageRenderer() {},
 		registerCommand(_n: string, d: { handler: (a: string, c: unknown) => Promise<void> }) {
 			cmd = d.handler;
@@ -172,7 +172,11 @@ test("simple launch: bare `/loop <goal>` uses repo defaults and auto-sizes the b
 		},
 	};
 	const notes: string[] = [];
-	const ctx = { cwd, ui: { notify: (t: string) => notes.push(t) } };
+	const ctx = {
+		cwd,
+		sessionManager: { getSessionId: () => "test-session" },
+		ui: { notify: (t: string) => notes.push(t) },
+	};
 	const registry = getBackgroundProcessRegistry();
 	loopExtension(pi as never);
 

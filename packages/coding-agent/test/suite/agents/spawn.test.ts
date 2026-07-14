@@ -1,8 +1,10 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseTeam, resetTeamsForTests, setActiveTeam, spawnAgent } from "../../../src/core/agents/index.ts";
 import { resetLifecycleForTests } from "../../../src/core/agents/lifecycle.ts";
 import type { CreateChildSessionInput, CreateChildSessionResult, SpawnDeps } from "../../../src/core/agents/spawn.ts";
@@ -128,6 +130,8 @@ describe("spawnAgent", () => {
 		const call = captured[0];
 		if (call) {
 			expect(call.customPrompt).toContain("You are an explorer.");
+			expect(call.customPrompt).toContain("## DELEGATION BOUNDARY");
+			expect(call.customPrompt).toContain("Conclude as soon as the goal's success criteria are satisfied");
 			expect(call.customPrompt).toContain("## CONTEXT");
 			expect(call.customPrompt).toContain("Repo uses oauth");
 			expect(call.tools).toEqual(["read", "grep"]);
@@ -314,9 +318,74 @@ describe("spawnAgent", () => {
 		expect(snapshot?.canSteer).toBe(true);
 	});
 
-	it("queues a next-turn task notification when a background spawn completes", async () => {
+	it("records child thinking and full tool arguments for the activity drawer", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
+		const findTool: AgentTool = {
+			name: "find",
+			label: "find",
+			description: "Find files",
+			parameters: Type.Object({
+				pattern: Type.String(),
+				path: Type.Optional(Type.String()),
+				limit: Type.Optional(Type.Number()),
+			}),
+			execute: async () => ({ content: [{ type: "text", text: "LicenseAllocation.ts" }], details: {} }),
+		};
+		const childHarness = await createHarness({ tools: [findTool] });
+		const deps: SpawnDeps = {
+			settingsManager: harness.settingsManager,
+			modelRegistry: harness.session.modelRegistry,
+			artifactDir: makeArtifactDir(),
+			createChildSession: async (): Promise<CreateChildSessionResult> => ({
+				session: childHarness.session,
+				dispose: () => childHarness.cleanup(),
+			}),
+		};
+		childHarness.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxThinking("Inspect the allocation files first"),
+					fauxToolCall("find", {
+						pattern: "*License*Allocation*",
+						path: "/home/siddharth/projects/dev/frontend/miniorange-iam-frontend",
+						limit: 100,
+					}),
+				],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("found it"),
+		]);
+
+		const result = await spawnAgent(
+			{
+				definition: makeDefinition({ name: "explore", tools: ["find"] }),
+				prompt: "find allocation",
+				parent: { session: harness.session, depth: 0 },
+				background: false,
+			},
+			deps,
+		);
+
+		const log = getBackgroundProcessRegistry().get(result.registryId)?.log.join("\n") ?? "";
+		expect(log).toContain("thinking: Inspect the allocation files first");
+		expect(log).toContain("find *License*Allocation* in ~/projects/dev/frontend/miniorange-iam-frontend (limit 100)");
+	});
+
+	it("shows a task notification and triggers a parent turn when a background spawn completes", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		let displayedNotification = false;
+		harness.session.subscribe((event) => {
+			if (
+				event.type === "message_start" &&
+				event.message.role === "custom" &&
+				event.message.customType === "task-notification" &&
+				event.message.display === true
+			) {
+				displayedNotification = true;
+			}
+		});
 
 		const childHarness = await createHarness();
 		const deps: SpawnDeps = {
@@ -330,6 +399,7 @@ describe("spawnAgent", () => {
 		};
 
 		childHarness.setResponses([fauxAssistantMessage("background done")]);
+		harness.setResponses([fauxAssistantMessage("acknowledged background result")]);
 
 		const result = await spawnAgent(
 			{
@@ -344,10 +414,10 @@ describe("spawnAgent", () => {
 		expect(result.inline).toContain("Background agent launched");
 		await waitForBackgroundStatus(result.registryId, "idle");
 
-		harness.setResponses([fauxAssistantMessage("ack")]);
-		await harness.session.prompt("continue");
+		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("acknowledged background result"));
 
 		const notification = harness.session.messages.find(isTaskNotification);
+		expect(displayedNotification).toBe(true);
 		expect(typeof notification?.content === "string" ? notification.content : "").toContain("<task-notification");
 		expect(typeof notification?.content === "string" ? notification.content : "").toContain("background done");
 		expect(typeof notification?.content === "string" ? notification.content : "").toContain(result.registryId);

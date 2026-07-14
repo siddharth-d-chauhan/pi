@@ -25,6 +25,17 @@ describe("SettingsManager", () => {
 		}
 	});
 
+	it("loads a valid absolute compaction ceiling and ignores invalid values", () => {
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ compaction: { maxContextTokens: 220000.9 } }));
+		const manager = SettingsManager.create(projectDir, agentDir);
+		expect(manager.getCompactionSettings().maxContextTokens).toBe(220000);
+
+		writeFileSync(settingsPath, JSON.stringify({ compaction: { maxContextTokens: -1 } }));
+		const invalid = SettingsManager.create(projectDir, agentDir);
+		expect(invalid.getCompactionSettings().maxContextTokens).toBeUndefined();
+	});
+
 	describe("preserves externally added settings", () => {
 		it("should preserve enabledModels when changing thinking level", async () => {
 			// Create initial settings file

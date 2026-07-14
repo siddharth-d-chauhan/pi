@@ -155,6 +155,8 @@ export type {
 	ExtensionRuntime,
 	ExtensionShortcut,
 	ExtensionUIContext,
+	ExtensionUICustomDrawerOptions,
+	ExtensionUICustomOptions,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	FindToolCallEvent,
@@ -321,6 +323,7 @@ export {
 	type SkillFrontmatter,
 } from "./core/skills.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
+export { formatThinkingSummary, formatToolCallSummary } from "./core/tool-call-summary.ts";
 export { type EditDiffResult, generateDiffString, generateUnifiedPatch } from "./core/tools/edit-diff.ts";
 // Tools
 export {

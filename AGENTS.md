@@ -28,7 +28,7 @@ Seam rules: optional and undefined-safe (unset = exact upstream behavior); featu
 
 ## Code Quality
 
-- Read files in full before wide-ranging changes or audits; don't rely on search snippets.
+- Understand code before changing it: don't act from search snippets alone. Read the full files a change spans when they're small or the change is wide-ranging; otherwise read the relevant symbols/sections (grep/codemap first, then targeted ranges) instead of paging whole large files.
 - No `any` unless necessary. No inline/dynamic imports — top-level only. Inline single-use one-line helpers. Check node_modules for external API types.
 - Only erasable TypeScript (Node strip-only) in root-config code: no parameter properties, `enum`, `namespace`, `import =`/`export =`.
 - Never remove/downgrade code to fix type errors from outdated deps; upgrade the dep. Ask before removing intentional-looking functionality. No backward compatibility unless asked.

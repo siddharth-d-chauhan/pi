@@ -106,6 +106,28 @@ async execute(toolCallId, params, onUpdate, ctx, signal) {
 }
 ```
 
+## Bottom Drawers
+
+Bottom drawers are focused inline components that retain recent conversation above them instead of covering it:
+
+```typescript
+const result = await ctx.ui.custom<string | null>(
+  (tui, theme, keybindings, done) => new ActivityComponent({ onClose: done }),
+  { drawer: { height: "40%" } },
+);
+```
+
+The height accepts rows or a percentage and defaults to `"40%"`. It is a minimum height, so larger component output remains visible.
+
+Use `setWidget()` for non-focusable content that should remain immediately above the prompt, such as a todo list:
+
+```typescript
+ctx.ui.setWidget("todo", ["▶ Implement drawer", "☐ Validate navigation"]);
+ctx.ui.setWidget("todo", undefined); // remove it
+```
+
+The streaming working row is controlled independently with `setWorkingMessage()` and `setWorkingIndicator()`.
+
 ## Overlays
 
 Overlays render components on top of existing content without clearing the screen. Pass `{ overlay: true }` to `ctx.ui.custom()`:

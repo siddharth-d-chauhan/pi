@@ -26,6 +26,7 @@
 
 import type { AgentSession } from "../agent-session.ts";
 import { getBackgroundProcessRegistry } from "../background-process-registry.ts";
+import { enforceAgentRunBudget } from "./run-budget.ts";
 
 export interface AgentLifecycleEntry {
 	registryId: string;
@@ -40,7 +41,11 @@ export interface AgentLifecycleEntry {
 	/** True while a delivery-triggered turn is in flight. */
 	busy: boolean;
 	/** Messages queued while the agent was running/busy; drained on idle. */
-	queue: Array<{ wrapped: string; from: string }>;
+	queue: Array<{
+		wrapped: string;
+		from: string;
+		onReply?: (outcome: QueuedDeliveryOutcome) => Promise<void> | void;
+	}>;
 	/** In-flight revive, memoized so concurrent deliveries share one session. */
 	reviving?: Promise<AgentSession | undefined>;
 }
@@ -50,11 +55,13 @@ export type DeliveryReceipt =
 	| { status: "replied"; reply: string; usage?: { tokens: number; costUsd: number } }
 	| { status: "failed"; reason: string };
 
+export type QueuedDeliveryOutcome = { reply: string; usage: { tokens: number; costUsd: number } } | { failed: string };
+
 /** Default idle TTL before an agent's session is parked to disk. */
 export const DEFAULT_IDLE_TTL_MS = 420_000;
 
 /** Turn cap for a single message delivery (prevents runaway revived agents). */
-const DELIVERY_MAX_TURNS = 20;
+const DELIVERY_MAX_TURNS = 8;
 
 const agents = new Map<string, AgentLifecycleEntry>();
 
@@ -123,7 +130,14 @@ async function drainQueue(entry: AgentLifecycleEntry): Promise<void> {
 	while (entry.queue.length > 0 && agents.get(entry.registryId) === entry && entry.state === "idle" && !entry.busy) {
 		const next = entry.queue.shift();
 		if (!next) return;
-		await runDeliveryTurn(entry, next.wrapped);
+		const outcome = await runDeliveryTurn(entry, next.wrapped);
+		if (next.onReply) {
+			try {
+				await next.onReply(outcome);
+			} catch {
+				// Notification failure must not block the remaining queue.
+			}
+		}
 	}
 }
 
@@ -228,16 +242,7 @@ async function runDeliveryTurn(
 	entry.busy = true;
 	getBackgroundProcessRegistry().setStatus(registryId, "running");
 	const statsBefore = session.getSessionStats();
-	let turns = 0;
-	const turnUnsub = session.subscribe((event) => {
-		if (event.type !== "turn_end") return;
-		turns += 1;
-		if (turns === DELIVERY_MAX_TURNS) {
-			void session.steer("Budget notice: wrap up now and return your final answer.");
-		} else if (turns > DELIVERY_MAX_TURNS) {
-			session.abort();
-		}
-	});
+	const disposeRunBudget = enforceAgentRunBudget(session, { maxTurns: DELIVERY_MAX_TURNS });
 	try {
 		await session.prompt(wrapped);
 		const statsAfter = session.getSessionStats();
@@ -251,7 +256,7 @@ async function runDeliveryTurn(
 	} catch (err) {
 		return { failed: (err as Error).message };
 	} finally {
-		turnUnsub();
+		disposeRunBudget();
 		entry.busy = false;
 		// The entry may have been killed/disposed while the turn ran — never
 		// resurrect its registry status or arm timers on a dead entry.
@@ -272,7 +277,11 @@ async function runDeliveryTurn(
 export async function deliverToAgent(
 	registryId: string,
 	message: string,
-	opts: { from: string; awaitReply?: boolean } = { from: "main" },
+	opts: {
+		from: string;
+		awaitReply?: boolean;
+		onQueuedReply?: (outcome: QueuedDeliveryOutcome) => Promise<void> | void;
+	} = { from: "main" },
 ): Promise<DeliveryReceipt> {
 	const entry = agents.get(registryId);
 	if (!entry) return { status: "failed", reason: `No agent "${registryId}" (it may have been disposed).` };
@@ -282,7 +291,7 @@ export async function deliverToAgent(
 	if (entry.state === "running" || entry.busy) {
 		// Queued in the LIFECYCLE (not the session) so a park cannot drop it;
 		// markAgentIdle / parkAgent drain this queue.
-		entry.queue.push({ wrapped, from: opts.from });
+		entry.queue.push({ wrapped, from: opts.from, onReply: opts.onQueuedReply });
 		return { status: "queued" };
 	}
 

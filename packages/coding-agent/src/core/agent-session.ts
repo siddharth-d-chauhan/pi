@@ -311,6 +311,7 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	private _midRunCompactionRequested = false;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -389,6 +390,7 @@ export class AgentSession {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installAgentNextTurnRefresh();
+		this._installAgentCompactionGuard();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -519,6 +521,23 @@ export class AgentSession {
 				model: this.agent.state.model,
 				thinkingLevel: this.agent.state.thinkingLevel,
 			};
+		};
+	}
+
+	/** End a tool loop cleanly at the configured context ceiling so the normal
+	 * auto-compaction pipeline can summarize and then continue the same run. */
+	private _installAgentCompactionGuard(): void {
+		const previousShouldStopAfterTurn = this.agent.shouldStopAfterTurn;
+		this.agent.shouldStopAfterTurn = async (turn, signal) => {
+			if (await previousShouldStopAfterTurn?.(turn, signal)) return true;
+			if (turn.message.stopReason !== "toolUse") return false;
+			const settings = this.settingsManager.getCompactionSettings();
+			const contextWindow = this.model?.contextWindow ?? 0;
+			if (!settings.enabled || contextWindow <= 0) return false;
+			const contextTokens = estimateContextTokens(turn.context.messages).tokens;
+			if (!shouldCompact(contextTokens, contextWindow, settings)) return false;
+			this._midRunCompactionRequested = true;
+			return true;
 		};
 	}
 
@@ -1129,9 +1148,14 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		if (await this._checkCompaction(msg)) {
+		const resumeAfterCompaction = this._midRunCompactionRequested;
+		this._midRunCompactionRequested = false;
+		if (await this._checkCompaction(msg, true, resumeAfterCompaction)) {
 			return true;
 		}
+		// A failed/unavailable summary must not silently terminate the active task.
+		// Continuing lets the normal overflow recovery path make one final attempt.
+		if (resumeAfterCompaction) return true;
 
 		// The agent loop drains both queues before emitting agent_end. Any messages
 		// here were queued by agent_end extension handlers and need a continuation.
@@ -1988,7 +2012,11 @@ export class AgentSession {
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 */
-	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+	private async _checkCompaction(
+		assistantMessage: AssistantMessage,
+		skipAbortedCheck = true,
+		resumeAfterCompaction = false,
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
@@ -2071,10 +2099,13 @@ export class AgentSession {
 			}
 			contextTokens = estimate.tokens;
 		} else {
-			contextTokens = directContextTokens;
+			// Include tool results appended after the provider reported its input usage.
+			// A single large read/bash result can otherwise overflow the next request
+			// before end-of-run auto-compaction gets a chance to act.
+			contextTokens = Math.max(directContextTokens, estimateContextTokens(this.agent.state.messages).tokens);
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			return await this._runAutoCompaction("threshold", false);
+			return await this._runAutoCompaction("threshold", resumeAfterCompaction);
 		}
 		return false;
 	}

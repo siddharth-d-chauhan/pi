@@ -1,9 +1,12 @@
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	createAssistantMessageEventStream,
 	fauxAssistantMessage,
+	fauxToolCall,
 	type Model,
 } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { estimateTokens } from "../../src/core/compaction/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
@@ -168,6 +171,63 @@ describe("AgentSession compaction characterization", () => {
 		expect(compactionEntries).toHaveLength(1);
 		expect(compactionEnd?.result?.estimatedTokensAfter).toBeGreaterThan(0);
 		expect(getStreamCallCount()).toBe(1);
+	});
+
+	it("compacts and resumes a long tool loop before its next provider request", async () => {
+		const largeResultTool: AgentTool = {
+			name: "large_result",
+			label: "Large result",
+			description: "Return a large result",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [{ type: "text", text: "x".repeat(8_000) }],
+				details: {},
+			}),
+		};
+		const harness = await createHarness({
+			tools: [largeResultTool],
+			models: [{ id: "faux-1", contextWindow: 10_000, maxTokens: 1_000 }],
+			settings: {
+				compaction: { enabled: true, keepRecentTokens: 2_500, reserveTokens: 0, maxContextTokens: 3_000 },
+			},
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "mid-run tool results compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: {},
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		const guard = harness.session.agent.shouldStopAfterTurn;
+		const guardDecisions: boolean[] = [];
+		harness.session.agent.shouldStopAfterTurn = async (turn, signal) => {
+			const decision = (await guard?.(turn, signal)) ?? false;
+			guardDecisions.push(decision);
+			return decision;
+		};
+		const firstToolTurn = createAssistant(harness, { stopReason: "toolUse", totalTokens: 100 });
+		firstToolTurn.content = [fauxToolCall("large_result", {})];
+		const secondToolTurn = createAssistant(harness, { stopReason: "toolUse", totalTokens: 2_200 });
+		secondToolTurn.content = [fauxToolCall("large_result", {})];
+		harness.setResponses([firstToolTurn, secondToolTurn, fauxAssistantMessage("done after compaction")]);
+
+		await harness.session.prompt("run the long task");
+
+		expect(guardDecisions).toContain(true);
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "threshold",
+			aborted: false,
+			willRetry: true,
+		});
+		expect(harness.session.getLastAssistantText()).toBe("done after compaction");
 	});
 
 	it("cancels in-progress manual compaction when abortCompaction is called", async () => {

@@ -40,6 +40,8 @@ export interface Keybindings {
 	"tui.select.pageDown": true;
 	"tui.select.confirm": true;
 	"tui.select.cancel": true;
+	// Generic activity-drawer actions
+	"tui.activity.message": true;
 }
 
 export type Keybinding = keyof Keybindings;
@@ -133,6 +135,7 @@ export const TUI_KEYBINDINGS = {
 		defaultKeys: ["escape", "ctrl+c"],
 		description: "Cancel selection",
 	},
+	"tui.activity.message": { defaultKeys: "s", description: "Message selected activity" },
 } as const satisfies KeybindingDefinitions;
 
 export interface KeybindingConflict {

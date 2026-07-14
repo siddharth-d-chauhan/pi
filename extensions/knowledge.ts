@@ -56,33 +56,138 @@ function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
  *  tool calls must not be able to alter memory state or trigger reconciliation. */
 const CORE = new Set(["knowledge_search", "pi_context_task", "pi_context_shift", "pi_semantic_expand"]);
 
-/** Code + flow query surface — promoted from the proxy to direct mounts so the
- *  model can (and, via the guideline below, is TOLD to) query codebase structure
- *  while coding instead of grepping blind. find_code / code_search / resolve_symbol
- *  answer "what exists / where"; trace / neighbors answer "how it flows / what
- *  connects"; pi_context_code is the broker's code packet. */
-const CODE = new Set([
-	"knowledge_find_code",
-	"knowledge_code_search",
-	"knowledge_resolve_symbol",
-	"knowledge_trace",
-	"knowledge_neighbors",
-	"pi_context_code",
-	// completeness: missing implementation / missing tests for a rule or symbol.
-	"knowledge_gaps",
-	"knowledge_coverage",
-]);
+/** Keep one phase-aware code tool hot. The overlapping generic code search
+ * stays behind knowledge_call so agents do not query both surfaces for the
+ * same evidence. */
+const CODE = new Set(["pi_context_code"]);
 
 /** The prompt fix: a single Guidelines directive (attached to the anchor code
  *  tool) that makes the model reach for these while coding. */
 const CODE_GUIDELINE = [
-	"Before writing or editing code, QUERY the codebase graph instead of guessing or grepping blind: " +
-		"use kp find_code / code_search to locate existing implementations and utilities to REUSE, " +
-		"kp resolve_symbol for a symbol's real definition and its callers, and kp trace / neighbors to " +
-		"follow call and data FLOW and see what connects. Prefer reusing existing code over reinventing it, " +
-		"and check the flow before changing shared code. When finishing, use kp gaps / coverage to check for " +
-		"missing implementation or tests.",
+	"Before writing or editing code, query ctx context_code ONCE with an exact registered repository name " +
+		"to locate existing implementations and utilities to reuse. Do not retry it with invented repository aliases. For a symbol's callers, " +
+		"flow, gaps, or coverage, use knowledge_call and describe the cold tool first if its arguments are unknown. " +
+		"Prefer reusing existing code over reinventing it, and check the flow before changing shared code.",
 ];
+
+export interface RegisteredCodeRepository {
+	repository: string;
+	root: string;
+}
+
+function insideRoot(cwd: string, root: string): boolean {
+	const normalizedCwd = cwd.replace(/\/+$/, "");
+	const normalizedRoot = root.replace(/\/+$/, "");
+	return normalizedCwd === normalizedRoot || normalizedCwd.startsWith(`${normalizedRoot}/`);
+}
+
+/** Resolve only against the authoritative KP registry; never pass invented names through. */
+export function resolveRegisteredRepository(
+	requested: string | undefined,
+	query: string | undefined,
+	cwd: string,
+	repositories: RegisteredCodeRepository[],
+): string | undefined {
+	const requestedName = requested?.trim();
+	if (requestedName) {
+		const exact = repositories.find((repo) => repo.repository.toLowerCase() === requestedName.toLowerCase());
+		if (exact) return exact.repository;
+	}
+
+	const queryText = query?.toLowerCase() ?? "";
+	const queryMatches = repositories.filter(
+		(repo) => queryText.includes(repo.repository.toLowerCase()) || queryText.includes(repo.root.toLowerCase()),
+	);
+	if (queryMatches.length === 1) return queryMatches[0].repository;
+
+	if (requestedName) {
+		const lowered = requestedName.toLowerCase();
+		const aliasMatches = repositories.filter(
+			(repo) => lowered.includes(repo.repository.toLowerCase()) || repo.repository.toLowerCase().includes(lowered),
+		);
+		if (aliasMatches.length === 1) return aliasMatches[0].repository;
+		return undefined;
+	}
+
+	const cwdMatches = repositories.filter((repo) => insideRoot(cwd, repo.root));
+	return cwdMatches.length === 1 ? cwdMatches[0].repository : undefined;
+}
+
+export function constrainRepositorySchema(schema: unknown, repositories: RegisteredCodeRepository[]): unknown {
+	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
+	const source = schema as Record<string, unknown>;
+	const properties =
+		source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
+			? (source.properties as Record<string, unknown>)
+			: undefined;
+	if (!properties?.repository || repositories.length === 0) return schema;
+	const repository =
+		typeof properties.repository === "object" && !Array.isArray(properties.repository)
+			? (properties.repository as Record<string, unknown>)
+			: {};
+	return {
+		...source,
+		properties: {
+			...properties,
+			repository: {
+				...repository,
+				enum: repositories.map((repo) => repo.repository),
+				description: "Exact registered repository name; choose one enum value and never invent an alias",
+			},
+		},
+	};
+}
+
+const SCOPED_CONTEXT_TOOLS = new Set(["pi_context_task", "pi_context_shift", "pi_context_code"]);
+
+/** Pi owns session location and project selection. Model-supplied values are
+ * hints only: cwd is always the live session cwd and task/shift use KP's
+ * configured project instead of allowing an invented empty partition. */
+export function normalizeContextArguments(
+	piName: string,
+	params: Record<string, unknown>,
+	cwd: string,
+	repositories: RegisteredCodeRepository[],
+): Record<string, unknown> {
+	if (!SCOPED_CONTEXT_TOOLS.has(piName)) return params;
+	const arguments_: Record<string, unknown> = piName === "pi_context_code" ? { ...params } : { ...params, cwd };
+	if (piName === "pi_context_task" || piName === "pi_context_shift") delete arguments_.project;
+
+	if (repositories.length === 0) return arguments_;
+	const requested = typeof params.repository === "string" ? params.repository : undefined;
+	const queryKey = piName === "pi_context_task" ? "text" : piName === "pi_context_shift" ? "new_request" : "query";
+	const query = typeof params[queryKey] === "string" ? params[queryKey] : undefined;
+	const repository = resolveRegisteredRepository(requested, query, cwd, repositories);
+	if (!repository) {
+		delete arguments_.repository;
+		if (requested || piName === "pi_context_code") {
+			throw new Error(
+				`Unknown repository '${requested ?? ""}'. Use exactly one registered name: ${repositories.map((repo) => repo.repository).join(", ")}`,
+			);
+		}
+		return arguments_;
+	}
+	arguments_.repository = repository;
+	return arguments_;
+}
+
+/** Project is deployment configuration for Pi, not a model choice. */
+export function constrainContextSchema(piName: string, schema: unknown): unknown {
+	if ((piName !== "pi_context_task" && piName !== "pi_context_shift") || !schema || typeof schema !== "object") {
+		return schema;
+	}
+	const source = schema as Record<string, unknown>;
+	const properties =
+		source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
+			? { ...(source.properties as Record<string, unknown>) }
+			: undefined;
+	if (!properties) return schema;
+	delete properties.project;
+	const required = Array.isArray(source.required)
+		? source.required.filter((name): name is string => typeof name === "string" && name !== "project")
+		: source.required;
+	return { ...source, properties, ...(required ? { required } : {}) };
+}
 
 // KP reads can return large graph/code payloads. The MODEL still gets the full
 // (bounded) result, but the TUI must not dump it — over-wide/huge blocks break
@@ -112,6 +217,30 @@ function compactLine(text: string): Component {
 		render: (width: number) => [truncateToWidth(text, Math.max(1, width))],
 		invalidate: () => {},
 	};
+}
+
+export function summarizeKnowledgeResult(piName: string, content: unknown): string {
+	const text = blocksToText(content);
+	const lines = text.split("\n").filter((line) => line.trim());
+	const lbl = piName.replace(/^knowledge_/, "kp ").replace(/^pi_/, "ctx ");
+	try {
+		const parsed = JSON.parse(text) as {
+			found?: boolean;
+			error?: { code?: string; message?: string };
+			errors?: Array<{ code?: string; message?: string }>;
+			scope?: { status?: string };
+		};
+		const error = parsed.error ?? parsed.errors?.[0];
+		if (error) return `${lbl} · DEGRADED · ${error.code ?? "ERROR"}: ${error.message ?? "unknown failure"}`;
+		if (parsed.found === false) return `${lbl} · DEGRADED · no usable result`;
+		if (parsed.scope?.status && parsed.scope.status !== "resolved") {
+			return `${lbl} · DEGRADED · scope ${parsed.scope.status}`;
+		}
+	} catch {
+		// Non-JSON tools keep the compact generic summary.
+	}
+	const head = (lines[0] ?? "").replace(/\s+/g, " ").trim();
+	return `${lbl} · ${lines.length} line${lines.length === 1 ? "" : "s"} · ${text.length} chars${head ? ` — ${head}` : ""}`;
 }
 
 /** pi-normalized names of the mountable KP surface (server uses dots). */
@@ -248,8 +377,21 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		let repositories: RegisteredCodeRepository[] = [];
+		try {
+			const result = await (await connect()).callTool({ name: "knowledge.list_repos", arguments: {} }, undefined, {
+				timeout: KP_CALL_TIMEOUT_MS,
+			});
+			const parsed = JSON.parse(blocksToText(result.content)) as { repos?: RegisteredCodeRepository[] };
+			repositories = (parsed.repos ?? []).filter(
+				(repo) => typeof repo.repository === "string" && typeof repo.root === "string",
+			);
+		} catch {
+			// Registry enrichment is optional; exact validation remains fail-open.
+		}
+
 		let mounted = 0;
-		const proxied: Array<{ piName: string; server: string; desc: string }> = [];
+		const proxied: Array<{ piName: string; server: string; desc: string; inputSchema: unknown }> = [];
 		for (const tool of tools) {
 			const piName = tool.name.replace(/\./g, "_");
 			if (!READ_ONLY.has(piName)) continue; // only the vetted read surface mounts
@@ -258,6 +400,7 @@ export default function (pi: ExtensionAPI) {
 					piName,
 					server: tool.name,
 					desc: (tool.description ?? "").split("\n")[0].slice(0, 90),
+					inputSchema: tool.inputSchema,
 				});
 				continue;
 			}
@@ -278,20 +421,20 @@ export default function (pi: ExtensionAPI) {
 				promptSnippet: isCode
 					? `${piName.replace(/^knowledge_/, "kp ").replace(/^pi_/, "ctx ")} — query code/flow before editing`
 					: undefined,
-				promptGuidelines: piName === "knowledge_find_code" ? CODE_GUIDELINE : undefined,
-				parameters: tool.inputSchema as never,
+				promptGuidelines: piName === "pi_context_code" ? CODE_GUIDELINE : undefined,
+				parameters: constrainContextSchema(
+					piName,
+					constrainRepositorySchema(tool.inputSchema, repositories),
+				) as never,
 				// Compact, width-safe display — show WHAT it did, not the payload.
 				renderResult: (res: { content?: unknown }, _o: unknown, theme: { fg(n: string, s: string): string }) => {
-					const text = blocksToText(res.content);
-					const lines = text.split("\n").filter((l) => l.trim());
-					const head = (lines[0] ?? "").replace(/\s+/g, " ").trim();
-					const lbl = piName.replace(/^knowledge_/, "kp ").replace(/^pi_/, "ctx ");
-					const summary = `${lbl} · ${lines.length} line${lines.length === 1 ? "" : "s"} · ${text.length} chars${head ? ` — ${head}` : ""}`;
-					return compactLine(theme.fg("dim", summary));
+					const summary = summarizeKnowledgeResult(piName, res.content);
+					return compactLine(theme.fg(summary.includes("DEGRADED") ? "error" : "dim", summary));
 				},
 				async execute(_id: string, params: Record<string, unknown>, signal: AbortSignal) {
 					const c = await connect();
-					const result = await c.callTool({ name: tool.name, arguments: params }, undefined, {
+					const arguments_ = normalizeContextArguments(piName, params, ctx.cwd, repositories);
+					const result = await c.callTool({ name: tool.name, arguments: arguments_ }, undefined, {
 						signal,
 						timeout: KP_CALL_TIMEOUT_MS,
 					});
@@ -307,42 +450,56 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (proxied.length > 0) {
-			const byPiName = new Map(proxied.map((p) => [p.piName, p.server]));
+			const byPiName = new Map(proxied.map((p) => [p.piName, p]));
 			pi.registerTool({
 				name: "knowledge_call",
 				label: "kp call",
 				description:
-					"Call a less-common read-only knowledge tool by name. Use {list:true} once to see the catalog, " +
-					"then {tool, arguments}.",
+					"Call a cold read-only knowledge tool by name. Use {list:true} for names, {describe:tool} for its schema, then {tool, arguments}.",
 				parameters: {
 					type: "object",
 					properties: {
 						list: { type: "boolean", description: "return the tool catalog" },
+						describe: { type: "string", description: "return one cold tool's input schema" },
 						tool: { type: "string" },
 						arguments: { type: "object" },
 					},
 				} as never,
 				async execute(
 					_id: string,
-					params: { list?: boolean; tool?: string; arguments?: Record<string, unknown> },
+					params: { list?: boolean; describe?: string; tool?: string; arguments?: Record<string, unknown> },
 					signal: AbortSignal,
 				) {
-					if (params?.list || !params?.tool) {
+					if (params?.list) {
 						const catalog = proxied.map((p) => `- ${p.piName}: ${p.desc}`).join("\n");
 						return { content: [{ type: "text", text: catalog }] as never, details: undefined };
 					}
-					const server = byPiName.get(params.tool);
-					if (!server) throw new Error(`unknown tool '${params.tool}' — call knowledge_call {list:true}`);
+					if (params?.describe) {
+						const described = byPiName.get(params.describe);
+						if (!described)
+							throw new Error(`unknown tool '${params.describe}' — call knowledge_call {list:true}`);
+						return {
+							content: [{ type: "text", text: JSON.stringify(described.inputSchema) }] as never,
+							details: undefined,
+						};
+					}
+					if (!params?.tool) throw new Error("provide list, describe, or tool");
+					const selected = byPiName.get(params.tool);
+					if (!selected) throw new Error(`unknown tool '${params.tool}' — call knowledge_call {list:true}`);
 					const c = await connect();
-					const result = await c.callTool({ name: server, arguments: params.arguments ?? {} }, undefined, {
-						signal,
-						timeout: KP_CALL_TIMEOUT_MS,
-					});
+					const result = await c.callTool(
+						{ name: selected.server, arguments: params.arguments ?? {} },
+						undefined,
+						{
+							signal,
+							timeout: KP_CALL_TIMEOUT_MS,
+						},
+					);
 					if (result.isError) {
 						const msg = (result.content as Array<{ type: string; text?: string }>)
 							.map((block) => (block.type === "text" ? (block.text ?? "") : ""))
 							.join("\n");
-						throw new Error(msg || `${server} failed`);
+						throw new Error(msg || `${selected.server} failed`);
 					}
 					return { content: result.content as never, details: undefined };
 				},

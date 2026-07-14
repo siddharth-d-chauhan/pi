@@ -1,7 +1,7 @@
 /**
- * Offline loop optimizer (batch GEPA) — pure functions.
+ * Deterministic offline loop-step distiller — pure functions.
  *
- * Online GEPA-lite (in loop.ts) teaches ONE run from its own repeated
+ * The online adapter (in loop.ts) teaches ONE run from its own repeated
  * failures. This distills across ALL runs: a lesson the online system had to
  * re-invent in many separate loops should be promoted into the BASE prompt
  * permanently, so future loops start pre-loaded instead of re-learning it the
@@ -11,8 +11,12 @@
  */
 
 export interface RunRecord {
+	schemaVersion?: 1;
+	taskId?: string;
+	traceId?: string;
+	snapshotId?: string;
 	goal: string;
-	/** base-prompt version this run used (bumped by each `apply`). */
+	/** base-prompt version this run used (bumped by each evaluated promotion). */
 	promptVersion: number;
 	rounds: number;
 	rejections: number;

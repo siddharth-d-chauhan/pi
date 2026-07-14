@@ -49,4 +49,37 @@ describe("CustomEditor autocomplete navigation", () => {
 		editor.handleInput("\r");
 		expect(submitted).toBe("/model");
 	});
+
+	test("offers empty-prompt Down to the contextual activity handler", () => {
+		const keybindings = KeybindingsManager.create();
+		setKeybindings(keybindings);
+		const editor = new CustomEditor(new TUI(new VirtualTerminal()), getEditorTheme(), keybindings);
+		let calls = 0;
+		editor.onDownArrowOnEmpty = () => {
+			calls++;
+			return true;
+		};
+
+		editor.handleInput("\x1b[B");
+
+		expect(calls).toBe(1);
+		expect(editor.getText()).toBe("");
+	});
+
+	test("does not offer non-empty prompts to the activity handler", () => {
+		const keybindings = KeybindingsManager.create();
+		setKeybindings(keybindings);
+		const editor = new CustomEditor(new TUI(new VirtualTerminal()), getEditorTheme(), keybindings);
+		let calls = 0;
+		editor.onDownArrowOnEmpty = () => {
+			calls++;
+			return true;
+		};
+		editor.setText("draft");
+
+		editor.handleInput("\x1b[B");
+
+		expect(calls).toBe(0);
+		expect(editor.getText()).toBe("draft");
+	});
 });

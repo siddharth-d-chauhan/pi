@@ -292,6 +292,19 @@ describe("shouldCompact", () => {
 
 		expect(shouldCompact(95000, 100000, settings)).toBe(false);
 	});
+
+	it("uses an optional absolute ceiling before the window reserve threshold", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			reserveTokens: 10000,
+			keepRecentTokens: 20000,
+			maxContextTokens: 60000,
+		};
+
+		expect(shouldCompact(60000, 100000, settings)).toBe(false);
+		expect(shouldCompact(60001, 100000, settings)).toBe(true);
+		expect(shouldCompact(95000, 100000, { ...settings, maxContextTokens: 200000 })).toBe(true);
+	});
 });
 
 describe("findCutPoint", () => {

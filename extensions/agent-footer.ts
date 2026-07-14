@@ -31,14 +31,16 @@ function formatTokens(tokens: number): string {
 	return tokens < 1000 ? `${tokens}` : `${(tokens / 1000).toFixed(1)}k`;
 }
 
-function agentTotals(snapshots: BackgroundProcessSnapshot[]): { tokens: number; cost: number } {
-	let tokens = 0;
+function agentTotals(snapshots: BackgroundProcessSnapshot[]): { fresh: number; cached: number; cost: number } {
+	let fresh = 0;
+	let cached = 0;
 	let cost = 0;
 	for (const snap of snapshots) {
-		tokens += snap.metrics?.tokens ?? 0;
+		fresh += snap.metrics?.freshTokens ?? snap.metrics?.tokens ?? 0;
+		cached += snap.metrics?.cacheReadTokens ?? 0;
 		cost += snap.metrics?.costUsd ?? 0;
 	}
-	return { tokens, cost };
+	return { fresh, cached, cost };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -88,8 +90,11 @@ export default function (pi: ExtensionAPI) {
 
 						const totals = agentTotals(agents);
 						const middle =
-							totals.tokens > 0
-								? theme.fg("dim", `⇄ ${formatTokens(totals.tokens)} tok · $${totals.cost.toFixed(4)}`)
+							totals.fresh > 0
+								? theme.fg(
+										"dim",
+										`⇄ ${formatTokens(totals.fresh)} fresh${totals.cached ? ` · ${formatTokens(totals.cached)} cached` : ""} · $${totals.cost.toFixed(4)}`,
+									)
 								: "";
 
 						const branch = footerData.getGitBranch();

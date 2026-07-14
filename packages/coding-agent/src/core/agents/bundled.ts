@@ -71,7 +71,7 @@ tools: read, grep, find, ls
 spawns: none
 model: pi/slow
 thinkingLevel: high
-maxTurns: 30
+maxTurns: 16
 background: false
 isolation: none
 output:

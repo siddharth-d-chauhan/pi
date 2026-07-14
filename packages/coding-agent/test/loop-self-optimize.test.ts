@@ -20,6 +20,7 @@ test("online GEPA-lite: the loop rewrites its own round prompt after a failure r
 
 	const pi = {
 		registerTool() {},
+		registerShortcut() {},
 		registerMessageRenderer() {},
 		registerCommand(_n: string, d: { handler: (a: string, c: unknown) => Promise<void> }) {
 			cmd = d.handler;
@@ -32,7 +33,11 @@ test("online GEPA-lite: the loop rewrites its own round prompt after a failure r
 		},
 	};
 	const notes: string[] = [];
-	const ctx = { cwd, ui: { notify: (t: string, l: string) => notes.push(`[${l}] ${t}`) } };
+	const ctx = {
+		cwd,
+		sessionManager: { getSessionId: () => "test-session" },
+		ui: { notify: (t: string, l: string) => notes.push(`[${l}] ${t}`) },
+	};
 	const registry = getBackgroundProcessRegistry();
 	const entry = () => registry.list().find((e) => e.label === "↻ orchestrate fix-export");
 	const lastRound = () => [...sent].reverse().find((m) => m.customType === "loop-round");
@@ -45,7 +50,7 @@ test("online GEPA-lite: the loop rewrites its own round prompt after a failure r
 	if (!cmd || !settled) throw new Error("extension did not register");
 
 	// launch (no gate/review — isolate the criteria failure class)
-	await cmd("fix-export rounds=8 orchestrate review=off", ctx);
+	await cmd("fix-export rounds=8 review=off", ctx);
 	const dir = `${cwd}/.pi/loops/fix-export`;
 	const progress = `${dir}/PROGRESS.md`;
 	// criteria round 0
@@ -74,7 +79,7 @@ test("online GEPA-lite: the loop rewrites its own round prompt after a failure r
 
 	// the prompt now carries a learned, un-skippable step it wrote for itself
 	expect(afterTwo).toContain("LEARNED THIS RUN");
-	expect(afterTwo).toContain("PASTE its real output");
+	expect(afterTwo).toContain("makes the failing verify commands exit 0");
 	expect(afterTwo).toContain("(learned:");
 	// and it is placed FIRST, before the passive "go read the guardrails file"
 	expect(afterTwo.indexOf("LEARNED THIS RUN")).toBeLessThan(afterTwo.indexOf("Guardrails file"));

@@ -101,6 +101,8 @@ export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	/** Optional absolute ceiling for models whose large windows become slow or expensive before exhaustion. */
+	maxContextTokens?: number;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
@@ -208,7 +210,9 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	const windowThreshold = contextWindow - settings.reserveTokens;
+	const threshold = settings.maxContextTokens ? Math.min(windowThreshold, settings.maxContextTokens) : windowThreshold;
+	return contextTokens > threshold;
 }
 
 // ============================================================================

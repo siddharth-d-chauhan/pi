@@ -46,7 +46,7 @@ const DETAIL_LINES = 16;
 const SECTION_LABELS: Record<ActivitySection, string> = {
 	"needs-input": "Needs input",
 	working: "Working",
-	completed: "Completed",
+	completed: "Finished",
 };
 
 function isAgent(snapshot: BackgroundProcessSnapshot): boolean {
@@ -64,9 +64,9 @@ export function activityKind(snapshot: BackgroundProcessSnapshot): string {
 }
 
 export function activitySection(snapshot: BackgroundProcessSnapshot): ActivitySection {
+	if (snapshot.inputRequest) return "needs-input";
 	if (snapshot.status === "running") return "working";
-	if (snapshot.status === "completed" || snapshot.status === "cancelled") return "completed";
-	return "needs-input";
+	return "completed";
 }
 
 function matchesFilter(snapshot: BackgroundProcessSnapshot, filter: ActivityFilter): boolean {
@@ -91,6 +91,7 @@ export function groupActivity(
 }
 
 function headline(snapshot: BackgroundProcessSnapshot): string {
+	if (snapshot.inputRequest) return snapshot.inputRequest;
 	const latest = snapshot.logTail.at(-1);
 	return snapshot.summary?.trim() || (latest ? sanitizeLogLine(latest) : "") || snapshot.label;
 }
@@ -101,6 +102,7 @@ export class AgentHubComponent implements Component {
 	private selected = 0;
 	private steering = false;
 	private steerText = "";
+	private messageTargetId: string | undefined;
 	private filter: ActivityFilter = "all";
 	private detailId: string | undefined;
 	private detailTop = 0;
@@ -180,8 +182,76 @@ export class AgentHubComponent implements Component {
 		this.followTail = this.detailTop === maxTop;
 	}
 
+	private canMessage(snapshot: BackgroundProcessSnapshot | undefined): snapshot is BackgroundProcessSnapshot {
+		return Boolean(
+			snapshot &&
+				isAgent(snapshot) &&
+				(snapshot.status === "running" || snapshot.status === "idle" || snapshot.status === "parked"),
+		);
+	}
+
+	private beginMessage(snapshot: BackgroundProcessSnapshot): void {
+		this.steering = true;
+		this.steerText = "";
+		this.messageTargetId = snapshot.id;
+	}
+
+	private finishMessage(): void {
+		this.steering = false;
+		this.steerText = "";
+		this.messageTargetId = undefined;
+	}
+
+	private renderMessageComposer(width: number): string[] {
+		const target = this.snapshots.find((snapshot) => snapshot.id === this.messageTargetId);
+		return [
+			truncateToWidth(
+				` ${ui.copper(ui.bold(`steer ${target?.agentType ?? "agent"}`))} ${ui.faint("›")} ${ui.ink(this.steerText)}${ui.amber("▌")}`,
+				width,
+			),
+			truncateToWidth(
+				ui.keyHints([
+					["↵", "send"],
+					["esc", "cancel"],
+				]),
+				width,
+			),
+		];
+	}
+
 	handleInput(data: string): void {
 		const selected = this.snapshots[this.selected];
+
+		if (this.steering) {
+			if (matchesKey(data, "escape")) {
+				this.finishMessage();
+			} else if (matchesKey(data, "return")) {
+				const target = this.snapshots.find((snapshot) => snapshot.id === this.messageTargetId);
+				if (target && this.steerText.trim()) {
+					const text = this.steerText.trim();
+					if (target.status === "running" || isLoop(target)) {
+						getBackgroundProcessRegistry().update(target.id, { inputRequest: undefined });
+						getBackgroundProcessRegistry().steer(target.id, text);
+					} else {
+						getBackgroundProcessRegistry().update(target.id, { inputRequest: undefined });
+						void deliverToAgent(target.id, text, { from: "user" }).then((receipt) => {
+							if (receipt.status === "failed") {
+								getBackgroundProcessRegistry().appendLog(target.id, `[message failed: ${receipt.reason}]`);
+							}
+						});
+					}
+				}
+				this.finishMessage();
+			} else if (matchesKey(data, "backspace")) {
+				this.steerText = this.steerText.slice(0, -1);
+			} else if (!data.startsWith("\x1b")) {
+				for (const ch of data) {
+					if (ch >= " " && ch !== "\x7f") this.steerText += ch;
+				}
+			}
+			this.tui.requestRender();
+			return;
+		}
 
 		if (this.detailId) {
 			const detail = this.snapshots.find((snapshot) => snapshot.id === this.detailId);
@@ -203,32 +273,8 @@ export class AgentHubComponent implements Component {
 				this.scrollDetail(DETAIL_LINES);
 			} else if (data === "x") {
 				if (detail?.canKill && detail.status === "running") getBackgroundProcessRegistry().kill(detail.id);
-			}
-			this.tui.requestRender();
-			return;
-		}
-
-		if (this.steering) {
-			if (matchesKey(data, "escape")) {
-				this.steering = false;
-				this.steerText = "";
-			} else if (matchesKey(data, "return")) {
-				if (selected && this.steerText.trim()) {
-					const text = this.steerText.trim();
-					if (selected.status === "running" || isLoop(selected)) {
-						getBackgroundProcessRegistry().steer(selected.id, text);
-					} else {
-						void deliverToAgent(selected.id, text, { from: "user" });
-					}
-				}
-				this.steering = false;
-				this.steerText = "";
-			} else if (matchesKey(data, "backspace")) {
-				this.steerText = this.steerText.slice(0, -1);
-			} else if (!data.startsWith("\x1b")) {
-				for (const ch of data) {
-					if (ch >= " " && ch !== "\x7f") this.steerText += ch;
-				}
+			} else if (this.keybindings.matches(data, "tui.activity.message") && this.canMessage(detail)) {
+				this.beginMessage(detail);
 			}
 			this.tui.requestRender();
 			return;
@@ -262,14 +308,8 @@ export class AgentHubComponent implements Component {
 		} else if (data === "r" && selected?.status === "parked") {
 			if (isLoop(selected)) getBackgroundProcessRegistry().steer(selected.id, "more 1");
 			else void reviveAgent(selected.id);
-		} else if (
-			data === "s" &&
-			selected &&
-			isAgent(selected) &&
-			(selected.status === "running" || selected.status === "idle" || selected.status === "parked")
-		) {
-			this.steering = true;
-			this.steerText = "";
+		} else if (this.keybindings.matches(data, "tui.activity.message") && this.canMessage(selected)) {
+			this.beginMessage(selected);
 		}
 		this.tui.requestRender();
 	}
@@ -307,7 +347,11 @@ export class AgentHubComponent implements Component {
 		const metrics = snapshot.metrics;
 		if (metrics) {
 			const parts = [
-				metrics.tokens ? `${formatTokens(metrics.tokens)} tok` : undefined,
+				metrics.freshTokens ? `${formatTokens(metrics.freshTokens)} fresh` : undefined,
+				metrics.cacheReadTokens ? `${formatTokens(metrics.cacheReadTokens)} cached` : undefined,
+				!metrics.freshTokens && !metrics.cacheReadTokens && metrics.tokens
+					? `${formatTokens(metrics.tokens)} tok`
+					: undefined,
 				metrics.costUsd ? `$${metrics.costUsd.toFixed(4)}` : undefined,
 				metrics.requests ? `${metrics.requests} req` : undefined,
 				metrics.contextPct ? `${metrics.contextPct.toFixed(0)}% ctx` : undefined,
@@ -329,10 +373,18 @@ export class AgentHubComponent implements Component {
 			for (const raw of visible) lines.push(pad(theme.fg("toolOutput", `  ${sanitizeLogLine(raw)}`)));
 		}
 		lines.push("");
+		if (this.steering) {
+			lines.push(...this.renderMessageComposer(width));
+			return lines;
+		}
 		const hints: Array<[string, string]> = [
 			["↑↓", "scroll"],
 			["⇧↓", "running"],
 		];
+		if (this.canMessage(snapshot)) {
+			const messageKey = this.keybindings.getKeys("tui.activity.message")[0] ?? "s";
+			hints.push([messageKey, "steer"]);
+		}
 		if (snapshot.status === "running" && snapshot.canKill) hints.push(["x", "kill"]);
 		hints.push(["esc", "back"], ["q", "close"]);
 		lines.push(pad(ui.keyHints(hints)));
@@ -387,21 +439,9 @@ export class AgentHubComponent implements Component {
 
 		lines.push("");
 		if (this.steering) {
-			const target = this.snapshots[this.selected];
-			lines.push(
-				pad(
-					` ${ui.copper(ui.bold(`steer ${target?.agentType ?? "agent"}`))} ${ui.faint("›")} ${ui.ink(this.steerText)}${ui.amber("▌")}`,
-				),
-			);
-			lines.push(
-				pad(
-					ui.keyHints([
-						["↵", "send"],
-						["esc", "cancel"],
-					]),
-				),
-			);
+			lines.push(...this.renderMessageComposer(width));
 		} else {
+			const messageKey = this.keybindings.getKeys("tui.activity.message")[0] ?? "s";
 			lines.push(
 				pad(
 					ui.keyHints([
@@ -410,7 +450,7 @@ export class AgentHubComponent implements Component {
 						["←→", "filter"],
 						["↵", "logs"],
 						["x", "kill"],
-						["s", "message"],
+						[messageKey, "steer"],
 						["r", "revive"],
 						["q", "close"],
 					]),

@@ -59,8 +59,12 @@ function agentRow(snap: BackgroundProcessSnapshot, theme: ThemeLike): string {
 	const name = snap.label.split("·")[0].trim() || snap.agentType || snap.id;
 	const parts: string[] = [];
 	if (snap.status === "running") parts.push(elapsed(snap));
-	const tokens = snap.metrics?.tokens;
-	if (tokens) parts.push(`${tokens < 1000 ? tokens : `${(tokens / 1000).toFixed(1)}k`} tok`);
+	const freshTokens = snap.metrics?.freshTokens ?? snap.metrics?.tokens;
+	const cacheReadTokens = snap.metrics?.cacheReadTokens;
+	if (freshTokens) parts.push(`${freshTokens < 1000 ? freshTokens : `${(freshTokens / 1000).toFixed(1)}k`} fresh`);
+	if (cacheReadTokens) {
+		parts.push(`${cacheReadTokens < 1000 ? cacheReadTokens : `${(cacheReadTokens / 1000).toFixed(1)}k`} cached`);
+	}
 	const meta = parts.length > 0 ? theme.fg("dim", ` · ${parts.join(" · ")}`) : "";
 	return `${statusGlyph(snap.status)} ${theme.fg("text", name)}${meta}`;
 }

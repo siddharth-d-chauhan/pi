@@ -76,6 +76,8 @@ export type {
 	ExtensionRuntime,
 	ExtensionShortcut,
 	ExtensionUIContext,
+	ExtensionUICustomDrawerOptions,
+	ExtensionUICustomOptions,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	FindToolCallEvent,

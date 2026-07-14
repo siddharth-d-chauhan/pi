@@ -15,6 +15,12 @@ export class CustomEditor extends Editor {
 	/** Handler for extension-registered shortcuts. Returns true if handled. */
 	public onExtensionShortcut?: (data: string) => boolean;
 	/**
+	 * Handler invoked when the user presses Down arrow with an empty prompt.
+	 * Used by the owner to open contextual background activity without
+	 * changing Down-arrow behavior while the user is editing text.
+	 */
+	public onDownArrowOnEmpty?: () => boolean;
+	/**
 	 * Handler invoked when the user presses Down arrow while the cursor is
 	 * already on the LAST line of the editor (and the buffer is
 	 * non-empty). Lets the owner scroll the chat scrollback DOWN by one
@@ -75,6 +81,16 @@ export class CustomEditor extends Editor {
 				return;
 			}
 			// Fall through to editor handling for delete-char-forward when not empty
+		}
+
+		// Down on an empty prompt may open contextual background activity.
+		if (
+			!this.isShowingAutocomplete() &&
+			this.getText().length === 0 &&
+			this.keybindings.matches(data, "tui.editor.cursorDown") &&
+			this.onDownArrowOnEmpty?.() === true
+		) {
+			return;
 		}
 
 		// Down on the LAST line / Up on the FIRST line of a non-empty editor

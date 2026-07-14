@@ -12,10 +12,11 @@
 import { mkdirSync } from "node:fs";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import type { AgentSession } from "../agent-session.ts";
+import type { AgentSession, SessionStats } from "../agent-session.ts";
 import { getBackgroundProcessRegistry } from "../background-process-registry.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SettingsManager } from "../settings-manager.ts";
+import { formatThinkingSummary, formatToolCallSummary } from "../tool-call-summary.ts";
 import { removeAgentIndexEntry, saveAgentIndexEntry } from "./agent-index.ts";
 import type { AgentDefinition, AgentPermissionMode, AgentSpawnPolicy, AgentToolList } from "./definitions.ts";
 import { canOmitProjectContext, isReadOnlyToolSet } from "./definitions.ts";
@@ -23,8 +24,26 @@ import { type AgentReturn, capReturn } from "./handles.ts";
 import { markAgentIdle, registerRunningAgent, releaseAgent } from "./lifecycle.ts";
 import { agentMemoryFilePath, formatMemorySection, loadAgentMemory } from "./memory.ts";
 import { resolveAgentModel } from "./model-roles.ts";
+import { deliverAgentNotification } from "./notifications.ts";
+import { enforceAgentRunBudget } from "./run-budget.ts";
 import { applyTeamToRouting, getActiveTeam } from "./teams.ts";
 import { type AgentWorktree, createAgentWorktree, finalizeAgentWorktree, isGitRepo } from "./worktree.ts";
+
+function backgroundMetrics(stats: SessionStats): {
+	tokens: number;
+	freshTokens: number;
+	cacheReadTokens: number;
+	costUsd: number;
+	requests: number;
+} {
+	return {
+		tokens: stats.tokens.total,
+		freshTokens: stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite,
+		cacheReadTokens: stats.tokens.cacheRead,
+		costUsd: stats.cost,
+		requests: stats.assistantMessages,
+	};
+}
 
 /** Effective per-spawn tool set after applying allowlist + denylist + spawn policy. */
 export interface EffectiveToolSet {
@@ -85,6 +104,8 @@ export interface SpawnOptions {
 
 export interface SpawnUsage {
 	tokens: number;
+	freshTokens?: number;
+	cacheReadTokens?: number;
 	costUsd: number;
 	requests: number;
 	durationMs: number;
@@ -648,33 +669,24 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 					const text = extractTextSnippet(end.message.content, 160);
 					if (text) registry.appendLog(registryId, text);
 				}
+			} else if (event.type === "message_update") {
+				const update = event.assistantMessageEvent;
+				if (update.type === "thinking_end") {
+					const thinking = formatThinkingSummary(update.content);
+					if (thinking) registry.appendLog(registryId, `thinking: ${thinking}`);
+				}
 			} else if (event.type === "tool_execution_start") {
-				const start = event as unknown as { toolName?: string };
-				if (start.toolName) registry.appendLog(registryId, `↳ ${start.toolName}`);
+				registry.appendLog(registryId, `↳ ${formatToolCallSummary(event.toolName, event.args, childInput.cwd)}`);
 			} else if (event.type === "agent_end") {
 				const stats = child.session.getSessionStats();
 				registry.update(registryId, {
-					metrics: {
-						tokens: stats.tokens.total,
-						costUsd: stats.cost,
-						requests: countAssistantRequests(child.session),
-					},
+					metrics: backgroundMetrics(stats),
 				});
 			}
 		});
 
-		// Turn-cap steering/abort.
-		const turnCount = { value: 0 };
 		const maxTurns = definition.maxTurns ?? 40;
-		const turnUnsub = child.session.subscribe((event) => {
-			if (event.type !== "turn_end") return;
-			turnCount.value += 1;
-			if (turnCount.value === maxTurns) {
-				void child.session.steer("Budget notice: wrap up now and return your final answer.");
-			} else if (turnCount.value > maxTurns) {
-				child.session.abort();
-			}
-		});
+		const disposeRunBudget = enforceAgentRunBudget(child.session, { maxTurns });
 
 		let adopted = false;
 		try {
@@ -714,11 +726,7 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 
 			const stats = child.session.getSessionStats();
 			registry.update(registryId, {
-				metrics: {
-					tokens: stats.tokens.total,
-					costUsd: stats.cost,
-					requests: countAssistantRequests(child.session),
-				},
+				metrics: backgroundMetrics(stats),
 				resultHandle: capped.handle,
 				sessionFile: child.sessionFile,
 			});
@@ -760,6 +768,8 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 				handle: capped.handle,
 				usage: {
 					tokens: stats.tokens.total,
+					freshTokens: stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite,
+					cacheReadTokens: stats.tokens.cacheRead,
 					costUsd: stats.cost,
 					requests: countAssistantRequests(child.session),
 					durationMs: Date.now() - startedAt,
@@ -773,11 +783,7 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			const partial = child.session.getLastAssistantText()?.trim();
 			const stats = child.session.getSessionStats();
 			registry.update(registryId, {
-				metrics: {
-					tokens: stats.tokens.total,
-					costUsd: stats.cost,
-					requests: countAssistantRequests(child.session),
-				},
+				metrics: backgroundMetrics(stats),
 				sessionFile: child.sessionFile,
 			});
 			return {
@@ -787,6 +793,8 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 					: `[spawn failed: ${(err as Error).message}]`,
 				usage: {
 					tokens: stats.tokens.total,
+					freshTokens: stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite,
+					cacheReadTokens: stats.tokens.cacheRead,
 					costUsd: stats.cost,
 					requests: countAssistantRequests(child.session),
 					durationMs: Date.now() - startedAt,
@@ -796,7 +804,7 @@ export async function spawnAgent(opts: SpawnOptions, deps: SpawnDeps): Promise<S
 			};
 		} finally {
 			unsubscribe();
-			turnUnsub();
+			disposeRunBudget();
 			if (!adopted) {
 				child.dispose();
 				releaseAgent(registryId);
@@ -855,26 +863,21 @@ function queueBackgroundNotification(parent: AgentSession, agentType: string, re
 		`${result.inline}${handleLine}\n` +
 		"</task-notification>\n\n" +
 		"Do not poll for this task or duplicate its work. Use this result directly; call `agent_pull` only if the handle is needed.";
-	parent
-		.sendCustomMessage(
-			{
-				customType: "task-notification",
-				content: text,
-				display: true,
-				details: {
-					registryId: result.registryId,
-					agent: agentType,
-					status: result.status,
-					handle: result.handle,
-					usage: result.usage,
-					sessionFile: result.sessionFile,
-				},
-			},
-			{ deliverAs: "nextTurn" },
-		)
-		.catch((err) => {
-			getBackgroundProcessRegistry().appendLog(result.registryId, `[notification error: ${(err as Error).message}]`);
-		});
+	deliverAgentNotification(parent, {
+		customType: "task-notification",
+		content: text,
+		display: true,
+		details: {
+			registryId: result.registryId,
+			agent: agentType,
+			status: result.status,
+			handle: result.handle,
+			usage: result.usage,
+			sessionFile: result.sessionFile,
+		},
+	}).catch((err) => {
+		getBackgroundProcessRegistry().appendLog(result.registryId, `[notification error: ${(err as Error).message}]`);
+	});
 }
 
 function finalizeCancelled(child: CreateChildSessionResult, registryId: string, startedAt: number): SpawnResult {
@@ -884,6 +887,8 @@ function finalizeCancelled(child: CreateChildSessionResult, registryId: string, 
 		inline: "[spawn cancelled]",
 		usage: {
 			tokens: stats.tokens.total,
+			freshTokens: stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite,
+			cacheReadTokens: stats.tokens.cacheRead,
 			costUsd: stats.cost,
 			requests: countAssistantRequests(child.session),
 			durationMs: Date.now() - startedAt,
@@ -963,7 +968,13 @@ function composeChildSystemPrompt(
 	context?: string,
 	permissionMode?: AgentPermissionMode,
 ): string {
-	const parts: string[] = [definition.systemPrompt.trim()];
+	const parts: string[] = [
+		definition.systemPrompt.trim(),
+		"## DELEGATION BOUNDARY\n" +
+			"The user message for this run is your complete goal. Work only inside that goal and its stated scope. " +
+			"Do not expand into adjacent cleanup, architecture, or unrelated defects. Prefer the smallest evidence set and change set that can verify the requested outcome. " +
+			"Conclude as soon as the goal's success criteria are satisfied or a concrete blocker is proven; report out-of-scope observations without investigating them.",
+	];
 	if (context && context.trim().length > 0) {
 		parts.push(`## CONTEXT\n${context.trim()}`);
 	}

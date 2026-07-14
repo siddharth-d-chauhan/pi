@@ -98,15 +98,17 @@ describe("AssistantMessageComponent", () => {
 		expect(updatedLines.some((line) => line.startsWith("reasoning"))).toBe(true);
 	});
 
-	test("uses configured output padding for user messages", () => {
+	test("replaces the padding column with the left rule for user messages", () => {
 		initTheme("dark");
 
+		// The omp-style shell clamps padding to >=1 and draws the rule in that
+		// column, so content never shifts with the configured pad.
 		const paddedComponent = new UserMessageComponent("hello", undefined, 1);
 		const paddedLines = paddedComponent.render(40).map((line) => stripAnsi(line));
-		expect(paddedLines.some((line) => line.startsWith(" hello"))).toBe(true);
+		expect(paddedLines.some((line) => line.startsWith("▎hello"))).toBe(true);
 
 		const unpaddedComponent = new UserMessageComponent("hello", undefined, 0);
 		const unpaddedLines = unpaddedComponent.render(40).map((line) => stripAnsi(line));
-		expect(unpaddedLines.some((line) => line.startsWith("hello"))).toBe(true);
+		expect(unpaddedLines.some((line) => line.startsWith("▎hello"))).toBe(true);
 	});
 });

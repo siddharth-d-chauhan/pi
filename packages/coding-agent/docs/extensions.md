@@ -2490,6 +2490,28 @@ The callback receives:
 
 See [tui.md](tui.md) for the full component API.
 
+#### Bottom Drawer
+
+Pass `drawer` to keep recent chat visible while opening a focused inline surface from the bottom. Any custom component can use it:
+
+```typescript
+const result = await ctx.ui.custom<string | null>(
+  (tui, theme, keybindings, done) => new ActivityComponent({ onClose: done }),
+  { drawer: { height: "40%" } },
+);
+```
+
+`height` accepts terminal rows or a percentage and defaults to `"40%"`. It reserves a minimum height; components with more content can grow beyond it. Unlike overlay mode, a drawer participates in the normal layout and does not cover the chat behind it.
+
+For persistent content directly above the prompt, use the existing widget surface instead of opening a focused drawer:
+
+```typescript
+ctx.ui.setWidget("todo", ["▶ Build activity drawer", "☐ Run PTY checks"]);
+ctx.ui.setWidget("todo", undefined); // remove it
+```
+
+Widgets default to `aboveEditor`. The streaming working row immediately above them is controlled separately with `setWorkingMessage()` and `setWorkingIndicator()`.
+
 #### Overlay Mode (Experimental)
 
 Pass `{ overlay: true }` to render the component as a floating modal on top of existing content, without clearing the screen:

@@ -13,14 +13,18 @@ import {
 	getBackgroundProcessRegistry,
 	resetForTests as resetRegistry,
 } from "../../../src/core/background-process-registry.ts";
+import type { ExtensionContext } from "../../../src/core/extensions/types.ts";
+import { createAgentMessageToolDefinition } from "../../../src/core/tools/agent-message.ts";
 
 class FakeSession {
 	prompts: string[] = [];
 	followUps: string[] = [];
 	reply = "fake reply";
 	disposed = false;
+	agent: { afterToolCall?: unknown } = {};
 	private totalTokens = 0;
 	private listeners = new Set<(event: { type: string }) => void>();
+	private activeTools = ["read", "grep"];
 
 	async prompt(text: string): Promise<void> {
 		this.prompts.push(text);
@@ -37,6 +41,14 @@ class FakeSession {
 	}
 
 	async steer(_text: string): Promise<void> {}
+
+	getActiveToolNames(): string[] {
+		return [...this.activeTools];
+	}
+
+	setActiveToolsByName(names: string[]): void {
+		this.activeTools = [...names];
+	}
 
 	abort(): void {}
 
@@ -100,7 +112,8 @@ describe("agent lifecycle", () => {
 
 	it("queues in the lifecycle while running and drains on idle", async () => {
 		const { id, fake } = registerFake({ sessionFile: "/tmp/fake.jsonl" });
-		const receipt = await deliverToAgent(id, "note this", { from: "main" });
+		const onQueuedReply = vi.fn();
+		const receipt = await deliverToAgent(id, "note this", { from: "main", onQueuedReply });
 		expect(receipt).toEqual({ status: "queued" });
 		// Queued in the lifecycle, NOT the session — a park cannot drop it.
 		expect(fake.followUps).toHaveLength(0);
@@ -112,6 +125,60 @@ describe("agent lifecycle", () => {
 		expect(fake.prompts).toHaveLength(1);
 		expect(fake.prompts[0]).toContain("note this");
 		expect(getAgentLifecycle(id)?.queue).toHaveLength(0);
+		expect(onQueuedReply).toHaveBeenCalledWith({ reply: "fake reply", usage: { tokens: 100, costUsd: 0.001 } });
+	});
+
+	it("returns a drained busy-agent reply visibly and to the parent model", async () => {
+		const { id } = registerFake({ sessionFile: "/tmp/fake.jsonl" });
+		const sendCustomMessage = vi.fn(async () => {});
+		const senderSession = { isStreaming: false, sendCustomMessage } as unknown as AgentSession;
+		const tool = createAgentMessageToolDefinition({ selfLabel: "main", senderSession });
+
+		const result = await tool.execute(
+			"call-1",
+			{ to: id, message: "say hello", wait: true },
+			undefined,
+			undefined,
+			{} as ExtensionContext,
+		);
+
+		expect(result.details).toMatchObject({ receipt: "queued" });
+		markAgentIdle(id);
+		await vi.waitFor(() => expect(sendCustomMessage).toHaveBeenCalledOnce());
+		expect(sendCustomMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				customType: "agent-message",
+				display: true,
+				content: expect.stringContaining("fake reply"),
+			}),
+			{ triggerTurn: true },
+		);
+	});
+
+	it("shows an explicit agent input request in the main transcript without auto-running main", async () => {
+		const registry = getBackgroundProcessRegistry();
+		const id = registry.register({ kind: "subagent", label: "reviewer", agentType: "reviewer" });
+		const sendCustomMessage = vi.fn(async () => {});
+		const parentSession = { isStreaming: false, sendCustomMessage } as unknown as AgentSession;
+		const tool = createAgentMessageToolDefinition({
+			selfLabel: `reviewer(${id})`,
+			selfRegistryId: id,
+			parentSession,
+		});
+
+		await tool.execute(
+			"call-question",
+			{ to: "main", message: "Which deployment region should I use?", requiresInput: true },
+			undefined,
+			undefined,
+			{} as ExtensionContext,
+		);
+
+		expect(registry.get(id)?.inputRequest).toBe("Which deployment region should I use?");
+		expect(sendCustomMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ customType: "agent-question", display: true }),
+			{ triggerTurn: false },
+		);
 	});
 
 	it("parks idle agents after the TTL and revives on delivery", async () => {

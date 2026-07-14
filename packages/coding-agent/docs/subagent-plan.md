@@ -75,8 +75,8 @@ Implemented and verified:
   slot; synchronous launches still wait for capacity.
 - ✅ Result usage trailers include the real background registry id (`agentId: bg-...`) rather
   than a placeholder.
-- ✅ Background completion notification injection via a queued `<task-notification>` custom
-  message delivered on the parent session's next turn.
+- ✅ Background completion notification injection via a visible `<task-notification>` custom
+  message that triggers the idle parent immediately or follows up an active parent turn.
 - ✅ TUI background surfaces covered by headless render regressions: below-editor status
   widget log preview, log-panel metrics/result handle display, and selected-task kill.
 - ✅ Focused agent/regression suite clean locally; `npm run check` clean.
@@ -286,9 +286,9 @@ allowlist/denylist filtering.
 - `execute`: resolve definitions; sync tasks → `Promise.all(spawnAgent…)` bounded by
   semaphore; background tasks → fire, return normal task details with inline
   `Background agent launched: <registryId>` text. Mixed batches allowed.
-- Background completion injection: on child completion, `pi`-side bridge uses
-  `AgentSession.sendCustomMessage(..., { deliverAs: "nextTurn" })` to inject a
-  `<task-notification>` block (task id, status, inline result, handle) as next-turn context.
+- Background completion injection: on child completion, `pi` injects a visible
+  `<task-notification>` block (task id, status, inline result, handle) and starts a parent turn
+  immediately, or queues it as a follow-up when the parent is already streaming.
   Include "do not poll; do not duplicate the agent's work" guidance.
 - **Dynamic discovery**: the `agent` tool description includes only the spawnable bundled
   agents plus up to `agents.maxInlineDefinitions` project/user agents (default 12). Larger

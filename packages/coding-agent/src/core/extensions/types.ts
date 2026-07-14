@@ -38,6 +38,7 @@ import type {
 	KeyId,
 	OverlayHandle,
 	OverlayOptions,
+	SizeValue,
 	TUI,
 } from "@earendil-works/pi-tui";
 import type { Static, TSchema } from "typebox";
@@ -124,6 +125,21 @@ export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: Keybindi
  * UI context for extensions to request interactive UI.
  * Each mode (interactive, RPC, print) provides its own implementation.
  */
+export interface ExtensionUICustomDrawerOptions {
+	/** Drawer height in terminal rows or as a percentage of terminal height. */
+	height?: SizeValue;
+}
+
+export interface ExtensionUICustomOptions {
+	overlay?: boolean;
+	/** Render inline at the bottom with at least this drawer height. */
+	drawer?: ExtensionUICustomDrawerOptions;
+	/** Overlay positioning/sizing options. Can be static or a function for dynamic updates. */
+	overlayOptions?: OverlayOptions | (() => OverlayOptions);
+	/** Called with the overlay handle after the overlay is shown. Use to control visibility. */
+	onHandle?: (handle: OverlayHandle) => void;
+}
+
 export interface ExtensionUIContext {
 	/** Show a selector and return the user's choice. */
 	select(title: string, options: string[], opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
@@ -196,13 +212,7 @@ export interface ExtensionUIContext {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: {
-			overlay?: boolean;
-			/** Overlay positioning/sizing options. Can be static or a function for dynamic updates. */
-			overlayOptions?: OverlayOptions | (() => OverlayOptions);
-			/** Called with the overlay handle after the overlay is shown. Use to control visibility. */
-			onHandle?: (handle: OverlayHandle) => void;
-		},
+		options?: ExtensionUICustomOptions,
 	): Promise<T>;
 
 	/** Paste text into the editor, triggering paste handling (collapse for large content). */

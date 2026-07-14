@@ -25,6 +25,9 @@ export type BackgroundProcessStatus = "running" | "idle" | "parked" | "completed
 
 export interface BackgroundProcessMetrics {
 	tokens?: number;
+	/** Non-cache traffic: input + output + cache writes. */
+	freshTokens?: number;
+	cacheReadTokens?: number;
 	costUsd?: number;
 	requests?: number;
 	contextPct?: number;
@@ -44,6 +47,8 @@ export interface BackgroundProcess {
 	sessionFile?: string;
 	resultHandle?: string;
 	parentId?: string;
+	/** Explicit question waiting for a user/parent reply. */
+	inputRequest?: string;
 	/** Grouping key for the UI (e.g. a chain name groups its stage agents). */
 	group?: string;
 	onKill?: () => void;
@@ -68,6 +73,7 @@ export interface BackgroundProcessSnapshot {
 	sessionFile?: string;
 	resultHandle?: string;
 	parentId?: string;
+	inputRequest?: string;
 	group?: string;
 	canKill: boolean;
 	canSteer: boolean;
@@ -149,6 +155,7 @@ class BackgroundProcessRegistry {
 			sessionFile: init.sessionFile,
 			resultHandle: init.resultHandle,
 			parentId: init.parentId,
+			inputRequest: init.inputRequest,
 			group: init.group,
 			onKill: init.onKill,
 			onSteer: init.onSteer,
@@ -161,7 +168,7 @@ class BackgroundProcessRegistry {
 
 	update(
 		id: string,
-		patch: Partial<Pick<BackgroundProcess, "metrics" | "sessionFile" | "resultHandle" | "summary">>,
+		patch: Partial<Pick<BackgroundProcess, "metrics" | "sessionFile" | "resultHandle" | "summary" | "inputRequest">>,
 	): void {
 		const entry = this.#entries.get(id);
 		if (!entry) return;
@@ -169,6 +176,7 @@ class BackgroundProcessRegistry {
 		if ("sessionFile" in patch) entry.sessionFile = patch.sessionFile;
 		if ("resultHandle" in patch) entry.resultHandle = patch.resultHandle;
 		if ("summary" in patch) entry.summary = patch.summary;
+		if ("inputRequest" in patch) entry.inputRequest = patch.inputRequest;
 		this.#emit({ type: "update", id });
 	}
 
@@ -244,6 +252,7 @@ class BackgroundProcessRegistry {
 				sessionFile: e.sessionFile,
 				resultHandle: e.resultHandle,
 				parentId: e.parentId,
+				inputRequest: e.inputRequest,
 				group: e.group,
 				canKill: e.onKill !== undefined,
 				canSteer: e.onSteer !== undefined,

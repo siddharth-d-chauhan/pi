@@ -29,10 +29,10 @@ Both use the same structured summary format and track file operations cumulative
 Auto-compaction triggers when:
 
 ```
-contextTokens > contextWindow - reserveTokens
+contextTokens > min(contextWindow - reserveTokens, maxContextTokens)
 ```
 
-By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
+By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response. `maxContextTokens` is optional; when unset, the original window-minus-reserve threshold is unchanged.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
 

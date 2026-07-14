@@ -5,7 +5,7 @@
  * running agents get the message queued as a follow-up, idle agents are
  * woken with a real turn (and their reply returned), parked agents are
  * revived from their session file first. Messages to "main" are injected
- * into the parent conversation as a next-turn custom message.
+ * visibly and trigger/follow up the parent conversation.
  *
  * Completed agents stay addressable — prefer messaging an existing agent
  * that already has context over spawning a fresh one.
@@ -15,7 +15,14 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import type { AgentSession } from "../agent-session.ts";
-import { deliverToAgent, getAgentLifecycle, listLifecycleAgents } from "../agents/lifecycle.ts";
+import {
+	deliverToAgent,
+	getAgentLifecycle,
+	listLifecycleAgents,
+	type QueuedDeliveryOutcome,
+} from "../agents/lifecycle.ts";
+import { deliverAgentNotification } from "../agents/notifications.ts";
+import { getBackgroundProcessRegistry } from "../background-process-registry.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -29,6 +36,12 @@ const agentMessageSchema = Type.Object({
 		Type.Boolean({
 			description:
 				"Wait for the recipient's reply (idle/parked agents only — busy agents always queue). Default true.",
+		}),
+	),
+	requiresInput: Type.Optional(
+		Type.Boolean({
+			description:
+				"Set true only when messaging main because work cannot continue without a user/parent answer. The question is shown prominently in the main transcript.",
 		}),
 	),
 });
@@ -47,11 +60,33 @@ export interface CreateAgentMessageToolOptions {
 	selfLabel: string;
 	/** The spawner's session, when this instance belongs to a child agent. */
 	parentSession?: AgentSession;
+	/** Registry id of this child, used to expose an explicit input request. */
+	selfRegistryId?: string;
+	/** The session invoking this tool, used to return replies queued to busy agents. */
+	senderSession?: AgentSession;
 }
 
 function gistOf(text: string): string {
 	const flat = text.replace(/\s+/g, " ").trim();
 	return flat.length > 40 ? `${flat.slice(0, 39)}…` : flat;
+}
+
+async function deliverQueuedReply(
+	session: AgentSession,
+	registryId: string,
+	from: string,
+	outcome: QueuedDeliveryOutcome,
+): Promise<void> {
+	const failed = "failed" in outcome;
+	const body = failed ? `[queued message failed: ${outcome.failed}]` : outcome.reply || "(agent replied with no text)";
+	await deliverAgentNotification(session, {
+		customType: "agent-message",
+		content:
+			`<agent-message from="${from}" in-reply-to="queued">\n${body}\n</agent-message>\n\n` +
+			"The background agent processed the queued message. Use this reply directly and continue the current task.",
+		display: true,
+		details: { from, registryId, status: failed ? "failed" : "replied" },
+	});
 }
 
 export function createAgentMessageToolDefinition(
@@ -75,16 +110,22 @@ export function createAgentMessageToolDefinition(
 				if (!opts.parentSession) {
 					throw new Error('You ARE the main session — use a subagent registry id (bg-…) as "to".');
 				}
-				await opts.parentSession.sendCustomMessage(
+				if (args.requiresInput && opts.selfRegistryId) {
+					getBackgroundProcessRegistry().update(opts.selfRegistryId, { inputRequest: args.message });
+				}
+				await deliverAgentNotification(
+					opts.parentSession,
 					{
-						customType: "agent-message",
+						customType: args.requiresInput ? "agent-question" : "agent-message",
 						content:
 							`<agent-message from="${opts.selfLabel}">\n${args.message}\n</agent-message>\n\n` +
-							"Reply (if needed) with the agent_message tool.",
+							(args.requiresInput
+								? `The agent is waiting for input. Ask the user if necessary, then answer with agent_message to ${opts.selfRegistryId}.`
+								: "Reply (if needed) with the agent_message tool."),
 						display: true,
-						details: { from: opts.selfLabel },
+						details: { from: opts.selfLabel, registryId: opts.selfRegistryId, requiresInput: args.requiresInput },
 					},
-					{ deliverAs: "nextTurn" },
+					{ triggerWhenIdle: !args.requiresInput },
 				);
 				return {
 					content: [{ type: "text", text: "Message queued for the parent session's next turn." }],
@@ -92,16 +133,22 @@ export function createAgentMessageToolDefinition(
 				};
 			}
 
-			if (!getAgentLifecycle(to)) {
+			const target = getAgentLifecycle(to);
+			if (!target) {
 				const known = listLifecycleAgents()
 					.map((entry) => `${entry.registryId} (${entry.agentType}, ${entry.state})`)
 					.join(", ");
 				throw new Error(`Unknown agent "${to}". Known agents: ${known.length > 0 ? known : "none"}.`);
 			}
 
+			getBackgroundProcessRegistry().update(to, { inputRequest: undefined });
+			const senderSession = opts.senderSession;
 			const receipt = await deliverToAgent(to, args.message, {
 				from: opts.selfLabel,
 				awaitReply: args.wait !== false,
+				onQueuedReply: senderSession
+					? (outcome) => deliverQueuedReply(senderSession, to, `${target.agentType}(${to})`, outcome)
+					: undefined,
 			});
 			switch (receipt.status) {
 				case "replied":

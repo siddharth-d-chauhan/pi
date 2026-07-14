@@ -7,13 +7,15 @@
  *   context message. Fail-open: KP down → nothing injected, pi unaffected.
  * - Tracks the active WorkFrame/epoch by observing pi_context_task /
  *   pi_context_shift tool results (the model calls those tools directly).
+ * - Keeps only the active task/shift packet in provider context; superseded
+ *   packet payloads remain intact in session persistence for audit/navigation.
  * - /context shows the current WorkFrame, epoch, and boot packet summary.
  *
  * Everything dynamic is suffix-only (KV-cache invariant 4.4/4.8 of the plan).
  */
 
 import { createHash } from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ContextEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { copper, heatLine } from "./lib/card.ts";
 import { rolloutFlags } from "./lib/flags.ts";
@@ -87,11 +89,15 @@ interface BrokerState {
 	pendingArgs?: Map<string, { command?: string; files: string[]; cwd?: string }>;
 	/** Epoch-scoped fingerprints of risky actions whose advisories were already surfaced (PI-12). */
 	acknowledgedActions?: Set<string>;
+	/** Non-blocking advisories queued for the next model step. */
+	actionAdvisoryBlocks?: string[];
+	actionAdvisoriesShown?: boolean;
 	lastSpawn?: { at: number; items: number; child: string };
 	workFrameId?: string;
 	epoch?: number;
 	lastPacketId?: string;
 	kpDown?: string;
+	lastEpochCompaction?: { superseded: number; charsRemoved: number; activeEpoch: number };
 }
 
 const state: BrokerState = {};
@@ -109,23 +115,94 @@ function parseCoverage(content: Array<{ type: string; text?: string }>): Coverag
 	return undefined;
 }
 
-function parsePacket(content: Array<{ type: string; text?: string }>): ContextPacket | undefined {
+function readPacket(content: Array<{ type: string; text?: string }>): ContextPacket | undefined {
 	for (const block of content) {
 		if (block.type !== "text" || !block.text) continue;
 		try {
 			const parsed = JSON.parse(block.text) as ContextPacket;
-			if (parsed && typeof parsed === "object" && "packet_id" in parsed) {
-				// Cross-channel dedup: every fact this broker injects is recorded
-				// in the shared registry so other channels (area drift, recall)
-				// never deliver the same fact twice in one session.
-				markDelivered((parsed.candidates ?? []).map((c) => c.memory?.fact_id));
-				return parsed;
-			}
+			if (parsed && typeof parsed === "object" && "packet_id" in parsed) return parsed;
 		} catch {
 			// not JSON — skip
 		}
 	}
 	return undefined;
+}
+
+function parsePacket(content: Array<{ type: string; text?: string }>): ContextPacket | undefined {
+	const parsed = readPacket(content);
+	if (!parsed) return undefined;
+	// Cross-channel dedup: every fact this broker injects is recorded in the
+	// shared registry so other channels never deliver it twice in one session.
+	markDelivered((parsed.candidates ?? []).map((candidate) => candidate.memory?.fact_id));
+	return parsed;
+}
+
+export interface KnowledgeContextEpochResult {
+	messages: ContextEvent["messages"];
+	superseded: number;
+	charsRemoved: number;
+	activeEpoch?: number;
+}
+
+/**
+ * Keep only the newest task/shift knowledge packet active in provider context.
+ * Earlier tool results stay structurally paired with their tool calls, but their
+ * large, stale JSON payload is replaced transiently. Session persistence remains
+ * untouched, so branch navigation and audits still retain the original packet.
+ */
+export function compactKnowledgeContextEpochs(
+	messages: ContextEvent["messages"],
+	current?: { workFrameId?: string; epoch?: number },
+): KnowledgeContextEpochResult {
+	const packetMessages: Array<{ index: number; packet: ContextPacket; chars: number }> = [];
+	for (const [index, message] of messages.entries()) {
+		if (
+			message.role !== "toolResult" ||
+			(message.toolName !== "pi_context_task" && message.toolName !== "pi_context_shift")
+		) {
+			continue;
+		}
+		const textContent = message.content.filter((block) => block.type === "text");
+		const packet = readPacket(textContent);
+		if (!packet) continue;
+		packetMessages.push({
+			index,
+			packet,
+			chars: textContent.reduce((total, block) => total + block.text.length, 0),
+		});
+	}
+	if (packetMessages.length < 2) return { messages, superseded: 0, charsRemoved: 0 };
+
+	const active =
+		[...packetMessages]
+			.reverse()
+			.find(
+				(entry) =>
+					(!current?.workFrameId || entry.packet.work_frame_id === current.workFrameId) &&
+					(current?.epoch === undefined || (entry.packet.epoch ?? 1) === current.epoch),
+			) ?? packetMessages.at(-1)!;
+	const supersededIndices = new Map(
+		packetMessages.filter((entry) => entry.index !== active.index).map((entry) => [entry.index, entry]),
+	);
+	let charsRemoved = 0;
+	const compacted = messages.map((message, index) => {
+		const superseded = supersededIndices.get(index);
+		if (!superseded || message.role !== "toolResult") return message;
+		const oldEpoch = superseded.packet.epoch ?? 1;
+		const activeEpoch = active.packet.epoch ?? 1;
+		const replacement =
+			`[Superseded knowledge context omitted: epoch ${oldEpoch}` +
+			`${superseded.packet.work_frame_id ? `, WorkFrame ${superseded.packet.work_frame_id}` : ""}; ` +
+			`use active epoch ${activeEpoch}${active.packet.work_frame_id ? `, WorkFrame ${active.packet.work_frame_id}` : ""}.]`;
+		charsRemoved += Math.max(0, superseded.chars - replacement.length);
+		return { ...message, content: [{ type: "text" as const, text: replacement }] };
+	});
+	return {
+		messages: compacted,
+		superseded: supersededIndices.size,
+		charsRemoved,
+		activeEpoch: active.packet.epoch ?? 1,
+	};
 }
 
 /** Role-grouped item rendering: must_follow leads as hard rules; advisory is
@@ -264,6 +341,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		state.lastEpochCompaction = undefined;
 		const shared = (globalThis as Record<string, unknown>).__pi_kp__ as KpShared | undefined;
 		if (!shared) {
 			state.kpDown = "knowledge.ts not loaded";
@@ -344,17 +422,38 @@ export default function (pi: ExtensionAPI) {
 	// debug block. Boot memory is a persistent early message instead (above),
 	// so the conversation prefix — and the KV cache — stays intact turn over turn.
 	pi.on("context", async (event) => {
-		if (!state.debugBlock) return;
-		const messages = event?.messages;
+		const epochResult = compactKnowledgeContextEpochs(event.messages, {
+			workFrameId: state.workFrameId,
+			epoch: state.epoch,
+		});
+		const messages = epochResult.messages;
 		if (!Array.isArray(messages)) return;
-		// PI-13: the debug block is one-shot — mark it shown so the next turn_end clears it.
-		state.debugShown = true;
+		if (epochResult.superseded > 0 && epochResult.activeEpoch !== undefined) {
+			state.lastEpochCompaction = {
+				superseded: epochResult.superseded,
+				charsRemoved: epochResult.charsRemoved,
+				activeEpoch: epochResult.activeEpoch,
+			};
+		}
+		const transientBlocks: string[] = [];
+		if (state.debugBlock) {
+			// PI-13: the debug block is one-shot — mark it shown so the next turn_end clears it.
+			state.debugShown = true;
+			transientBlocks.push(state.debugBlock);
+		}
+		if (state.actionAdvisoryBlocks?.length) {
+			state.actionAdvisoriesShown = true;
+			transientBlocks.push(...state.actionAdvisoryBlocks);
+		}
+		if (transientBlocks.length === 0) {
+			return epochResult.superseded > 0 ? { messages } : undefined;
+		}
 		return {
 			messages: [
 				...messages,
 				{
 					role: "user" as const,
-					content: [{ type: "text" as const, text: state.debugBlock }],
+					content: [{ type: "text" as const, text: transientBlocks.join("\n\n") }],
 					timestamp: Date.now(),
 				},
 			],
@@ -402,6 +501,8 @@ export default function (pi: ExtensionAPI) {
 				state.debugBlock = undefined;
 				state.debugShown = false;
 				state.lastDebug = undefined;
+				state.actionAdvisoryBlocks = undefined;
+				state.actionAdvisoriesShown = false;
 				// Advisories must re-surface for the new direction (PI-12).
 				state.acknowledgedActions = undefined;
 			}
@@ -540,9 +641,9 @@ export default function (pi: ExtensionAPI) {
 
 	// PI-11/12: risky tool calls consult BOTH the deterministic gate
 	// (pi.pre_action_gate — hard-blocks on enforce_pattern rules, every time)
-	// AND the advisory phase (pi.context_before_action). Advisories are surfaced
-	// by blocking the action ONCE per epoch-scoped fingerprint; the acknowledged
-	// retry then proceeds. Fail-open: gate/advisory trouble never blocks work.
+	// AND the advisory phase (pi.context_before_action). Hard rules can block;
+	// advisories are queued once for the next model step without failing and
+	// retrying the current tool call. Fail-open: gate/advisory trouble never blocks work.
 	pi.on("tool_call", async (event) => {
 		const risky = event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash";
 		if (!risky) return;
@@ -577,8 +678,7 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			// 2) Advisory phase — surface scoped rules/pitfalls once per action
-			// CLASS (tool + files), not per command variant: retrying a failed
-			// bash command with a tweak must not re-trigger the advisory block.
+			// CLASS (tool + files), not per command variant.
 			const fingerprint = `${state.epoch ?? 1}|${event.toolName}|${files.join(",")}`;
 			if (state.acknowledgedActions?.has(fingerprint)) return; // already surfaced — let the retry through
 			const advisory = await callBroker(
@@ -592,12 +692,13 @@ export default function (pi: ExtensionAPI) {
 			);
 			const advisoryBlock = renderPhaseBlock(
 				advisory ?? {},
-				"Advisories for this action. Review them, then repeat the action to proceed (it will not be blocked again):",
+				"Advisories retrieved for a recent action. Apply them to subsequent work and correct the result if needed:",
 			);
 			if (advisoryBlock) {
 				state.acknowledgedActions ??= new Set();
 				state.acknowledgedActions.add(fingerprint);
-				return { block: true, reason: advisoryBlock };
+				state.actionAdvisoryBlocks = [...(state.actionAdvisoryBlocks ?? []), advisoryBlock].slice(-2);
+				state.actionAdvisoriesShown = false;
 			}
 		} catch {
 			// fail-open
@@ -645,6 +746,10 @@ export default function (pi: ExtensionAPI) {
 			state.debugBlock = undefined;
 			state.debugShown = false;
 		}
+		if (state.actionAdvisoriesShown) {
+			state.actionAdvisoryBlocks = undefined;
+			state.actionAdvisoriesShown = false;
+		}
 	});
 
 	pi.registerCommand("memory", {
@@ -669,6 +774,11 @@ export default function (pi: ExtensionAPI) {
 			}
 			lines.push(`boot memory: ${state.bootPacket?.candidates?.length ?? 0} item(s)`);
 			if (state.workFrameId) lines.push(`workframe: ${state.workFrameId} · epoch ${state.epoch ?? 1}`);
+			if (state.lastEpochCompaction) {
+				lines.push(
+					`context epochs: ${state.lastEpochCompaction.superseded} superseded packet(s) omitted · ${state.lastEpochCompaction.charsRemoved} chars avoided in current requests`,
+				);
+			}
 			if (state.lastDebug) lines.push(`last debug lookup: ${state.lastDebug.items} item(s)`);
 			if (state.lastSpawn)
 				lines.push(`last spawn packet: ${state.lastSpawn.items} item(s) (${state.lastSpawn.child})`);
@@ -683,6 +793,11 @@ export default function (pi: ExtensionAPI) {
 			const lines: string[] = [];
 			if (state.kpDown) lines.push(`broker: DOWN (${state.kpDown}) — pi runs without injected memory`);
 			if (state.workFrameId) lines.push(`workframe: ${state.workFrameId} · epoch ${state.epoch ?? 1}`);
+			if (state.lastEpochCompaction) {
+				lines.push(
+					`context epochs: ${state.lastEpochCompaction.superseded} superseded packet(s) omitted · ${state.lastEpochCompaction.charsRemoved} chars avoided in current requests`,
+				);
+			}
 			if (state.lastPacketId) lines.push(`last packet: ${state.lastPacketId}`);
 			const bootCount = state.bootPacket?.candidates?.length ?? 0;
 			lines.push(

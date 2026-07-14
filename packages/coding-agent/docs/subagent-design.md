@@ -95,7 +95,8 @@ agents too (opencode) so users can override their models.
   mistake).
 - Sync tasks stream in the parent turn; a running foreground task can be **promoted to
   background** with one keypress (opencode/Claude Code). Background completion is injected as
-  a `<task-notification>` user-role message between turns.
+  a visible `<task-notification>` user-role message and triggers an immediate parent turn (or
+  a follow-up when the parent is already streaming).
 - **Recursion guards**: `spawns` allowlist per agent (default none), depth cap
   (`agents.maxDepth`, default 2) carried on the child session options, self-spawn ban by type.
   Plan-mode parents spawn read-only children with spawns cleared (delegate.ts, both-sides

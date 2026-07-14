@@ -5,7 +5,7 @@
  * the current plan renders as a persistent widget above the editor:
  *
  *   ☑ read the failing test
- *   ▶ fix the timeout handling
+ *   ● fix the timeout handling
  *   ☐ run the suite
  *
  * Plan state derives from the session: on session start and branch
@@ -93,7 +93,7 @@ type ThemeLike = {
 
 const STATUS_MARKER: Record<PlanTaskStatus, string> = {
 	pending: "☐",
-	in_progress: "▶",
+	in_progress: "●",
 	completed: "☑",
 };
 
@@ -111,6 +111,9 @@ function formatTaskLine(task: PlanTask, theme: ThemeLike): string {
 
 /** Show every task while the plan is at most this long; collapse completed beyond it. */
 const COLLAPSE_THRESHOLD = 6;
+const RECONCILE_AFTER_MUTATIONS = 8;
+const MAX_RECONCILE_NUDGES = 2;
+const MUTATION_TOOLS = new Set(["apply_patch", "edit", "write"]);
 
 function planLines(tasks: PlanTask[], theme: ThemeLike): string[] {
 	const lines: string[] = [];
@@ -178,6 +181,13 @@ function restoreFromBranch(entries: Array<{ type: string; message?: unknown }>):
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
+	let mutationsSincePlanUpdate = 0;
+	let reconcileNudges = 0;
+	const resetReconciliation = (): void => {
+		mutationsSincePlanUpdate = 0;
+		reconcileNudges = 0;
+	};
+
 	pi.registerTool({
 		name: "update_plan",
 		label: "plan",
@@ -191,6 +201,7 @@ export default function (pi: ExtensionAPI) {
 			validatePlan(tasks);
 			const next = tasks.map((task) => ({ id: task.id, subject: task.subject, status: task.status }));
 			setPlanState(next);
+			resetReconciliation();
 			const completedCount = next.filter((task) => task.status === "completed").length;
 			const inProgress = next.find((task) => task.status === "in_progress");
 			let text = next.length === 0 ? "Plan cleared" : `Plan updated: ${completedCount}/${next.length} completed`;
@@ -227,9 +238,44 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		resetReconciliation();
 		restore(ctx);
 		if (!ctx.hasUI) return;
 		ctx.ui.setWidget("plan", (tui, theme) => new PlanWidget(tui, theme));
 	});
 	pi.on("session_tree", async (_event, ctx) => restore(ctx));
+	pi.on("agent_start", async () => resetReconciliation());
+	pi.on("tool_result", async (event) => {
+		if (event.toolName === "update_plan") {
+			resetReconciliation();
+			return;
+		}
+		if (!event.isError && MUTATION_TOOLS.has(event.toolName)) mutationsSincePlanUpdate += 1;
+	});
+	pi.on("context", async (event) => {
+		if (
+			mutationsSincePlanUpdate < RECONCILE_AFTER_MUTATIONS ||
+			reconcileNudges >= MAX_RECONCILE_NUDGES ||
+			!planTasks?.some((task) => task.status !== "completed")
+		) {
+			return;
+		}
+		mutationsSincePlanUpdate = 0;
+		reconcileNudges += 1;
+		return {
+			messages: [
+				...event.messages,
+				{
+					role: "user" as const,
+					content: [
+						{
+							type: "text" as const,
+							text: "Plan checkpoint: implementation has advanced since the checklist was last touched. Reconcile update_plan with verified reality before doing more broad work; do not mark untested work completed.",
+						},
+					],
+					timestamp: Date.now(),
+				},
+			],
+		};
+	});
 }

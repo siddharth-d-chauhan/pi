@@ -27,7 +27,9 @@ const agentTaskSchema = Type.Object({
 	/** Agent type to invoke (case-insensitive; matches the agent `name`). */
 	agent: Type.String({ description: "Name of the agent type to spawn." }),
 	/** Prompt to send to the child. */
-	prompt: Type.String({ description: "Goal or question to delegate to the agent." }),
+	prompt: Type.String({
+		description: "One bounded goal to delegate, including its success criteria and relevant scope limits.",
+	}),
 	/** Optional model override (role alias, provider/model, or plain model id). */
 	model: Type.Optional(Type.String({ description: "Optional model override." })),
 	/** Optional reasoning-effort (thinking level) override for this task.
@@ -68,7 +70,14 @@ export interface AgentTaskResult {
 	inline: string;
 	handle?: string;
 	registryId: string;
-	usage: { tokens: number; costUsd: number; requests: number; durationMs: number };
+	usage: {
+		tokens: number;
+		freshTokens?: number;
+		cacheReadTokens?: number;
+		costUsd: number;
+		requests: number;
+		durationMs: number;
+	};
 	sessionFile?: string;
 	/** Latest activity line (tool name / text snippet) while running. */
 	activity?: string;
@@ -124,6 +133,7 @@ function defaultCreateChildSessionFactory(_ctx: AgentToolContext) {
 						createAgentMessageToolDefinition({
 							selfLabel: `${input.subagentType}(${input.selfRegistryId})`,
 							parentSession: input.parentSession,
+							selfRegistryId: input.selfRegistryId,
 						}),
 					]
 				: [];
@@ -226,7 +236,11 @@ function statusGlyph(task: AgentTaskResult, theme: Theme): string {
 
 function formatMetrics(task: AgentTaskResult, theme: Theme): string {
 	const parts: string[] = [];
-	if (task.usage.tokens > 0) parts.push(`${formatTokens(task.usage.tokens)} tok`);
+	if (task.usage.freshTokens) parts.push(`${formatTokens(task.usage.freshTokens)} fresh`);
+	if (task.usage.cacheReadTokens) parts.push(`${formatTokens(task.usage.cacheReadTokens)} cached`);
+	if (!task.usage.freshTokens && !task.usage.cacheReadTokens && task.usage.tokens > 0) {
+		parts.push(`${formatTokens(task.usage.tokens)} tok`);
+	}
 	if (task.usage.costUsd > 0) parts.push(`$${task.usage.costUsd.toFixed(4)}`);
 	if (task.usage.durationMs > 0) parts.push(formatElapsed(task.usage.durationMs));
 	return parts.length > 0 ? theme.fg("dim", ` · ${parts.join(" · ")}`) : "";
@@ -504,6 +518,8 @@ export function createAgentToolDefinition(
 							if (tail) row.activity = sanitizeLogLine(tail);
 							if (entry.metrics) {
 								row.usage.tokens = entry.metrics.tokens ?? row.usage.tokens;
+								row.usage.freshTokens = entry.metrics.freshTokens ?? row.usage.freshTokens;
+								row.usage.cacheReadTokens = entry.metrics.cacheReadTokens ?? row.usage.cacheReadTokens;
 								row.usage.costUsd = entry.metrics.costUsd ?? row.usage.costUsd;
 								row.usage.requests = entry.metrics.requests ?? row.usage.requests;
 							}
@@ -662,6 +678,7 @@ export function registerColdAgents(options: CreateAgentToolOptions): number {
 			kind: "subagent",
 			label: entry.label,
 			agentType: entry.agentType,
+			parentId: options.parentSession.sessionId,
 			sessionFile: entry.sessionFile,
 			status: "parked",
 			onKill: () => {

@@ -86,7 +86,7 @@ test("optimizer pure logic: canonicalize, distill, recurrence, trend", () => {
 	show("version trend", JSON.stringify(trend, null, 2));
 });
 
-test("optimizer command: journal -> distill -> apply -> next loop pre-loaded", async () => {
+test("optimizer command: journal -> distill -> stage, with direct apply disabled", async () => {
 	const cwd = mkdtempSync(`${tmpdir()}/loop-opt-`);
 	const sent: Array<{ customType: string; content: string; details?: Record<string, unknown> }> = [];
 	let settled: (() => Promise<void>) | undefined;
@@ -94,6 +94,7 @@ test("optimizer command: journal -> distill -> apply -> next loop pre-loaded", a
 	const pi = {
 		registerTool() {},
 		registerMessageRenderer() {},
+		registerShortcut() {},
 		registerCommand(_n: string, d: { handler: (a: string, c: unknown) => Promise<void> }) {
 			cmd = d.handler;
 		},
@@ -105,7 +106,12 @@ test("optimizer command: journal -> distill -> apply -> next loop pre-loaded", a
 		},
 	};
 	const notes: string[] = [];
-	const ctx = { cwd, ui: { notify: (t: string, l: string) => notes.push(`[${l}] ${t}`) } };
+	const ctx = {
+		cwd,
+		model: undefined,
+		sessionManager: { getSessionId: () => "test-session" },
+		ui: { notify: (t: string, l: string) => notes.push(`[${l}] ${t}`) },
+	};
 	const registry = getBackgroundProcessRegistry();
 	const lastOf = (type: string) => [...sent].reverse().find((m) => m.customType === type);
 
@@ -136,25 +142,42 @@ test("optimizer command: journal -> distill -> apply -> next loop pre-loaded", a
 	expect((panel?.details?.proposals as Array<{ cls: string }>)[0].cls).toBe("criteria");
 	expect(existsSyncSafe(`${cwd}/.pi/loops/_optimizer/baseline-steps.json`)).toBe(false);
 
-	// 2. optimize apply -> promotes into base v2
+	// 2. Direct observational apply is no longer allowed.
 	await cmd("optimize apply", ctx);
-	expect(notes.some((n) => n.includes("promoted 1 step(s) into base prompt v2"))).toBe(true);
-	const baseline = JSON.parse(readFileSync(`${cwd}/.pi/loops/_optimizer/baseline-steps.json`, "utf-8"));
-	expect(baseline).toHaveLength(1);
-	expect(baseline[0].version).toBe(2);
-	expect(baseline[0].text).not.toContain("(learned:");
+	expect(notes.some((n) => n.includes("direct apply is disabled"))).toBe(true);
+	expect(existsSyncSafe(`${cwd}/.pi/loops/_optimizer/baseline-steps.json`)).toBe(false);
 
-	// 3. a NEW loop now starts pre-loaded with the standing lesson from round 1
-	await cmd("ship-thing rounds=4 orchestrate review=off criteria=off", ctx);
-	await settled?.();
-	await new Promise((r) => setTimeout(r, 25));
-	const round1 = lastOf("loop-round");
-	show("new loop round-1 prompt (pre-loaded)", round1?.content);
-	expect(round1?.content).toContain("STANDING LESSONS (v2)");
-	expect(round1?.content).toContain("PASTE its real output");
-	// pre-loaded from round 1, before any failure in THIS run
-	expect(round1?.content).not.toContain("LEARNED THIS RUN");
-	registry.kill(registry.list().find((e) => e.label.includes("ship-thing"))?.id as string);
+	// 3. A frozen task set is required before a candidate can be staged.
+	const tasks = ["validation", "held_out", "replay", "ood"].map((split) => ({
+		taskId: `task-${split}`,
+		goal: split,
+		split,
+		fixtureDir: `${cwd}/fixture`,
+		command: ["true"],
+		hardGates: ["verify"],
+	}));
+	writeFileSync(`${cwd}/tasks.json`, JSON.stringify(tasks));
+	await cmd("evolve freeze tasks.json", ctx);
+	await cmd("audit", ctx);
+	const audit = lastOf("loop-evolution-audit");
+	expect(audit?.details?.configured).toBe(true);
+	expect(audit?.details?.tasks).toBe(4);
+	await cmd("optimize propose", ctx);
+	const staged = lastOf("loop-optimize");
+	expect(staged?.details?.stagedMutationId).toMatch(/^mutation-/);
+	expect(existsSyncSafe(`${cwd}/.pi/loops/_optimizer/baseline-steps.json`)).toBe(false);
+	expect(settled).toBeTypeOf("function");
+
+	// 4. Terminal loop events retain evaluation-ready trace references.
+	await cmd("trace-record rounds=1 review=off criteria=off", ctx);
+	const active = registry.list().find((entry) => entry.label.includes("trace-record"));
+	expect(active).toBeDefined();
+	registry.kill(active?.id as string);
+	const trace = JSON.parse(readFileSync(`${cwd}/.pi/evolution/traces/runs.jsonl`, "utf-8").trim());
+	expect(trace.traceId).toMatch(/^trace-/);
+	expect(trace.taskId).toMatch(/^task-/);
+	expect(trace.snapshotId).toMatch(/^snapshot-/);
+	expect(trace.metrics.completed).toBe(false);
 });
 
 function existsSyncSafe(p: string): boolean {

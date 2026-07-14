@@ -37,21 +37,22 @@
  * Rejections append a lesson to GUARDRAILS.md, which every later round and
  * reviewer reads — the loop learns from its failures (Ralph guardrails).
  * Self-optimization, two tiers:
- *   ONLINE (GEPA-lite): when a failure CLASS (criteria/review/gate) recurs
+ *   ONLINE (deterministic): when a failure CLASS (criteria/review/gate) recurs
  *   within a run, the loop promotes its lesson from a passive guardrail into
  *   an explicit un-skippable step REWRITTEN INTO ITS OWN round prompt.
  *   Learned steps persist in state.json and survive /loop resume.
- *   OFFLINE (/loop optimize [apply]): every run appends a scored record to
+ *   OFFLINE (/loop optimize [propose]): every run appends a scored record to
  *   .pi/loops/_optimizer/journal.jsonl. A failure class the online tier had
  *   to re-learn across many runs is DISTILLED into a STANDING LESSON pre-
  *   loaded into every future loop's round prompt from round 1 (base-prompt
- *   versioned). The effect is measured — a promoted class should recur less.
+ *   versioned). Promotion requires paired baseline/candidate evaluation.
  * State (PROGRESS.md, GUARDRAILS.md, criteria.json, state.json) lives in
  * .pi/loops/<goal>/; context dies, files don't — /loop resume re-attaches.
  */
 
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getBackgroundProcessRegistry } from "@earendil-works/pi-coding-agent";
 import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
@@ -59,6 +60,22 @@ import { Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-
 import { type Static, Type } from "typebox";
 import { copper, heatLine } from "./lib/card.ts";
 import * as ui from "./lib/chips.ts";
+import { auditEvolution } from "./lib/evolution/audit.ts";
+import {
+	createSnapshot,
+	EVOLUTION_SCHEMA_VERSION,
+	type EvolutionTask,
+	hashValue,
+	newRecordId,
+} from "./lib/evolution/contracts.ts";
+import { appendTrace } from "./lib/evolution/store.ts";
+import {
+	evaluateLoopMutation,
+	freezeTaskManifest,
+	promoteLoopMutation,
+	proposeLoopMutation,
+	rollbackLoopMutation,
+} from "./lib/evolution/workflow.ts";
 import {
 	type BaselineStep,
 	distill,
@@ -328,11 +345,21 @@ interface OrchestratedLoop {
 	reviewModel?: string;
 	/** Consecutive rejected done claims; >=2 switches rounds to best-of-n candidates. */
 	rejections: number;
-	/** Self-optimization (online GEPA-lite): per-failure-class repeat counts,
+	/** Self-optimization (online deterministic adapter): per-failure-class repeat counts,
 	 *  and the instructions the loop has rewritten into its own round prompt
 	 *  once a failure class recurred. */
 	failureCounts: Record<string, { count: number; evidence: string }>;
 	learnedSteps: string[];
+	/** Stable references used by evaluation-ready trace records. */
+	taskId: string;
+	traceId: string;
+	startedAt: string;
+	snapshotId: string;
+	sessionId?: string;
+	model?: string;
+	environmentHash: string;
+	contextPacketIds: string[];
+	toolResultRefs: string[];
 	/** Offline optimizer: steps distilled from past runs, pre-loaded into the
 	 *  round prompt from round 1; and the base-prompt version this run used. */
 	baselineSteps: BaselineStep[];
@@ -403,22 +430,21 @@ function criteriaStatus(loop: OrchestratedLoop): { total: number; passed: number
  *  convergence signal, so the loop no longer depends on the model emitting a
  *  clean text verdict or honestly flipping passes. Criteria with no verify
  *  command keep their existing value. Persists the updated criteria.json. */
-export function runCriteriaChecks(
+export async function runCriteriaChecks(
 	loop: OrchestratedLoop,
-): { total: number; passed: number; allPass: boolean; failing: string[] } | undefined {
+): Promise<{ total: number; passed: number; allPass: boolean; failing: string[] } | undefined> {
 	const items = readCriteria(loop.dir);
 	if (!items) return undefined;
 	const cwd = loop.dir.split("/.pi/loops/")[0] || process.cwd();
 	let changed = false;
 	for (const c of items) {
 		if (!c.verify) continue; // no command → leave the model-set value
-		let ok = false;
-		try {
-			execFileSync("bash", ["-c", c.verify], { cwd, timeout: 60_000, stdio: "ignore" });
-			ok = true; // exit 0 = pass
-		} catch {
-			ok = false; // non-zero / timeout = fail
-		}
+		// Async on purpose: a slow verify command (up to the 60s timeout) must not
+		// block the TUI event loop while the settle handler runs. Sequential so
+		// verify commands never race each other.
+		const ok = await new Promise<boolean>((resolve) => {
+			execFile("bash", ["-c", c.verify as string], { cwd, timeout: 60_000 }, (error) => resolve(!error));
+		});
 		if (c.passes !== ok) {
 			c.passes = ok;
 			changed = true;
@@ -476,6 +502,10 @@ function appendRunRecord(loop: OrchestratedLoop, completed: boolean): void {
 	loop.recorded = true;
 	const cwd = loop.dir.replace(/\/\.pi\/loops\/[^/]+$/, "");
 	const record: RunRecord = {
+		schemaVersion: EVOLUTION_SCHEMA_VERSION,
+		taskId: loop.taskId,
+		traceId: loop.traceId,
+		snapshotId: loop.snapshotId,
 		goal: loop.goal,
 		promptVersion: loop.promptVersion,
 		rounds: loop.round,
@@ -486,6 +516,36 @@ function appendRunRecord(loop: OrchestratedLoop, completed: boolean): void {
 	try {
 		mkdirSync(optimizerDir(cwd), { recursive: true });
 		appendFileSync(journalPath(cwd), `${JSON.stringify(record)}\n`);
+		const criteria = criteriaStatus(loop);
+		const criteriaPassRate = criteria ? criteria.passed / criteria.total : Number(completed);
+		appendTrace(cwd, {
+			schemaVersion: EVOLUTION_SCHEMA_VERSION,
+			traceId: loop.traceId,
+			taskId: loop.taskId,
+			sessionId: loop.sessionId,
+			goal: loop.goal,
+			startedAt: loop.startedAt,
+			finishedAt: new Date().toISOString(),
+			snapshotId: loop.snapshotId,
+			gitRevision: loop.baseline,
+			model: loop.model,
+			environmentHash: loop.environmentHash,
+			contextPacketIds: loop.contextPacketIds,
+			toolResultRefs: loop.toolResultRefs,
+			rootCauseLabels: Object.keys(loop.failureCounts).map((label) => ({ source: "deterministic", label })),
+			metrics: {
+				completed,
+				qualityScore: (completed ? 1 : 0) - 0.05 * loop.round - 0.15 * loop.rejections,
+				criteriaPassRate,
+				rounds: loop.round,
+				rejections: loop.rejections,
+				latencyMs: Date.now() - Date.parse(loop.startedAt),
+				hardGates: {
+					...(criteria ? { criteria: criteria.remaining.length === 0 } : {}),
+					...(loop.gate ? { [loop.gate]: completed } : {}),
+				},
+			},
+		});
 	} catch {
 		// journal is best-effort
 	}
@@ -519,6 +579,17 @@ function saveState(loop: OrchestratedLoop, status: string): void {
 					rejections: loop.rejections,
 					failureCounts: loop.failureCounts,
 					learnedSteps: loop.learnedSteps,
+					baselineSteps: loop.baselineSteps,
+					promptVersion: loop.promptVersion,
+					taskId: loop.taskId,
+					traceId: loop.traceId,
+					startedAt: loop.startedAt,
+					snapshotId: loop.snapshotId,
+					sessionId: loop.sessionId,
+					model: loop.model,
+					environmentHash: loop.environmentHash,
+					contextPacketIds: loop.contextPacketIds,
+					toolResultRefs: loop.toolResultRefs,
 					verdicts: loop.verdicts.slice(-10),
 					baseline: loop.baseline,
 					status,
@@ -546,7 +617,7 @@ function addGuardrail(loop: OrchestratedLoop, lesson: string): void {
  *  from a passive guardrail into an explicit round-prompt step. */
 const LEARN_THRESHOLD = Math.max(2, Number(process.env.PI_LOOP_LEARN_THRESHOLD ?? 2));
 
-/** Online GEPA-lite: turn a recurring failure CLASS into a rewritten round-
+/** Deterministically turn a recurring failure CLASS into a rewritten round-
  *  prompt instruction. A guardrail the model may skim becomes an un-skippable
  *  numbered step once the same class of failure repeats — the loop editing its
  *  own operating instructions from its own failures. Returns the minted step,
@@ -554,7 +625,7 @@ const LEARN_THRESHOLD = Math.max(2, Number(process.env.PI_LOOP_LEARN_THRESHOLD ?
 function learnedStepFor(cls: string, evidence: string, gate?: string): string {
 	switch (cls) {
 		case "criteria":
-			return `Before ANY "done" verdict: run each remaining criterion's \`verify\` command from criteria.json and PASTE its real output into PROGRESS.md. Only flip passes=true from pasted command output — never from assertion. (learned: repeated done claims left criteria unmet — ${evidence})`;
+			return `Before ANY "done" verdict: the loop re-runs every criterion's \`verify\` command itself and your claim is rejected while one fails — so this round, do the WORK that makes the failing verify commands exit 0 (fix code, add the missing artifact), and note in PROGRESS.md which criterion each change targets. Never claim done from assertion. (learned: repeated done claims left criteria unmet — ${evidence})`;
 		case "review":
 			return `Before ANY "done" verdict: self-review the FULL diff against every acceptance criterion and fix the RECURRING class of issue the reviewer keeps finding, not just the one instance. (learned: independent review keeps rejecting — ${evidence})`;
 		case "gate":
@@ -651,7 +722,7 @@ function loopContractLines(loop: OrchestratedLoop): string[] {
 					...loop.baselineSteps.map((s, i) => `  P${i + 1}. ${s.text}`),
 				]
 			: [];
-	// Learned steps (online GEPA-lite): instructions the loop rewrote into its
+	// Learned steps (online deterministic adapter): instructions the loop rewrote into its
 	// OWN prompt after a failure class recurred THIS run. Highest priority —
 	// placed first, un-skippable, unlike the passive "go read the guardrails".
 	const learnedLines =
@@ -786,6 +857,8 @@ async function startOrchestration(
 		review?: boolean;
 		criteria?: boolean;
 		reviewModel?: string;
+		model?: string;
+		sessionId?: string;
 		/** No explicit rounds: auto-size the budget to criteria + 2 after round 0. */
 		autoBudget?: boolean;
 		/** Resume: restore round/notes/baseline from a prior run's state.json. */
@@ -796,6 +869,16 @@ async function startOrchestration(
 			rejections?: number;
 			failureCounts?: Record<string, { count: number; evidence: string }>;
 			learnedSteps?: string[];
+			baselineSteps?: BaselineStep[];
+			promptVersion?: number;
+			taskId?: string;
+			traceId?: string;
+			startedAt?: string;
+			sessionId?: string;
+			model?: string;
+			environmentHash?: string;
+			contextPacketIds?: string[];
+			toolResultRefs?: string[];
 		};
 		notify: OrchestratedLoop["notify"];
 	},
@@ -821,11 +904,31 @@ async function startOrchestration(
 	let baseline = opts.restore?.baseline;
 	if (!baseline) {
 		try {
-			baseline = execFileSync("git", ["rev-parse", "HEAD"], { cwd: opts.cwd, encoding: "utf-8" }).trim();
+			baseline = execFileSync("git", ["rev-parse", "HEAD"], {
+				cwd: opts.cwd,
+				encoding: "utf-8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
 		} catch {
 			// not a git repo — reviewer falls back to PROGRESS.md inspection
 		}
 	}
+	const baselineSteps = opts.restore?.baselineSteps ?? loadBaselineSteps(opts.cwd);
+	const promptVersion = opts.restore?.promptVersion ?? currentPromptVersion(baselineSteps);
+	const startedAt = opts.restore?.startedAt ?? new Date().toISOString();
+	const snapshot = createSnapshot(baselineSteps, promptVersion, startedAt);
+	const model = opts.restore?.model ?? opts.model;
+	const sessionId = opts.restore?.sessionId ?? opts.sessionId;
+	const environmentHash =
+		opts.restore?.environmentHash ??
+		hashValue({
+			cwd: opts.cwd,
+			gitRevision: baseline,
+			model,
+			gate: opts.gate,
+			review: opts.review !== false,
+			criteria: opts.criteria !== false,
+		});
 	const loop: OrchestratedLoop = {
 		id: "",
 		goal: opts.goal,
@@ -846,8 +949,17 @@ async function startOrchestration(
 		rejections: opts.restore?.rejections ?? 0,
 		failureCounts: opts.restore?.failureCounts ?? {},
 		learnedSteps: opts.restore?.learnedSteps ?? [],
-		baselineSteps: loadBaselineSteps(opts.cwd),
-		promptVersion: currentPromptVersion(loadBaselineSteps(opts.cwd)),
+		taskId: opts.restore?.taskId ?? newRecordId("task"),
+		traceId: opts.restore?.traceId ?? newRecordId("trace"),
+		startedAt,
+		snapshotId: snapshot.snapshotId,
+		sessionId,
+		model,
+		environmentHash,
+		contextPacketIds: opts.restore?.contextPacketIds ?? [],
+		toolResultRefs: opts.restore?.toolResultRefs ?? [],
+		baselineSteps,
+		promptVersion,
 		recorded: false,
 		autoBudget: opts.autoBudget === true && opts.restore === undefined,
 		verdicts: [],
@@ -922,7 +1034,7 @@ async function startOrchestration(
  *  the filesystem, not the process, is the loop's memory). */
 async function resumeOrchestration(
 	pi: ExtensionAPI,
-	opts: { goal?: string; cwd: string; notify: OrchestratedLoop["notify"] },
+	opts: { goal?: string; cwd: string; model?: string; sessionId?: string; notify: OrchestratedLoop["notify"] },
 ): Promise<string> {
 	const loopsDir = `${opts.cwd}/.pi/loops`;
 	let candidates: string[] = [];
@@ -944,6 +1056,16 @@ async function resumeOrchestration(
 		rejections?: number;
 		failureCounts?: Record<string, { count: number; evidence: string }>;
 		learnedSteps?: string[];
+		baselineSteps?: BaselineStep[];
+		promptVersion?: number;
+		taskId?: string;
+		traceId?: string;
+		startedAt?: string;
+		sessionId?: string;
+		model?: string;
+		environmentHash?: string;
+		contextPacketIds?: string[];
+		toolResultRefs?: string[];
 		baseline?: string;
 		status: string;
 	}
@@ -973,6 +1095,8 @@ async function resumeOrchestration(
 		review: target.reviewEnabled !== false,
 		criteria: target.criteriaEnabled !== false,
 		reviewModel: target.reviewModel,
+		model: target.model ?? opts.model,
+		sessionId: target.sessionId ?? opts.sessionId,
 		restore: {
 			round: target.round,
 			notes: target.notes ?? [],
@@ -980,6 +1104,16 @@ async function resumeOrchestration(
 			rejections: target.rejections,
 			failureCounts: target.failureCounts,
 			learnedSteps: target.learnedSteps,
+			baselineSteps: target.baselineSteps,
+			promptVersion: target.promptVersion,
+			taskId: target.taskId,
+			traceId: target.traceId,
+			startedAt: target.startedAt,
+			sessionId: target.sessionId,
+			model: target.model,
+			environmentHash: target.environmentHash,
+			contextPacketIds: target.contextPacketIds,
+			toolResultRefs: target.toolResultRefs,
 		},
 		notify: opts.notify,
 	}).then((msg) =>
@@ -1079,12 +1213,87 @@ function sendStatusPanel(
 	);
 }
 
-/** /loop optimize [apply] — the offline optimizer. Reads the run journal,
- *  distills failure classes that recurred across many runs into promotion
- *  proposals, shows the measured before/after effect of existing promotions,
- *  and (with apply) writes them into the baseline so every future loop starts
- *  pre-loaded. Cheap: distillation over recorded runs, no live re-runs. */
-function runOptimizer(pi: ExtensionAPI, cwd: string, apply: boolean, notify: NotifyFn): void {
+function freezeEvolutionTasks(cwd: string, file: string): ReturnType<typeof freezeTaskManifest> {
+	const path = resolve(cwd, file);
+	const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+	const tasks = Array.isArray(parsed)
+		? (parsed as EvolutionTask[])
+		: parsed && typeof parsed === "object" && Array.isArray((parsed as { tasks?: unknown }).tasks)
+			? ((parsed as { tasks: EvolutionTask[] }).tasks as EvolutionTask[])
+			: undefined;
+	if (!tasks) throw new Error("task file must be an array or an object with a tasks array");
+	return freezeTaskManifest(cwd, tasks);
+}
+
+function sendEvolutionAudit(pi: ExtensionAPI, cwd: string): void {
+	const audit = auditEvolution(cwd);
+	pi.sendMessage(
+		{
+			customType: "loop-evolution-audit",
+			content: [
+				`evolution audit · ${audit.configured ? "configured" : "not configured"}`,
+				`current ${audit.currentSnapshotId} · prompt v${audit.promptVersion} · ${audit.standingSteps} standing step(s)`,
+				`tasks ${audit.tasks}${audit.activeTaskManifest ? ` · ${audit.activeTaskManifest}` : ""}`,
+				`mutations ${audit.mutations} · proposed ${audit.proposed} · evaluated ${audit.evaluated} · promotable ${audit.promotable}`,
+				`rejected ${audit.rejected} · promoted ${audit.promoted} · rolled back ${audit.rolledBack} · traces ${audit.traces}`,
+			].join("\n"),
+			display: true,
+			details: audit,
+		},
+		{ triggerTurn: false },
+	);
+}
+
+async function runEvolutionCommand(pi: ExtensionAPI, cwd: string, parts: string[], notify: NotifyFn): Promise<void> {
+	const action = parts[0] ?? "audit";
+	if (action === "audit") {
+		sendEvolutionAudit(pi, cwd);
+		return;
+	}
+	if (action === "freeze") {
+		const file = parts[1];
+		if (!file) throw new Error("Usage: /loop evolve freeze <tasks.json>");
+		const manifest = freezeEvolutionTasks(cwd, file);
+		notify(`froze ${manifest.tasks.length} tasks as ${manifest.manifestId}`, "info");
+		return;
+	}
+	const mutationId = parts[1];
+	if (!mutationId) throw new Error(`Usage: /loop evolve ${action} <mutation-id>`);
+	if (action === "evaluate") {
+		notify(`running paired baseline/candidate evaluation for ${mutationId}`, "info");
+		const decision = await evaluateLoopMutation(cwd, mutationId);
+		pi.sendMessage(
+			{
+				customType: "loop-evolution-decision",
+				content: [
+					`${decision.decision.toUpperCase()} ${mutationId}`,
+					`completion Δ ${decision.comparison.deltas.completionRate.toFixed(3)} · quality Δ ${decision.comparison.deltas.qualityScore.toFixed(3)} · criteria Δ ${decision.comparison.deltas.criteriaPassRate.toFixed(3)}`,
+					`latency ×${decision.comparison.ratios.latency.toFixed(2)} · tokens ×${decision.comparison.ratios.tokens.toFixed(2)} · cost ×${decision.comparison.ratios.cost.toFixed(2)}`,
+					decision.reasons.length > 0 ? decision.reasons.join("; ") : "all predeclared gates passed",
+				].join("\n"),
+				display: true,
+				details: decision,
+			},
+			{ triggerTurn: false },
+		);
+		return;
+	}
+	if (action === "promote") {
+		promoteLoopMutation(cwd, mutationId);
+		notify(`promoted ${mutationId}; rollback with /loop evolve rollback ${mutationId}`, "info");
+		return;
+	}
+	if (action === "rollback") {
+		rollbackLoopMutation(cwd, mutationId);
+		notify(`rolled back ${mutationId}`, "info");
+		return;
+	}
+	throw new Error(`unknown evolution action '${action}'`);
+}
+
+/** /loop optimize [propose] — deterministic distillation only. Promotion is a
+ *  separate, human-invoked action after a paired evaluation passes. */
+function runOptimizer(pi: ExtensionAPI, cwd: string, propose: boolean, notify: NotifyFn): void {
 	const runs = loadJournal(cwd);
 	if (runs.length === 0) {
 		notify(
@@ -1099,20 +1308,14 @@ function runOptimizer(pi: ExtensionAPI, cwd: string, apply: boolean, notify: Not
 	const trend = versionTrend(runs);
 	const effects = existing.map((step) => ({ step, ...recurrence(runs, step) }));
 
-	let applied: Proposal[] = [];
-	if (apply && proposals.length > 0) {
-		const nextVersion = currentPromptVersion(existing) + 1;
-		const promoted: BaselineStep[] = [
-			...existing,
-			...proposals.map((p) => ({ cls: p.cls, text: p.text, runs: p.runs, version: nextVersion })),
-		];
+	let stagedMutationId: string | undefined;
+	if (propose && proposals.length > 0) {
 		try {
-			mkdirSync(optimizerDir(cwd), { recursive: true });
-			writeFileSync(baselinePath(cwd), `${JSON.stringify(promoted, null, 2)}\n`);
-			applied = proposals;
-			notify(`optimizer: promoted ${proposals.length} step(s) into base prompt v${nextVersion}`, "info");
-		} catch {
-			notify("optimizer: failed to write baseline-steps.json", "error");
+			const mutation = proposeLoopMutation({ cwd, proposals, runs });
+			stagedMutationId = mutation.mutationId;
+			notify(`optimizer: staged ${mutation.mutationId}; run /loop evolve evaluate ${mutation.mutationId}`, "info");
+		} catch (error) {
+			notify(`optimizer: ${(error as Error).message}`, "error");
 		}
 	}
 
@@ -1125,8 +1328,8 @@ function runOptimizer(pi: ExtensionAPI, cwd: string, apply: boolean, notify: Not
 				totalRuns: runs.length,
 				minRuns,
 				version: currentPromptVersion(existing),
-				proposals: applied.length > 0 ? [] : proposals,
-				applied,
+				proposals,
+				stagedMutationId,
 				existing: effects,
 				trend,
 			},
@@ -1365,7 +1568,7 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 		// if the objective criteria all still pass, the loop COMPLETES regardless
 		// of the reviewer's opinion (its findings are logged). Only a criterion
 		// that actually FAILS its verify command reopens the loop.
-		const objective = runCriteriaChecks(loop);
+		const objective = await runCriteriaChecks(loop);
 		if (objective && !objective.allPass) {
 			loop.rejections += 1;
 			const failing = objective.failing.join(", ");
@@ -1428,7 +1631,7 @@ async function settleRound(pi: ExtensionAPI, loop: OrchestratedLoop): Promise<vo
 	// This lets the loop converge without depending on the model emitting a clean
 	// text verdict (the fragile signal that stalled real runs). Without criteria,
 	// fall back to the model's verdict.
-	const checked = runCriteriaChecks(loop);
+	const checked = await runCriteriaChecks(loop);
 	if (checked) {
 		registry.appendLog(
 			loop.id,
@@ -1564,7 +1767,7 @@ interface LoopOptimizeDetails {
 	minRuns?: number;
 	version?: number;
 	proposals?: Proposal[];
-	applied?: Proposal[];
+	stagedMutationId?: string;
 	existing?: Array<{ step: BaselineStep; before: string; after: string }>;
 	trend?: Array<{ version: number; runs: number; meanScore: number }>;
 }
@@ -1947,17 +2150,12 @@ export default function (pi: ExtensionAPI) {
 			`${copper("▎")} ⚙ ${theme.fg("text", "loop optimizer")} · ${theme.fg("muted", `${d.totalRuns ?? 0} runs · base v${d.version ?? 1} · promote ≥${d.minRuns ?? 3} runs`)}`,
 		);
 		lines.push(heatLine(46));
-		const applied = d.applied ?? [];
 		const proposals = d.proposals ?? [];
-		if (applied.length > 0) {
-			lines.push(theme.fg("success", `✓ promoted ${applied.length} step(s) into the base prompt`));
-			for (const p of applied) {
-				lines.push(
-					`  ${theme.fg("success", "+")} ${theme.fg("text", `[${p.cls}] `)}${theme.fg("dim", p.text.slice(0, 78))}`,
-				);
-			}
+		if (d.stagedMutationId) {
+			lines.push(theme.fg("success", `✓ staged ${d.stagedMutationId}`));
+			lines.push(theme.fg("muted", `run /loop evolve evaluate ${d.stagedMutationId}`));
 		} else if (proposals.length > 0) {
-			lines.push(theme.fg("accent", `${proposals.length} promotion candidate(s) — /loop optimize apply to adopt`));
+			lines.push(theme.fg("accent", `${proposals.length} candidate(s) — /loop optimize propose to stage`));
 			for (const p of proposals) {
 				lines.push(
 					`  ${theme.fg("accent", "▸")} ${theme.fg("text", `[${p.cls}] `)}${theme.fg("muted", `recurred in ${p.runs} runs`)} ${theme.fg("dim", `(${p.sampleGoals.join(", ").slice(0, 40)})`)}`,
@@ -2014,6 +2212,8 @@ export default function (pi: ExtensionAPI) {
 					review: input.review ?? defaults.review,
 					criteria: input.criteria ?? defaults.criteria,
 					reviewModel: input.reviewModel ?? defaults.reviewModel,
+					model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+					sessionId: ctx.sessionManager.getSessionId(),
 					notify,
 				});
 				return { content: [{ type: "text", text: msg }], details: undefined };
@@ -2054,13 +2254,38 @@ export default function (pi: ExtensionAPI) {
 		if (text.trim()) activeOrchestration.lastMessage = text;
 	});
 
+	pi.on("tool_execution_end", async (event) => {
+		if (!activeOrchestration) return;
+		let resultHash = "unavailable";
+		try {
+			resultHash = hashValue(event.result).slice(0, 20);
+		} catch {
+			// Some extension results may not be JSON-serializable; keep only metadata.
+		}
+		activeOrchestration.toolResultRefs.push(
+			`tool:${event.toolName}:${event.toolCallId}:${event.isError ? "error" : "ok"}:${resultHash}`,
+		);
+		activeOrchestration.toolResultRefs = activeOrchestration.toolResultRefs.slice(-500);
+		if (/context[_-]?(?:task|shift|packet)|pi\.context/i.test(event.toolName)) {
+			let packetId: string | undefined;
+			try {
+				packetId = JSON.stringify(event.result).match(/"packet_?id"\s*:\s*"([^"]+)"/i)?.[1];
+			} catch {
+				// Ignore non-serializable context results.
+			}
+			if (packetId && !activeOrchestration.contextPacketIds.includes(packetId)) {
+				activeOrchestration.contextPacketIds.push(packetId);
+			}
+		}
+	});
+
 	pi.on("agent_settled", async () => {
 		if (activeOrchestration) await settleRound(pi, activeOrchestration);
 	});
 
 	pi.registerCommand("loop", {
 		description:
-			"/loop <goal> — orchestrated loop with smart defaults (.pi/loop.json, auto rounds). Also: verify <cap> | resume [<goal>] | status [<goal>] | optimize [apply]; flags rounds= gate= rmodel= review=off criteria=off",
+			"/loop <goal> — orchestrated loop with smart defaults. Also: verify | resume | status | optimize [propose] | evolve <audit|freeze|evaluate|promote|rollback>",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const raw = (args ?? "").trim();
 			const parts = raw.split(/\s+/).filter(Boolean);
@@ -2068,7 +2293,8 @@ export default function (pi: ExtensionAPI) {
 			if (!goal) {
 				ctx.ui.notify(
 					"Usage: /loop <goal>   (that's it — defaults from .pi/loop.json, budget auto-sized from criteria)\n" +
-						"       /loop verify <devbrain-cap> | /loop resume [<goal>] | /loop status [<goal>] | /loop optimize [apply]\n" +
+						"       /loop verify <devbrain-cap> | /loop resume [<goal>] | /loop status [<goal>]\n" +
+						"       /loop optimize [propose] | /loop evolve <audit|freeze|evaluate|promote|rollback>\n" +
 						"       overrides: rounds=N gate=<cap> rmodel=<model> review=off criteria=off",
 					"error",
 				);
@@ -2082,6 +2308,8 @@ export default function (pi: ExtensionAPI) {
 				const msg = await resumeOrchestration(pi, {
 					goal: resumeGoal,
 					cwd: ctx.cwd,
+					model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+					sessionId: ctx.sessionManager.getSessionId(),
 					notify: (text, level) => ctx.ui.notify(text, level),
 				});
 				ctx.ui.notify(msg, msg.startsWith("resumed") ? "info" : "error");
@@ -2100,7 +2328,21 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (goal === "optimize") {
-				runOptimizer(pi, ctx.cwd, /\bapply\b/i.test(raw), (t, l) => ctx.ui.notify(t, l));
+				if (/\bapply\b/i.test(raw)) {
+					ctx.ui.notify("direct apply is disabled; use propose → evaluate → promote", "error");
+					return;
+				}
+				runOptimizer(pi, ctx.cwd, /\bpropose\b/i.test(raw), (t, l) => ctx.ui.notify(t, l));
+				return;
+			}
+			if (goal === "evolve" || goal === "audit") {
+				try {
+					await runEvolutionCommand(pi, ctx.cwd, goal === "audit" ? ["audit"] : parts.slice(1), (t, l) =>
+						ctx.ui.notify(t, l),
+					);
+				} catch (error) {
+					ctx.ui.notify((error as Error).message, "error");
+				}
 				return;
 			}
 			// Explicit verify mode: the devbrain-gated retry loop.
@@ -2143,6 +2385,8 @@ export default function (pi: ExtensionAPI) {
 				review: /\breview=(off|false|0)\b/i.test(raw) ? false : (defaults.review ?? true),
 				criteria: /\bcriteria=(off|false|0)\b/i.test(raw) ? false : (defaults.criteria ?? true),
 				reviewModel: rmodelArg?.[1] ?? defaults.reviewModel,
+				model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+				sessionId: ctx.sessionManager.getSessionId(),
 				notify: (text, level) => ctx.ui.notify(text, level),
 			});
 			ctx.ui.notify(msg, "info");

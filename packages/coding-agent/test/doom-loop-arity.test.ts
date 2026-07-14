@@ -52,6 +52,26 @@ function freshHandler(): (command: string) => Promise<{ block?: boolean; reason?
 	return (command: string) => h({ toolName: "bash", input: { command } });
 }
 
+function freshToolHandler(): Handler {
+	const handlers: Handler[] = [];
+	mod.default({
+		on: (e: string, h: Handler) => {
+			if (e === "tool_call") handlers.push(h);
+		},
+		registerCommand() {},
+	} as never);
+	return handlers[0];
+}
+
+test("exact calls trip at the smaller exact threshold regardless of input key order", async () => {
+	const tool = freshToolHandler();
+	expect((await tool({ toolName: "read", input: { path: "a.ts", limit: 20 } })).block).toBeFalsy();
+	expect((await tool({ toolName: "read", input: { limit: 20, path: "a.ts" } })).block).toBeFalsy();
+	const third = await tool({ toolName: "read", input: { path: "a.ts", limit: 20 } });
+	expect(third.block).toBe(true);
+	expect(third.reason).toContain("same read call and arguments");
+});
+
 test("identical operations trip the guard at the threshold — arity-normalized", async () => {
 	const bash = freshHandler();
 	// three commits with DIFFERENT messages: raw strings differ, operation is the same

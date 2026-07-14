@@ -24,7 +24,6 @@ import type {
 	Keybinding,
 	KeyId,
 	MarkdownTheme,
-	OverlayHandle,
 	OverlayOptions,
 	SlashCommand,
 } from "@earendil-works/pi-tui";
@@ -62,6 +61,7 @@ import {
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import { disposeAllAgents } from "../../core/agents/index.ts";
+import { getBackgroundProcessRegistry } from "../../core/background-process-registry.ts";
 import {
 	CACHE_TTL_MS,
 	type CacheMiss,
@@ -76,6 +76,7 @@ import type {
 	ExtensionContext,
 	ExtensionRunner,
 	ExtensionUIContext,
+	ExtensionUICustomOptions,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	ProjectTrustContext,
@@ -115,6 +116,7 @@ import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { buildChatSearchEntries, ChatSearchComponent } from "./components/chat-search.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
+import { CustomDrawerComponent } from "./components/custom-drawer.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomEntryComponent } from "./components/custom-entry.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
@@ -2516,6 +2518,9 @@ export class InteractiveMode {
 				if (!customEditor.onExtensionShortcut) {
 					customEditor.onExtensionShortcut = (data: string) => this.defaultEditor.onExtensionShortcut?.(data);
 				}
+				if (!customEditor.onDownArrowOnEmpty) {
+					customEditor.onDownArrowOnEmpty = () => this.defaultEditor.onDownArrowOnEmpty?.() === true;
+				}
 				if (!customEditor.onDownArrowOnLastLine) {
 					customEditor.onDownArrowOnLastLine = () => this.defaultEditor.onDownArrowOnLastLine?.() === true;
 				}
@@ -2563,11 +2568,7 @@ export class InteractiveMode {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: {
-			overlay?: boolean;
-			overlayOptions?: OverlayOptions | (() => OverlayOptions);
-			onHandle?: (handle: OverlayHandle) => void;
-		},
+		options?: ExtensionUICustomOptions,
 	): Promise<T> {
 		const savedText = this.editor.getText();
 		const isOverlay = options?.overlay ?? false;
@@ -2599,9 +2600,11 @@ export class InteractiveMode {
 			};
 
 			Promise.resolve(factory(this.ui, theme, this.keybindings, close))
-				.then((c) => {
+				.then((customComponent) => {
 					if (closed) return;
-					component = c;
+					component = options?.drawer
+						? new CustomDrawerComponent(this.ui, customComponent, options.drawer.height ?? "40%")
+						: customComponent;
 					if (isOverlay) {
 						// Resolve overlay options - can be static or dynamic function
 						const resolveOptions = (): OverlayOptions | undefined => {
@@ -2688,6 +2691,16 @@ export class InteractiveMode {
 					}
 				}
 			}
+		};
+		this.defaultEditor.onDownArrowOnEmpty = () => {
+			const hasAgentActivity = getBackgroundProcessRegistry()
+				.list()
+				.some((entry) => entry.kind === "subagent" || entry.kind === "delegation");
+			if (!hasAgentActivity || !this.session.extensionRunner.getCommand("agents")) return false;
+			void this.session.prompt("/agents").catch((error: unknown) => {
+				this.showError(error instanceof Error ? error.message : String(error));
+			});
+			return true;
 		};
 
 		// Register app action handlers

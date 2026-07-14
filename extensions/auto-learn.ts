@@ -51,7 +51,7 @@ const rememberSchema = Type.Object({
 	kind: Type.Unsafe<(typeof KINDS)[number]>({
 		type: "string",
 		enum: [...KINDS],
-		description: "rule/preference/convention/style boot always; others are recallable facts",
+		description: "rule/preference boot always; convention/style task relevant; others are recallable facts",
 	}),
 	summary: Type.String({ description: "one sentence, imperative for rules" }),
 	detail: Type.Optional(Type.String()),
@@ -69,19 +69,6 @@ type RememberInput = Static<typeof rememberSchema>;
 
 const DIRECTIVE_RE =
 	/\b(from now on|always|never|remember (?:that|to)|don'?t ever|make sure (?:to|you)|going forward)\b/i;
-
-function directiveBriefing(): string {
-	return [
-		"<auto-learn>",
-		"You accumulate durable knowledge with the `remember` tool. Call it when:",
-		"- the user states a standing preference or corrects your approach (kind: rule/preference),",
-		"- you discover a reusable lesson or a pitfall while working (kind: lesson/pitfall),",
-		"- a non-obvious decision is made worth keeping (kind: decision).",
-		"Every remembered item is a proposal and requires human review before it can affect future context.",
-		"Do NOT remember: transient task state, secrets, or anything the repo already records.",
-		"</auto-learn>",
-	].join("\n");
-}
 
 export default function (pi: ExtensionAPI) {
 	let pendingDirective: string | undefined;
@@ -124,9 +111,16 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "remember",
 		label: "remember",
+		// The full when-to-call briefing lives HERE (tool schemas ride the cached
+		// prompt prefix) instead of a per-turn context append, which is re-sent
+		// uncached on every request.
 		description:
 			"Queue an untrusted proposal for a durable rule, preference, lesson, or pitfall. " +
-			"A human must review it before it can affect future session context.",
+			"A human must review it before it can affect future session context. " +
+			"Call it when the user states a standing preference or corrects your approach (kind: rule/preference), " +
+			"when you discover a reusable lesson or pitfall while working (kind: lesson/pitfall), " +
+			"or when a non-obvious decision worth keeping is made (kind: decision). " +
+			"Do NOT remember transient task state, secrets, or anything the repo already records.",
 		parameters: rememberSchema,
 		async execute(_id: string, rawInput: RememberInput, _signal, _onUpdate, ctx) {
 			const input = rawInput as RememberInput & Record<string, unknown>;
@@ -169,24 +163,27 @@ export default function (pi: ExtensionAPI) {
 		pendingDirective = DIRECTIVE_RE.test(event.text) ? event.text.slice(0, 200) : undefined;
 	});
 
+	// The standing when-to-remember briefing lives in the tool description
+	// (cached prefix). Only the transient directive nudge is injected, and only
+	// on the turn where a directive was detected.
 	pi.on("context", async (event) => {
 		const messages = event?.messages;
-		if (!Array.isArray(messages)) return;
-		const blocks = [directiveBriefing()];
-		if (pendingDirective) {
-			blocks.push(
-				`<auto-learn-nudge>The user's message looks like a standing directive. If it is one, ` +
-					`call remember(kind: rule|preference) to queue an untrusted proposal for later review.</auto-learn-nudge>`,
-			);
-		}
+		if (!Array.isArray(messages) || !pendingDirective) return;
 		return {
 			messages: [
 				...messages,
-				...blocks.map((text) => ({
+				{
 					role: "user" as const,
-					content: [{ type: "text" as const, text }],
+					content: [
+						{
+							type: "text" as const,
+							text:
+								`<auto-learn-nudge>The user's message looks like a standing directive. If it is one, ` +
+								`call remember(kind: rule|preference) to queue an untrusted proposal for later review.</auto-learn-nudge>`,
+						},
+					],
 					timestamp: Date.now(),
-				})),
+				},
 			],
 		};
 	});

@@ -217,7 +217,7 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			const ctx = options?.agentToolContext;
 			return createAgentMessageToolDefinition({
 				selfLabel: "main",
-				parentSession: ctx ? undefined : undefined,
+				senderSession: ctx?.parentSession,
 			});
 		}
 		case "agent_list":
@@ -272,7 +272,10 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			});
 		}
 		case "agent_message":
-			return createAgentMessageTool({ selfLabel: "main" });
+			return createAgentMessageTool({
+				selfLabel: "main",
+				senderSession: options?.agentToolContext?.parentSession,
+			});
 		case "agent_list":
 			return createAgentListTool(
 				cwd,
@@ -309,7 +312,7 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
 	const ctx = options?.agentToolContext;
 	return {
-		agent_message: createAgentMessageToolDefinition({ selfLabel: "main" }),
+		agent_message: createAgentMessageToolDefinition({ selfLabel: "main", senderSession: ctx?.parentSession }),
 		chain: createToolDefinition("chain", cwd, options),
 		agent: ctx
 			? createAgentToolDefinition(ctx.cwd, ctx.agentDir ?? getAgentDir(), ctx.packageAgentDirs, {
@@ -357,7 +360,7 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 export function createAllTools(cwd: string, options?: ToolsOptions): Record<ToolName, Tool> {
 	const ctx = options?.agentToolContext;
 	return {
-		agent_message: createAgentMessageTool({ selfLabel: "main" }),
+		agent_message: createAgentMessageTool({ selfLabel: "main", senderSession: ctx?.parentSession }),
 		chain: createTool("chain", cwd, options),
 		agent: ctx ? createAgentTool(ctx) : wrapToolDefinition(createUnavailableAgentToolDefinition()),
 		agent_list: createAgentListTool(

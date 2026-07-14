@@ -82,6 +82,44 @@ const utility = join(home, "dist", "claude", ".claude", "tools", "aidlc-utility.
 const bun = process.env.PI_BUN ?? join(homedir(), ".bun", "bin", "bun");
 const engineAvailable = existsSync(engine) && existsSync(bun);
 
+describe.skipIf(!engineAvailable)("aidlc extension loop guard (real engine)", () => {
+	it("re-issues the conductor contract after compaction while a workflow is active", async () => {
+		const aidlcExtension = (await import("../../../extensions/aidlc.ts")).default;
+		const sent: string[] = [];
+		const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+		let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+		const pi = {
+			registerCommand(_name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+				command = def.handler;
+			},
+			on(event: string, handler: (event: unknown, ctx: unknown) => Promise<void>) {
+				handlers.set(event, handler);
+			},
+			sendUserMessage(content: string) {
+				sent.push(content);
+			},
+		};
+		aidlcExtension(pi as never);
+		const cwd = mkdtempSync(join(tmpdir(), "aidlc-compact-"));
+		const ctx = { cwd, ui: { notify: () => {} } };
+
+		await command?.("fix the CSV export bug", ctx); // launch → contract + first directive
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toContain("<aidlc-conductor>");
+		expect(sent[0]).toContain("already ran the first NEXT");
+
+		await handlers.get("session_compact")?.({ type: "session_compact" }, ctx);
+		expect(sent).toHaveLength(2);
+		expect(sent[1]).toContain("<aidlc-conductor>");
+		expect(sent[1]).toContain("compacted mid-workflow");
+
+		// inactive sessions pay nothing: after /aidlc stop, compaction is free
+		await command?.("stop", ctx);
+		await handlers.get("session_compact")?.({ type: "session_compact" }, ctx);
+		expect(sent).toHaveLength(2);
+	});
+});
+
 describe.skipIf(!engineAvailable)("aidlc engine smoke (real awslabs engine)", () => {
 	function run(cwd: string, tool: string, args: string[]): string {
 		return runArgv(cwd, [tool, ...args]);

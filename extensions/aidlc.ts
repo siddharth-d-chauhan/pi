@@ -329,6 +329,24 @@ export default function aidlc(pi: ExtensionAPI) {
 		mintHumanTurn(ctx.cwd);
 	});
 
+	// Upstream's SessionStart(compact) hook: compaction can summarize away the
+	// conductor contract, stalling the loop. Re-fetch the pending directive and
+	// re-send the FULL contract so the workflow continues deterministically.
+	pi.on("session_compact", async (_event, ctx) => {
+		if (!active) return;
+		const cwd = (ctx as { cwd?: string }).cwd ?? process.cwd();
+		const res = await runEngine(cwd, ["next"]);
+		const directive = parseDirective(res.out);
+		if (!directive || directive.kind === "done" || directive.kind === "parked") return;
+		lastSignature = ""; // fresh contract → reset the no-progress counter
+		nudges = 0;
+		pi.sendUserMessage(
+			`${conductorKickoff(cwd, "--resume", JSON.stringify(directive))}\n` +
+				"(Context was just compacted mid-workflow — the contract above is re-issued; pick up exactly where the directive says.)",
+			{ deliverAs: "followUp" },
+		);
+	});
+
 	// pi's Stop-hook equivalent: when the conductor ends its turn but the
 	// engine still names pending work, re-arm the loop — bounded, with the
 	// upstream human-wait carve-out, and free when no workflow is active.

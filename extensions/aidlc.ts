@@ -7,11 +7,22 @@
  * `agent_settled` guard re-arms it (bounded) when the model stops mid-loop —
  * pi's equivalent of the upstream Stop hook.
  *
+ * Verified against the real engine end-to-end (confirm → intent-birth →
+ * run-stage → artifact → gate approve → skeleton-stance → presence refusal):
+ * - CLAUDE_PROJECT_DIR must ride EVERY engine invocation — the engine resolves
+ *   the project module-relative otherwise and writes workflow state into the
+ *   central install instead of the project.
+ * - Gate approval REFUSES unless a HUMAN_TURN audit event was minted since the
+ *   last gate resolution (upstream mints it via a UserPromptSubmit hook); pi
+ *   mints it on the `input` event, preserving the "a model cannot approve its
+ *   own gate" property.
+ * - Relative `.claude/...` paths in directives resolve under the ENGINE HOME,
+ *   not the project; `aidlc/...` paths resolve in the project.
+ *
  * Token posture: ZERO context cost while no workflow is active — no context
- * handlers, no system-prompt additions; the settle guard early-returns.
- * Engine install is central (`~/.pi/aidlc-workflows`, override PI_AIDLC_HOME):
- * the tools resolve their stage graph/scopes module-relative, so one install
- * serves every project while workflow state lands in the project's `aidlc/`.
+ * handlers, no system-prompt additions; the settle guard and the mint
+ * early-return. Engine install is central (`~/.pi/aidlc-workflows`, override
+ * PI_AIDLC_HOME); one install serves every project.
  */
 
 import { execFile } from "node:child_process";
@@ -29,8 +40,18 @@ function aidlcHome(): string {
 	return process.env.PI_AIDLC_HOME ?? join(homedir(), ".pi", "aidlc-workflows");
 }
 
+/** The harness root the engine ships in — directives' relative `.claude/...`
+ *  paths resolve HERE, not in the project. */
+function engineRoot(): string {
+	return join(aidlcHome(), "dist", "claude");
+}
+
 function enginePath(): string {
-	return join(aidlcHome(), "dist", "claude", ".claude", "tools", "aidlc-orchestrate.ts");
+	return join(engineRoot(), ".claude", "tools", "aidlc-orchestrate.ts");
+}
+
+function auditLibPath(): string {
+	return join(engineRoot(), ".claude", "tools", "aidlc-audit.ts");
 }
 
 function bunBin(): string {
@@ -41,9 +62,11 @@ function bunBin(): string {
 
 export interface AidlcDirective {
 	kind: string;
+	stage?: string;
+	gate?: boolean | string;
 	question?: string;
 	message?: string;
-	stage_slug?: string;
+	reason?: string;
 	stage_file?: string;
 }
 
@@ -70,20 +93,50 @@ export function directivePending(kind: string): boolean {
 	return kind === "run-stage" || kind === "invoke-swarm" || kind === "print";
 }
 
+/** Path of the active intent's state file inside a project, or undefined. */
+export function activeStateFile(cwd: string): string | undefined {
+	try {
+		// active-space exists only once a non-default space is used
+		let space = "default";
+		try {
+			space = readFileSync(join(cwd, "aidlc", "active-space"), "utf-8").trim() || "default";
+		} catch {
+			// keep default
+		}
+		const intentsDir = join(cwd, "aidlc", "spaces", space, "intents");
+		const intent = readFileSync(join(intentsDir, "active-intent"), "utf-8").trim();
+		if (!intent) return undefined;
+		const state = join(intentsDir, intent, "aidlc-state.md");
+		return existsSync(state) ? state : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** True when the active intent's state file shows a stage positively waiting
  *  on the human ([?] gate open / [R] revising) — the upstream Stop hook's
  *  human-wait carve-out. Fail-open to false (the nudge cap still bounds us). */
 export function humanWaitState(cwd: string): boolean {
 	try {
-		const space = readFileSync(join(cwd, "aidlc", "active-space"), "utf-8").trim() || "default";
-		const intentsDir = join(cwd, "aidlc", "spaces", space, "intents");
-		const intent = readFileSync(join(intentsDir, "active-intent"), "utf-8").trim();
-		if (!intent) return false;
-		const state = readFileSync(join(intentsDir, intent, "aidlc-state.md"), "utf-8");
-		return /\[(\?|R)\]/.test(state);
+		const state = activeStateFile(cwd);
+		if (!state) return false;
+		return /\[(\?|R)\]/.test(readFileSync(state, "utf-8"));
 	} catch {
 		return false;
 	}
+}
+
+/** Every engine invocation carries CLAUDE_PROJECT_DIR so workflow state lands
+ *  in the project, never in the central install (verified failure mode), and
+ *  bun's dir on PATH — the engine's report subcommand spawns `bun` itself. */
+function engineEnv(cwd: string): NodeJS.ProcessEnv {
+	const bunDir = join(bunBin(), "..");
+	const path = process.env.PATH ?? "";
+	return {
+		...process.env,
+		CLAUDE_PROJECT_DIR: cwd,
+		PATH: path.includes(bunDir) ? path : `${bunDir}:${path}`,
+	};
 }
 
 function runEngine(cwd: string, args: string[]): Promise<{ ok: boolean; out: string }> {
@@ -91,7 +144,7 @@ function runEngine(cwd: string, args: string[]): Promise<{ ok: boolean; out: str
 		execFile(
 			bunBin(),
 			[enginePath(), ...args],
-			{ cwd, timeout: ENGINE_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+			{ cwd, env: engineEnv(cwd), timeout: ENGINE_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
 			(error, stdout, stderr) => {
 				resolve({ ok: !error, out: `${stdout ?? ""}${stdout ? "" : (stderr ?? "")}` });
 			},
@@ -99,34 +152,70 @@ function runEngine(cwd: string, args: string[]): Promise<{ ok: boolean; out: str
 	});
 }
 
+/** Mirror of upstream's aidlc-mint-presence UserPromptSubmit hook: on a real
+ *  human prompt, append a HUMAN_TURN event to the active intent's audit ledger
+ *  so gate approvals can commit. Fail-open, fire-and-forget, and gated on
+ *  workflow state existing — zero cost in projects that never ran /aidlc. */
+function mintHumanTurn(cwd: string): void {
+	if (!activeStateFile(cwd) || !existsSync(auditLibPath())) return;
+	const script = `const a=await import(${JSON.stringify(auditLibPath())});a.appendAuditEntry("HUMAN_TURN",{},process.env.CLAUDE_PROJECT_DIR);`;
+	execFile(bunBin(), ["-e", script], { cwd, env: engineEnv(cwd), timeout: ENGINE_TIMEOUT_MS }, () => {
+		// non-fatal — a mint failure must never block the human's turn
+	});
+}
+
 function installReady(): boolean {
 	return existsSync(enginePath());
 }
 
-/** The lean conductor contract. Deliberately small: the engine bakes its full
- *  conductor persona into the first run-stage directive, and each stage file
- *  loads only when a directive names it — pi does not duplicate that prose. */
-function conductorKickoff(intentArgs: string): string {
-	const engine = `${bunBin()} ${enginePath()}`;
+/** The conductor contract. Covers the ROUTING the engine cannot inject itself
+ *  (everything between directives); stage-execution depth arrives via the
+ *  engine's own conductor persona on the first run-stage directive, and each
+ *  stage file loads only when named — pi does not duplicate that prose. */
+function conductorKickoff(cwd: string, intentArgs: string): string {
+	// PATH carries bun for the engine's own child spawns (report → aidlc-state).
+	const engine = `CLAUDE_PROJECT_DIR="${cwd}" PATH="${join(bunBin(), "..")}:$PATH" ${bunBin()} ${enginePath()}`;
 	return [
 		"<aidlc-conductor>",
 		"You are the CONDUCTOR of an AI-DLC workflow. A deterministic engine owns ALL routing, state,",
-		"audit, and gates; you own the quality of the single move it names. Run it via bash from the",
-		"project root:",
+		"audit, and gates; you own the quality of the single move it names. Engine commands (bash, from",
+		"the project root — the CLAUDE_PROJECT_DIR prefix is REQUIRED on every call):",
 		`  NEXT:   ${engine} next [args]`,
-		`  REPORT: ${engine} report --stage <slug> --result <outcome> [--user-input "<text>"]`,
-		"Forwarding loop — repeat until kind=done:",
-		"1. Run NEXT (this first call: pass the user's intent/flags below as the argument).",
-		"2. Act on the ONE JSON directive it prints:",
-		"   - ask → relay the question to the user VERBATIM and END YOUR TURN. Hard stop: no tool",
-		"     calls, no invented options, no proceeding until the user answers.",
-		"   - run-stage → open the directive's stage_file and execute exactly that stage, reading only",
-		"     the `consumes` paths it resolved and writing the `produces` paths. Honor `gate`.",
-		"   - print / error → show the message to the user and follow its instruction.",
-		"   - parked / done → tell the user and stop.",
-		"3. REPORT the outcome (--result approved|completed|... per the stage protocol), then NEXT again.",
-		"Rules: never edit aidlc-state.md or audit files by hand — report owns every transition; at an",
-		"approval gate end your turn and wait for the human; keep artifacts inside the directive's paths.",
+		`  REPORT: ${engine} report --stage <slug> --result <approved|completed> [--user-input "<text>"]`,
+		`  PARK:   ${engine} park   (pause cleanly at a stage boundary; also use when context runs low)`,
+		"Forwarding loop — repeat until kind=done: run NEXT, act on the ONE JSON directive, REPORT, again.",
+		"Directive kinds:",
+		"  - run-stage → read the directive's stage_file and execute exactly that stage: read only the",
+		"    resolved `consumes` paths, write the `produces` paths. Then branch on `gate`:",
+		"      gate false → REPORT --result completed (no approval needed).",
+		"      gate true  → present the artifacts and an Approve / Request-Changes choice, END YOUR TURN;",
+		"        on approval REPORT --result approved. A rejection is handled conductor-side (revise the",
+		"        artifact, re-present) — it is never a report outcome.",
+		'      gate "unresolved" → do NOT run the stage. Read the ## Walking Skeleton practice',
+		"        (aidlc/spaces/<space>/memory/: org.md → team.md → project.md, most specific wins),",
+		"        classify on|off|scope-dependent, REPORT --skeleton-stance <stance>, then NEXT again.",
+		"  - ask → relay the question to the user VERBATIM and END YOUR TURN — no tool calls, no invented",
+		'    options. Deliver the answer afterwards: for a stage question, REPORT --user-input "<answer>";',
+		"    for the fresh-workspace scope confirmation, re-run NEXT with the choice — confirmed stock",
+		'    scope → NEXT --scope <name> "<intent>"; a compose request → NEXT compose "<description>"',
+		"    (compose is a leading VERB, never a --scope value).",
+		"  - print → do exactly what the message says: run the named tool (with the same",
+		"    CLAUDE_PROJECT_DIR prefix), print its output; if it ends with 're-run next' continue the loop,",
+		"    otherwise stop.",
+		"  - invoke-swarm → autonomous Construction fan-out: follow the directive using aidlc-swarm.ts",
+		"    prepare/check/finalize as the referee (same env prefix); finalize exit 0 → NEXT again;",
+		"    exit 2 → halt and ask the human.",
+		"  - error → show the message; follow its recovery instruction.  - parked/done → tell the user; stop.",
+		"Paths: relative `.claude/...` paths in directives resolve under the ENGINE HOME",
+		`(${engineRoot()}); \`aidlc/...\` paths resolve in the project. Never edit aidlc-state.md or audit`,
+		"files by hand — report owns every transition. Human presence at gates is minted automatically by",
+		"pi on each real user message; never fabricate it.",
+		"Question files: write stage questions to the declared *-questions.md with lettered options and",
+		'blank "[Answer]:" tags; offer the user "Guide me" / "I\'ll edit the file" / "Chat" and treat the',
+		"file as the source of truth.",
+		"Project knowledge: when pi's knowledge tools are available, USE them inside stages — codemap/KP",
+		"(pi_context_code, knowledge_call, knowledge_search, context_recall) for reverse-engineering and",
+		"before code-generation edits, instead of broad file paging; store durable decisions with remember.",
 		`Start now: run NEXT with the argument ${JSON.stringify(intentArgs)}.`,
 		"</aidlc-conductor>",
 	].join("\n");
@@ -138,7 +227,8 @@ export default function aidlc(pi: ExtensionAPI) {
 	let nudges = 0;
 
 	pi.registerCommand("aidlc", {
-		description: "Run an AI-DLC workflow (real awslabs engine): /aidlc <intent> · --resume · status · stop · setup",
+		description:
+			"Run an AI-DLC workflow (real awslabs engine): /aidlc <intent> · --scope <s> · compose · --resume · status · park · stop · setup",
 		handler: async (args, ctx) => {
 			const raw = (args ?? "").trim();
 			if (raw === "setup") {
@@ -172,26 +262,45 @@ export default function aidlc(pi: ExtensionAPI) {
 				ctx.ui.notify(`aidlc engine not found at ${enginePath()} — run /aidlc setup (needs bun)`, "error");
 				return;
 			}
+			if (raw === "park") {
+				active = false;
+				const res = await runEngine(ctx.cwd, ["park"]);
+				const directive = parseDirective(res.out);
+				ctx.ui.notify(
+					directive?.kind === "parked" || directive?.kind === "print"
+						? `aidlc parked — /aidlc --resume to continue. ${(directive.message ?? directive.reason ?? "").slice(0, 120)}`
+						: `park failed: ${res.out.slice(0, 160)}`,
+					"info",
+				);
+				return;
+			}
 			if (raw === "status" || raw === "") {
-				const res = await runEngine(ctx.cwd, ["next"]);
+				const res = await runEngine(ctx.cwd, ["next", "--status"]);
 				const directive = parseDirective(res.out);
 				ctx.ui.notify(
 					directive
-						? `aidlc: ${directive.kind}${directive.stage_slug ? ` @ ${directive.stage_slug}` : ""} — ${
-								(directive.question ?? directive.message ?? "").slice(0, 120) || "(pending stage)"
+						? `aidlc: ${directive.kind}${directive.stage ? ` @ ${directive.stage}` : ""} — ${
+								(directive.question ?? directive.message ?? "").slice(0, 160) || "(pending stage)"
 							}`
 						: `aidlc engine unreadable: ${res.out.slice(0, 160)}`,
 					directive ? "info" : "error",
 				);
 				return;
 			}
-			// Everything else — an intent, --resume, --scope <s>, --status — goes to
-			// the engine verbatim through the conductor loop.
+			// Everything else — an intent, compose "<desc>", --scope/--stage/--phase
+			// jumps, --resume, intent/space verbs — goes to the engine verbatim
+			// through the conductor loop.
 			active = true;
 			lastSignature = "";
 			nudges = 0;
-			pi.sendUserMessage(conductorKickoff(raw));
+			pi.sendUserMessage(conductorKickoff(ctx.cwd, raw));
 		},
+	});
+
+	// Upstream's UserPromptSubmit presence hook, on pi's input event: without a
+	// fresh HUMAN_TURN row the engine refuses every gate approval (verified).
+	pi.on("input", async (_event, ctx) => {
+		mintHumanTurn(ctx.cwd);
 	});
 
 	// pi's Stop-hook equivalent: when the conductor ends its turn but the
@@ -203,14 +312,14 @@ export default function aidlc(pi: ExtensionAPI) {
 		const res = await runEngine(cwd, ["next"]);
 		const directive = parseDirective(res.out);
 		if (!directive) return;
-		if (directive.kind === "done") {
+		if (directive.kind === "done" || directive.kind === "parked") {
 			active = false;
-			ctx.ui.notify("aidlc workflow complete", "info");
+			ctx.ui.notify(directive.kind === "done" ? "aidlc workflow complete" : "aidlc workflow parked", "info");
 			return;
 		}
-		if (!directivePending(directive.kind)) return; // ask/parked/error → human's turn
+		if (!directivePending(directive.kind)) return; // ask/error → human's turn
 		if (humanWaitState(cwd)) return; // gate open / revising → the stop is legitimate
-		const signature = `${directive.kind}:${directive.stage_slug ?? ""}:${directive.message ?? ""}`;
+		const signature = `${directive.kind}:${directive.stage ?? ""}:${directive.message ?? ""}`;
 		nudges = signature === lastSignature ? nudges + 1 : 1;
 		lastSignature = signature;
 		if (nudges > NUDGE_CAP) {
@@ -223,7 +332,7 @@ export default function aidlc(pi: ExtensionAPI) {
 		}
 		pi.sendUserMessage(
 			`<aidlc-continuation>The workflow engine still has a pending directive (${directive.kind}` +
-				`${directive.stage_slug ? ` @ ${directive.stage_slug}` : ""}). Continue the forwarding loop: ` +
+				`${directive.stage ? ` @ ${directive.stage}` : ""}). Continue the forwarding loop: ` +
 				`act on it, report, and run next again — or relay its question and stop if it needs the user.</aidlc-continuation>`,
 		);
 	});

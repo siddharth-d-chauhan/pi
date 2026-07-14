@@ -47,6 +47,13 @@ function configuredSubagentToolLimit(): number {
 	return Number.isFinite(value) && value >= 1 ? Math.floor(value) : DEFAULT_SUBAGENT_TOOL_LIMIT;
 }
 
+/** Subagent discovery checkpoint scales with the tool limit (6/14 of the
+ *  default ratio) so a raised budget doesn't tighten results prematurely;
+ *  identical to the fixed 6 when the limit is unchanged. */
+function subagentDiscoveryCheckpoint(): number {
+	return Math.max(6, Math.floor((configuredSubagentToolLimit() * 6) / DEFAULT_SUBAGENT_TOOL_LIMIT));
+}
+
 function configuredPrimaryToolLimit(): number {
 	const value = Number(process.env.PI_PRIMARY_MAX_TOOL_CALLS ?? DEFAULT_PRIMARY_TOOL_LIMIT);
 	return Number.isFinite(value) && value >= 1 ? Math.floor(value) : DEFAULT_PRIMARY_TOOL_LIMIT;
@@ -203,7 +210,7 @@ export default function tokenBudget(pi: ExtensionAPI): void {
 			`For existing files, prefer one apply_patch call with minimal hunks over write or inline shell/Python rewrites; use write for new files. ` +
 			`Never resend unchanged whole-file content.` +
 			(subagentSession
-				? " As a subagent, target at most 6 discovery calls and 14 total tool calls; return the best evidence-backed result instead of widening scope after that budget."
+				? ` As a subagent, target at most ${subagentDiscoveryCheckpoint()} discovery calls and ${configuredSubagentToolLimit()} total tool calls; return the best evidence-backed result instead of widening scope after that budget.`
 				: ""),
 	}));
 
@@ -216,7 +223,9 @@ export default function tokenBudget(pi: ExtensionAPI): void {
 	) => void;
 	onToolResult("tool_result", async (event, ctx) => {
 		toolCalls += 1;
-		const toolCheckpoint = subagentSession ? Math.min(configuredToolCheckpoint(), 14) : configuredToolCheckpoint();
+		const toolCheckpoint = subagentSession
+			? Math.min(configuredToolCheckpoint(), configuredSubagentToolLimit())
+			: configuredToolCheckpoint();
 		const toolCheckpointReached = toolCalls >= toolCheckpoint && !toolCheckpointDelivered;
 		const withToolCheckpoint = (content: ToolResultEvent["content"]): ToolResultEvent["content"] => {
 			if (!toolCheckpointReached) return content;
@@ -251,7 +260,7 @@ export default function tokenBudget(pi: ExtensionAPI): void {
 		const discoveryTool = !event.isError && BUDGETED_TOOLS.has(event.toolName);
 		if (discoveryTool) discoveryCalls += 1;
 		const checkpointAt = subagentSession
-			? Math.min(configuredDiscoveryCheckpoint(), 6)
+			? Math.min(configuredDiscoveryCheckpoint(), subagentDiscoveryCheckpoint())
 			: configuredDiscoveryCheckpoint();
 		const checkpointReached = discoveryTool && discoveryCalls >= checkpointAt;
 		const maxChars = checkpointReached ? Math.min(configuredMaxChars(), TIGHT_MAX_CHARS) : configuredMaxChars();

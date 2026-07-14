@@ -69,13 +69,28 @@ function saveFullToolOutput(
  * Disposing restores the original tool set so later lifecycle messages get a
  * fresh budget without permanently weakening the agent.
  */
+function envToolLimit(): number | undefined {
+	const value = Number(process.env.PI_SUBAGENT_MAX_TOOL_CALLS);
+	return Number.isFinite(value) && value >= 1 ? Math.floor(value) : undefined;
+}
+
 export function enforceAgentRunBudget(
 	session: AgentSession,
 	options: { maxTurns: number; maxToolCalls?: number; scopeCheckpoint?: number; maxResultChars?: number },
 ): () => void {
 	const activeTools = session.getActiveToolNames();
-	const maxToolCalls = options.maxToolCalls ?? DEFAULT_AGENT_TOOL_CALL_LIMIT;
-	const scopeCheckpoint = options.scopeCheckpoint ?? DEFAULT_AGENT_SCOPE_CHECKPOINT;
+	// PI_SUBAGENT_MAX_TOOL_CALLS is the same knob the token-budget extension
+	// reads, so one env var governs both cap layers. Legitimate heavy subagents
+	// (e.g. AIDLC composer/construction workers) need more than the default.
+	const maxToolCalls = options.maxToolCalls ?? envToolLimit() ?? DEFAULT_AGENT_TOOL_CALL_LIMIT;
+	// Scale the scope-checkpoint steer with the limit (8/14 of the default);
+	// identical to the fixed default when the limit is unchanged.
+	const scopeCheckpoint =
+		options.scopeCheckpoint ??
+		Math.max(
+			DEFAULT_AGENT_SCOPE_CHECKPOINT,
+			Math.floor((maxToolCalls * DEFAULT_AGENT_SCOPE_CHECKPOINT) / DEFAULT_AGENT_TOOL_CALL_LIMIT),
+		);
 	const maxResultChars = options.maxResultChars ?? DEFAULT_AGENT_TOOL_RESULT_CHAR_LIMIT;
 	const previousAfterToolCall = session.agent.afterToolCall;
 	const budgetedAfterToolCall: NonNullable<typeof session.agent.afterToolCall> = async (context, signal) => {

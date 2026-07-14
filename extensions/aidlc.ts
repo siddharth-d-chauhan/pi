@@ -310,6 +310,11 @@ export default function aidlc(pi: ExtensionAPI) {
 			active = true;
 			lastSignature = "";
 			nudges = 0;
+			// AIDLC subagents (composer, construction workers) legitimately need
+			// more than the default 14-call budget — the composer alone reads the
+			// scope registry + stage graph + 9 scope files before validate-grid.
+			// Raise the shared knob for the session unless the user pinned it.
+			if (!process.env.PI_SUBAGENT_MAX_TOOL_CALLS) process.env.PI_SUBAGENT_MAX_TOOL_CALLS = "48";
 			const first = await runEngine(ctx.cwd, ["next", ...tokenizeArgs(raw)]);
 			const firstDirective = parseDirective(first.out);
 			pi.sendUserMessage(

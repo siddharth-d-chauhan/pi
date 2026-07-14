@@ -92,4 +92,20 @@ describe("agent run budget", () => {
 		expect(raw.abort).toHaveBeenCalledOnce();
 		dispose();
 	});
+
+	it("honors PI_SUBAGENT_MAX_TOOL_CALLS when no explicit limit is passed", () => {
+		vi.stubEnv("PI_SUBAGENT_MAX_TOOL_CALLS", "3");
+		try {
+			const { session, raw, emit } = fakeSession();
+			const dispose = enforceAgentRunBudget(session, { maxTurns: 8 });
+			emit("tool_execution_start");
+			emit("tool_execution_start");
+			expect(raw.setActiveToolsByName).not.toHaveBeenCalled();
+			emit("tool_execution_start"); // env limit of 3 reached — tools removed
+			expect(raw.setActiveToolsByName).toHaveBeenCalledWith([]);
+			dispose();
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
 });

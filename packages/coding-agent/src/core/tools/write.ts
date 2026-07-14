@@ -132,7 +132,7 @@ function formatWriteCall(
 	args: { path?: string; file_path?: string; content?: string } | undefined,
 	options: ToolRenderResultOptions,
 	theme: Theme,
-	cache: WriteHighlightCache | undefined,
+	_cache: WriteHighlightCache | undefined,
 	cwd: string,
 ): string {
 	const rawPath = str(args?.file_path ?? args?.path);
@@ -143,18 +143,16 @@ function formatWriteCall(
 	if (fileContent === null) {
 		text += `\n\n${theme.fg("error", "[invalid content arg - expected string]")}`;
 	} else if (fileContent) {
-		const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
-		const renderedLines = lang
-			? (cache?.highlightedLines ?? highlightCode(replaceTabs(normalizeDisplayText(fileContent)), lang))
-			: normalizeDisplayText(fileContent).split("\n");
-		const lines = trimTrailingEmptyLines(renderedLines);
+		// Show the written content as a diff — all-additions (green `+`), since
+		// write creates or fully replaces the file. Collapsed to a few lines.
+		const lines = trimTrailingEmptyLines(normalizeDisplayText(fileContent).split("\n"));
 		const totalLines = lines.length;
 		const maxLines = options.expanded ? lines.length : 10;
 		const displayLines = lines.slice(0, maxLines);
 		const remaining = lines.length - maxLines;
-		text += `\n\n${displayLines.map((line) => (lang ? line : theme.fg("toolOutput", replaceTabs(line)))).join("\n")}`;
+		text += `\n\n${displayLines.map((line) => theme.fg("success", `+ ${replaceTabs(line)}`)).join("\n")}`;
 		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines, ${totalLines} total,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+			text += `${theme.fg("muted", `\n... (+${remaining} more of ${totalLines} lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
 		}
 	}
 

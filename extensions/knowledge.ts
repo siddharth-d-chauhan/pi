@@ -18,6 +18,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Component } from "@earendil-works/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -81,6 +83,36 @@ const CODE_GUIDELINE = [
 		"and check the flow before changing shared code. When finishing, use kp gaps / coverage to check for " +
 		"missing implementation or tests.",
 ];
+
+// KP reads can return large graph/code payloads. The MODEL still gets the full
+// (bounded) result, but the TUI must not dump it — over-wide/huge blocks break
+// the layout. So we cap the content the model sees and render only a compact,
+// width-safe "what it did" line in the UI.
+const RESULT_CAP_CHARS = 12_000;
+
+function blocksToText(content: unknown): string {
+	return Array.isArray(content)
+		? (content as Array<{ type?: string; text?: string }>)
+				.map((b) => (b?.type === "text" ? (b.text ?? "") : ""))
+				.join("\n")
+		: "";
+}
+
+function capContent(content: unknown): unknown {
+	const text = blocksToText(content);
+	if (text.length <= RESULT_CAP_CHARS) return content;
+	const head = Math.floor(RESULT_CAP_CHARS * 0.6);
+	const body = `${text.slice(0, head)}\n…[${text.length - RESULT_CAP_CHARS} chars elided]…\n${text.slice(text.length - (RESULT_CAP_CHARS - head))}`;
+	return [{ type: "text", text: body }];
+}
+
+/** A one-line, width-truncated display component (never breaks the layout). */
+function compactLine(text: string): Component {
+	return {
+		render: (width: number) => [truncateToWidth(text, Math.max(1, width))],
+		invalidate: () => {},
+	};
+}
 
 /** pi-normalized names of the mountable KP surface (server uses dots). */
 const READ_ONLY = new Set([
@@ -248,6 +280,15 @@ export default function (pi: ExtensionAPI) {
 					: undefined,
 				promptGuidelines: piName === "knowledge_find_code" ? CODE_GUIDELINE : undefined,
 				parameters: tool.inputSchema as never,
+				// Compact, width-safe display — show WHAT it did, not the payload.
+				renderResult: (res: { content?: unknown }, _o: unknown, theme: { fg(n: string, s: string): string }) => {
+					const text = blocksToText(res.content);
+					const lines = text.split("\n").filter((l) => l.trim());
+					const head = (lines[0] ?? "").replace(/\s+/g, " ").trim();
+					const lbl = piName.replace(/^knowledge_/, "kp ").replace(/^pi_/, "ctx ");
+					const summary = `${lbl} · ${lines.length} line${lines.length === 1 ? "" : "s"} · ${text.length} chars${head ? ` — ${head}` : ""}`;
+					return compactLine(theme.fg("dim", summary));
+				},
 				async execute(_id: string, params: Record<string, unknown>, signal: AbortSignal) {
 					const c = await connect();
 					const result = await c.callTool({ name: tool.name, arguments: params }, undefined, {
@@ -260,7 +301,7 @@ export default function (pi: ExtensionAPI) {
 							.join("\n");
 						throw new Error(msg || `${tool.name} failed`);
 					}
-					return { content: result.content as never, details: undefined };
+					return { content: capContent(result.content) as never, details: undefined };
 				},
 			});
 		}

@@ -170,6 +170,9 @@ function formatReadResult(
 	_cwd: string,
 	isError: boolean,
 ): string {
+	// Collapsed (the default now that toolOutputExpanded is off): show only the
+	// read header, not the file body — the model still gets the full contents.
+	// ctrl+o (expand) reveals it.
 	if (!options.expanded && !isError) {
 		return "";
 	}
